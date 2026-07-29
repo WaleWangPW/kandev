@@ -1,3 +1,10 @@
+---
+spec: docs/specs/azure-devops-integration/spec.md
+created: 2026-07-17
+updated: 2026-07-29
+status: building
+---
+
 # Azure DevOps Integration Plan
 
 ## Scope
@@ -7,8 +14,9 @@ Implement the Azure DevOps Services integration defined in
 workspace-scoped PAT configuration, direct REST work-item and pull-request
 reads, persistent task PR links, responsive settings/browse surfaces, immediate
 integration availability updates, provider-neutral remote repository selection,
-server-side authenticated Azure clones, and an editable Azure Boards view. No
-Azure runtime path may require `gh` or `az`.
+server-side authenticated Azure clones, an Azure Boards view, remembered browse
+preferences, rich work-item detail, provider-specific task actions, and
+work-item/PR watchers. No Azure runtime path may require `gh` or `az`.
 
 ## Architecture
 
@@ -31,8 +39,20 @@ Azure runtime path may require `gh` or `az`.
   metadata. Hydrate work items through the existing bounded 200-item batches.
 - Keep provider writes behind a fixed server-side field allowlist. Resolve the
   selected board's column/done reference names on the backend and use an Azure
-  JSON Patch `/rev` test before title, assignee, tags, or board-position
-  operations.
+  JSON Patch `/rev` test before assignment or board-position operations. Resolve
+  Assign to me from the stored PAT identity; never accept an arbitrary identity
+  supplied by the browser.
+- Store Azure browse preferences in backend-owned portable user settings, keyed
+  by workspace. Do not introduce localStorage/sessionStorage fallback reads or
+  dual writes.
+- Fetch work-item detail and discussion on demand. Normalize a small allowlist
+  of planning fields, sanitize provider HTML, and page comments with Azure's
+  opaque continuation token.
+- Reuse GitHub's action/default-query preset shapes and GitLab's generation-safe
+  issue/review watcher lifecycle without translating Azure records into either
+  provider's models.
+- Probe saved credentials immediately and return the resulting health in the
+  config mutation response. Keep the 90-second health poll as recovery.
 - Register the service as non-fatal during backend boot and expose mock routes
   only under `KANDEV_MOCK_AZURE_DEVOPS=true`.
 
@@ -46,6 +66,14 @@ Azure runtime path may require `gh` or `az`.
 - Runtime defaults: `profiles.yaml` for the E2E mock selector only.
 - Workspace cleanup and task/repository validation through existing service
   interfaces rather than integration-specific SQL outside the new package.
+- User settings models/DTO/store patches for
+  `azure_devops_browse_preferences`.
+- Work-item detail/comments/current-identity REST methods, normalized planning
+  fields, and constrained assignment/column patch generation.
+- Persistent task/work-item links, workspace query/action preset overrides, and
+  Azure watcher/reservation stores.
+- Azure watcher polling plus provider events, orchestrator watcher sources,
+  self-heal, in-flight throttling, reset, and cleanup wiring.
 
 ## Frontend Touch Points
 
@@ -70,6 +98,19 @@ Azure runtime path may require `gh` or `az`.
   discovery and dispatches branch reads to the selected provider.
 - Azure browse presets and saved views reuse the interaction model of GitHub and
   GitLab, with raw WIQL contained in an Advanced disclosure.
+- The page hydrates portable Azure preferences before selecting defaults,
+  persists only valid user changes, and falls back deterministically when a
+  remembered provider ID is stale.
+- Board cards and work-item rows open a desktop `Dialog`. Phone uses a dedicated
+  full-height `Drawer` with a fixed header/action area and one internally
+  scrolling detail/discussion body. Shared hooks own detail, assignment, move,
+  quick-action, and error state.
+- Work-item detail is read-only except for Assign to me, Unassign, and board
+  column/split-state controls. A visible Task menu exposes workspace-configured
+  actions and existing linked Kandev tasks.
+- Azure settings adds Default queries, Quick actions, Work-item watches, and
+  Pull-request watches using shared settings cards, watcher enable drafts,
+  reset dialogs, responsive tables/cards, and save coordination.
 - No required action may be hover-only or desktop-only.
 
 ## Tests
@@ -94,9 +135,22 @@ Azure runtime path may require `gh` or `az`.
 - TypeScript API/hook/view-model tests for dependent selector resets, board
   grouping, optimistic move rollback, conflict refresh, and normalized card
   updates.
-- Playwright desktop and `mobile-chrome` flows for initial board load, card
-  editing, moving, reload persistence, mobile focused-column navigation, editor
-  containment, and absence of document horizontal overflow.
+- Playwright desktop and `mobile-chrome` flows for initial board load,
+  assignment and column changes, reload persistence, mobile focused-column
+  navigation, detail containment, and absence of document horizontal overflow.
+- Go tests for immediate save-time auth health, work-item detail/comment
+  pagination, PAT identity resolution, planning-field normalization, constrained
+  patch operations, task/work-item associations, preset normalization, watcher
+  generation/reservation safety, cleanup, and poll errors.
+- User settings and frontend hook tests for per-user/per-workspace preference
+  hydration, queued optimistic writes, stale provider fallback, and no browser
+  storage dependency.
+- Component tests for read-only detail, section retries, Assign to me/Unassign,
+  quick-action payloads, linked-task indicators, preset editors, and responsive
+  watcher controls.
+- Playwright desktop and `mobile-chrome` flows for restored filters, detail and
+  discussion, assignment/column changes, quick task creation, immediate
+  availability, default-query/action customization, and watcher create/run/reset.
 
 ## Verification
 
@@ -104,9 +158,8 @@ Azure runtime path may require `gh` or `az`.
 - `rtk go test ./internal/azuredevops/...` from `apps/backend`
 - `rtk make -C apps/backend test`
 - `rtk make -C apps/backend lint`
-- `rtk pnpm --filter @kandev/web typecheck` from `apps`
-- `rtk pnpm --filter @kandev/web test -- --run` from `apps`
-- `rtk pnpm --filter @kandev/web lint` from `apps`
+- Task files define the exact focused Go and Vitest commands for each new
+  behavior; run those during TDD before the corresponding task is marked done.
 - `pnpm e2e:run --host --project chromium -- e2e/tests/integrations/azure-devops.spec.ts` from `apps/web`
 - `pnpm e2e:run --host --project mobile-chrome -- e2e/tests/integrations/mobile-azure-devops.spec.ts e2e/tests/task/mobile-create-task-remote-repo.spec.ts` from `apps/web`
 
@@ -139,6 +192,19 @@ Azure runtime path may require `gh` or `az`.
 - Azure board snapshots can exceed one work-item batch and can contain deleted
   references. Preserve backlog order, omit missing items, and keep the
   remaining board usable.
+- Azure work-item types expose different estimate fields. Normalize only the
+  documented planning-field allowlist and omit unavailable values instead of
+  guessing a universal Effort field.
+- Discussion uses a preview-version Azure endpoint and opaque continuation
+  tokens. Keep paging isolated behind the Azure client contract.
+- The PAT represents one Azure identity for the whole workspace; Assign to me
+  means that identity, which may differ from the signed-in Kandev user's email.
+- Portable preference writes can race rapid filter changes. Use one queued
+  patch stream and ignore stale loads so an older response cannot overwrite the
+  most recent in-memory selection.
+- Watchers can fan out task creation. Reuse generation reservations, profile
+  dependency checks, 60-second minimum polling, and `max_inflight_tasks`
+  throttling before enabling them.
 
 ## Task Waves
 
@@ -188,6 +254,30 @@ Wave 9: responsive board UI
 Wave 10: board validation and documentation
 
 - [x] [Task 17: Board E2E, docs, and verification](task-17-board-validation.md)
+
+Wave 11: connection, preference, and work-item contracts
+
+- [ ] [Task 18: Immediate connection activation](task-18-immediate-activation.md)
+- [ ] [Task 19: Portable Azure browse preferences](task-19-browse-preferences.md)
+- [ ] [Task 20: Work-item detail contracts](task-20-work-item-detail.md)
+- [ ] [Task 21: Constrained work-item mutations](task-21-work-item-mutations.md)
+- [ ] [Task 22: Task work-item associations](task-22-task-work-item-links.md)
+- [ ] [Task 23: Azure provider presets](task-23-provider-presets.md)
+
+Wave 12: watcher backend
+
+- [ ] [Task 24: Azure watcher persistence](task-24-watcher-persistence.md)
+- [ ] [Task 25: Azure watcher polling](task-25-watcher-polling.md)
+- [ ] [Task 26: Azure watcher dispatch](task-26-watcher-dispatch.md)
+
+Wave 13: responsive frontend
+
+- [ ] [Task 27: Responsive work-item detail](task-27-work-item-detail-ui.md)
+- [ ] [Task 28: Azure automation settings](task-28-automation-settings.md)
+
+Wave 14: integrated validation
+
+- [ ] [Task 29: Azure enhancement validation](task-29-enhancement-validation.md)
 
 Tasks within a wave are listed separately for ownership clarity but should run
 sequentially in the current workspace when they touch the same package or state
