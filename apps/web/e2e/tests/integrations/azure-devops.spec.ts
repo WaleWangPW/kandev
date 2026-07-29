@@ -161,21 +161,22 @@ test("connects and browses Azure work items, PRs, and feedback", async ({
   });
 
   await testPage.getByTestId("azure-board-card-101").click();
-  await testPage.getByLabel("Title").fill("Handle token rotation safely");
-  await testPage.getByRole("button", { name: "Save changes" }).click();
-  await expect(testPage.getByText("Handle token rotation safely")).toBeVisible();
+  await testPage.getByTestId("azure-board-column-select").click();
+  await testPage.getByRole("option", { name: "Active" }).click();
+  await testPage.getByRole("button", { name: "Move to column" }).click();
+  await expect(testPage.getByText("Handle token rotation")).toBeVisible();
 
   await testPage
     .getByTestId("azure-board-card-101")
     .dragTo(testPage.getByTestId("azure-board-column-active"));
   await testPage.reload();
   await expect(
-    testPage.getByTestId("azure-board-column-active").getByText("Handle token rotation safely"),
+    testPage.getByTestId("azure-board-column-active").getByText("Handle token rotation"),
   ).toBeVisible();
 
   await testPage.getByTestId("azure-devops-work-items-mode").click();
   await testPage.getByTestId("azure-devops-search-button").click();
-  await expect(testPage.getByText("Handle token rotation safely")).toBeVisible();
+  await expect(testPage.getByText("Handle token rotation")).toBeVisible();
   await testPage.getByTestId("azure-devops-pull-requests-mode").click();
   await testPage.getByTestId("azure-devops-search-button").click();
   await expect(testPage.getByText("Rotate integration credentials")).toBeVisible();

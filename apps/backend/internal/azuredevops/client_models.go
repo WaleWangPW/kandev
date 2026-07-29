@@ -76,11 +76,11 @@ type WorkItemDetail struct {
 
 // WorkItemComment is the safe subset of an Azure Boards discussion comment.
 type WorkItemComment struct {
-	ID          int       `json:"id"`
-	Content     string    `json:"content"`
-	Author      Identity  `json:"author"`
-	PublishedAt time.Time `json:"publishedAt,omitempty"`
-	UpdatedAt   time.Time `json:"updatedAt,omitempty"`
+	ID          int        `json:"id"`
+	Content     string     `json:"content"`
+	Author      Identity   `json:"author"`
+	PublishedAt *time.Time `json:"publishedAt,omitempty"`
+	UpdatedAt   *time.Time `json:"updatedAt,omitempty"`
 }
 
 // WorkItemCommentPage carries Azure's opaque continuation token verbatim.

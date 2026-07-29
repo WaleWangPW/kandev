@@ -116,6 +116,48 @@ type taskPRStoreContract interface {
 	DeleteTaskPRsByTask(context.Context, string) error
 }
 
+type taskWorkItemStoreContract interface {
+	UpsertTaskWorkItem(context.Context, *TaskWorkItem) error
+	ListTaskWorkItemsByWorkspace(context.Context, string) (map[string][]*TaskWorkItem, error)
+	DeleteTaskWorkItemsByTask(context.Context, string) error
+	DeleteTaskWorkItemsByWorkspace(context.Context, string) error
+}
+
+func TestStoreDeleteTaskWorkItemsIsScoped(t *testing.T) {
+	store, err := NewStore(newTestDB(t), nil)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	contract, ok := any(store).(taskWorkItemStoreContract)
+	if !ok {
+		t.Fatal("Store does not implement the task work item persistence contract")
+	}
+	ctx := context.Background()
+	for _, row := range []*TaskWorkItem{
+		{TaskID: "task-a", WorkspaceID: "workspace-a", ProjectID: "project-a", WorkItemID: 1},
+		{TaskID: "task-b", WorkspaceID: "workspace-a", ProjectID: "project-a", WorkItemID: 2},
+		{TaskID: "task-c", WorkspaceID: "workspace-b", ProjectID: "project-b", WorkItemID: 3},
+	} {
+		if err := contract.UpsertTaskWorkItem(ctx, row); err != nil {
+			t.Fatalf("upsert task work item: %v", err)
+		}
+	}
+	if err := contract.DeleteTaskWorkItemsByTask(ctx, "task-a"); err != nil {
+		t.Fatalf("delete task work items by task: %v", err)
+	}
+	byWorkspace, err := contract.ListTaskWorkItemsByWorkspace(ctx, "workspace-a")
+	if err != nil || len(byWorkspace["task-a"]) != 0 || len(byWorkspace["task-b"]) != 1 {
+		t.Fatalf("task-scoped deletion result = %+v, err = %v", byWorkspace, err)
+	}
+	if err := contract.DeleteTaskWorkItemsByWorkspace(ctx, "workspace-a"); err != nil {
+		t.Fatalf("delete task work items by workspace: %v", err)
+	}
+	byWorkspace, err = contract.ListTaskWorkItemsByWorkspace(ctx, "workspace-b")
+	if err != nil || len(byWorkspace["task-c"]) != 1 {
+		t.Fatalf("workspace-scoped deletion result = %+v, err = %v", byWorkspace, err)
+	}
+}
+
 func TestStoreDeleteTaskPRsByTaskIsScoped(t *testing.T) {
 	store, err := NewStore(newTestDB(t), nil)
 	if err != nil {

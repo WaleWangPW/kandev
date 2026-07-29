@@ -155,14 +155,13 @@ test("mobile board opens a focused column editor without horizontal overflow", a
     caption: "Azure DevOps focused mobile board column",
   });
   await testPage.getByTestId("azure-board-card-101").click();
-  await expect(testPage.getByRole("heading", { name: /Edit work item/ })).toBeVisible();
-  await testPage.getByLabel("Title").fill("Handle token rotation safely");
+  await expect(testPage.getByRole("heading", { name: /Work item #101/ })).toBeVisible();
   await testPage.getByTestId("azure-board-column-select").click();
   await testPage.getByRole("option", { name: "Active" }).click();
-  await testPage.getByRole("button", { name: "Save changes" }).click();
+  await testPage.getByRole("button", { name: "Move to column" }).click();
   await testPage.getByTestId("azure-board-column-picker").click();
   await testPage.getByRole("button", { name: /Active 1/ }).click();
-  await expect(testPage.getByText("Handle token rotation safely")).toBeVisible();
+  await expect(testPage.getByText("Handle token rotation")).toBeVisible();
 
   await testPage.getByTestId("azure-devops-work-items-mode").click();
   await testPage.getByTestId("azure-devops-mobile-filter-button").click();

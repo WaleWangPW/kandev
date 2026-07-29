@@ -182,6 +182,25 @@ describe("buildTerminalFields via buildCoreFields", () => {
   });
 });
 
+describe("Azure DevOps browse preference mapping", () => {
+  it("maps saved preferences and leaves them absent without settings", () => {
+    expect(mapUserSettingsResponse(null).azureDevOpsBrowsePreferences).toBeUndefined();
+
+    const preferences = { "project-1": { teamId: "team-1", boardId: "board-1" } };
+    const result = mapUserSettingsResponse({
+      settings: {
+        user_id: DEFAULT_USER_ID,
+        workspace_id: toWorkspaceId(""),
+        repository_ids: [],
+        azure_devops_browse_preferences: preferences,
+        updated_at: UPDATED_AT,
+      },
+    });
+
+    expect(result.azureDevOpsBrowsePreferences).toEqual(preferences);
+  });
+});
+
 describe("mapUserSettingsResponse", () => {
   it("maps the portable task-list details preference and defaults it to false", () => {
     expect(mapUserSettingsResponse(null).tasksListShowDetails).toBe(false);

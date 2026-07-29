@@ -124,9 +124,7 @@ export type AzureDevOpsBoardSnapshot = {
 
 export type AzureDevOpsBoardWorkItemUpdate = {
   revision: number;
-  title?: string;
-  assignedTo?: string;
-  tags?: string[];
+  assigneeAction?: "assign_current_user" | "unassign";
   columnId?: string;
   columnDone?: boolean;
 };

@@ -188,12 +188,12 @@ func (c *RESTClient) ListWorkItemComments(ctx context.Context, projectID string,
 	endpoint := fmt.Sprintf("/%s/_apis/wit/workItems/%d/comments?%s", pathPart(projectID), id, query.Encode())
 	var response struct {
 		Comments []struct {
-			ID           int       `json:"id"`
-			Text         string    `json:"text"`
-			IsDeleted    bool      `json:"isDeleted"`
-			CreatedDate  time.Time `json:"createdDate"`
-			ModifiedDate time.Time `json:"modifiedDate"`
-			CreatedBy    Identity  `json:"createdBy"`
+			ID           int        `json:"id"`
+			Text         string     `json:"text"`
+			IsDeleted    bool       `json:"isDeleted"`
+			CreatedDate  *time.Time `json:"createdDate"`
+			ModifiedDate *time.Time `json:"modifiedDate"`
+			CreatedBy    Identity   `json:"createdBy"`
 		} `json:"comments"`
 	}
 	var headers http.Header
@@ -210,7 +210,15 @@ func (c *RESTClient) ListWorkItemComments(ctx context.Context, projectID string,
 			PublishedAt: comment.CreatedDate, UpdatedAt: comment.ModifiedDate,
 		})
 	}
-	sort.SliceStable(comments, func(i, j int) bool { return comments[i].PublishedAt.After(comments[j].PublishedAt) })
+	sort.SliceStable(comments, func(i, j int) bool {
+		if comments[i].PublishedAt == nil {
+			return false
+		}
+		if comments[j].PublishedAt == nil {
+			return true
+		}
+		return comments[i].PublishedAt.After(*comments[j].PublishedAt)
+	})
 	return &WorkItemCommentPage{Comments: comments, ContinuationToken: headers.Get("x-ms-continuationtoken")}, nil
 }
 

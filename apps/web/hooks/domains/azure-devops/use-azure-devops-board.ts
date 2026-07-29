@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getAzureDevOpsBoardSnapshot,
   listAzureDevOpsBoards,
@@ -16,11 +16,6 @@ import type {
 } from "@/lib/types/azure-devops";
 
 type BoardWorkItemChanges = Omit<AzureDevOpsBoardWorkItemUpdate, "revision">;
-
-export type AzureDevOpsBoardEditorValues = Pick<
-  BoardWorkItemChanges,
-  "title" | "assignedTo" | "tags" | "columnId"
->;
 
 function errorMessage(cause: unknown, fallback: string): string {
   return cause instanceof Error ? cause.message : fallback;
@@ -44,6 +39,10 @@ function useBoardDiscovery(
   preferredTeamId?: string,
   preferredBoardId?: string,
 ) {
+  const preferredTeamIdRef = useRef(preferredTeamId);
+  const preferredBoardIdRef = useRef(preferredBoardId);
+  preferredTeamIdRef.current = preferredTeamId;
+  preferredBoardIdRef.current = preferredBoardId;
   const [teams, setTeams] = useState<AzureDevOpsTeam[]>([]);
   const [boards, setBoards] = useState<AzureDevOpsBoardReference[]>([]);
   const [teamId, setTeamId] = useState("");
@@ -65,9 +64,10 @@ function useBoardDiscovery(
       .then((result) => {
         if (!cancelled) {
           setTeams(result.teams);
+          const rememberedTeamID = preferredTeamIdRef.current;
           setTeamId(
-            result.teams.some((team) => team.id === preferredTeamId)
-              ? (preferredTeamId ?? "")
+            result.teams.some((team) => team.id === rememberedTeamID)
+              ? (rememberedTeamID ?? "")
               : (result.teams[0]?.id ?? ""),
           );
         }
@@ -76,7 +76,7 @@ function useBoardDiscovery(
     return () => {
       cancelled = true;
     };
-  }, [preferredTeamId, projectId, workspaceId]);
+  }, [projectId, workspaceId]);
 
   useEffect(() => {
     if (!workspaceId || !projectId || !teamId) {
@@ -86,13 +86,15 @@ function useBoardDiscovery(
     }
     let cancelled = false;
     setBoardId("");
+    setError(null);
     listAzureDevOpsBoards(workspaceId, projectId, teamId)
       .then((result) => {
         if (!cancelled) {
           setBoards(result.boards);
+          const rememberedBoardID = preferredBoardIdRef.current;
           setBoardId(
-            result.boards.some((board) => board.id === preferredBoardId)
-              ? (preferredBoardId ?? "")
+            result.boards.some((board) => board.id === rememberedBoardID)
+              ? (rememberedBoardID ?? "")
               : (result.boards[0]?.id ?? ""),
           );
         }
@@ -101,7 +103,7 @@ function useBoardDiscovery(
     return () => {
       cancelled = true;
     };
-  }, [preferredBoardId, projectId, teamId, workspaceId]);
+  }, [projectId, teamId, workspaceId]);
 
   useEffect(() => {
     if (preferredTeamId && teams.some((team) => team.id === preferredTeamId)) {
@@ -134,20 +136,6 @@ export function useAzureDevOpsBoard(
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const reloadSnapshot = useCallback(async () => {
-    if (!workspaceId || !projectId || !teamId || !boardId) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const next = await getAzureDevOpsBoardSnapshot(workspaceId, projectId, teamId, boardId);
-      setSnapshot(next);
-    } catch (cause) {
-      setError(errorMessage(cause, "Unable to load board"));
-    } finally {
-      setLoading(false);
-    }
-  }, [boardId, projectId, teamId, workspaceId]);
-
   useEffect(() => {
     let cancelled = false;
     if (!workspaceId || !projectId || !teamId || !boardId) return;
@@ -165,7 +153,6 @@ export function useAzureDevOpsBoard(
   const updateItem = useCallback(
     async (item: AzureDevOpsBoardWorkItem, values: BoardWorkItemChanges) => {
       if (!workspaceId || !teamId || !boardId) return;
-      const previous = snapshot;
       const optimistic = { ...item, ...values };
       setSnapshot((current) => replaceBoardItem(current, item.id, optimistic));
       try {
@@ -179,13 +166,18 @@ export function useAzureDevOpsBoard(
         );
         setSnapshot((current) => replaceBoardItem(current, item.id, updated));
       } catch (cause) {
-        setSnapshot(previous);
+        setSnapshot((current) => {
+          if (!current) return current;
+          return {
+            ...current,
+            items: current.items.map((candidate) => (candidate === optimistic ? item : candidate)),
+          };
+        });
         setError(errorMessage(cause, "Unable to update work item"));
-        void reloadSnapshot();
         throw cause;
       }
     },
-    [boardId, projectId, reloadSnapshot, snapshot, teamId, workspaceId],
+    [boardId, projectId, teamId, workspaceId],
   );
 
   const moveItem = useCallback(
@@ -195,9 +187,9 @@ export function useAzureDevOpsBoard(
     [updateItem],
   );
 
-  const saveItem = useCallback(
-    (item: AzureDevOpsBoardWorkItem, values: AzureDevOpsBoardEditorValues) =>
-      updateItem(item, values),
+  const updateAssignee = useCallback(
+    (item: AzureDevOpsBoardWorkItem, assigneeAction: "assign_current_user" | "unassign") =>
+      updateItem(item, { assigneeAction }),
     [updateItem],
   );
 
@@ -212,6 +204,6 @@ export function useAzureDevOpsBoard(
     loading,
     error: discovery.error ?? error,
     moveItem,
-    saveItem,
+    updateAssignee,
   };
 }

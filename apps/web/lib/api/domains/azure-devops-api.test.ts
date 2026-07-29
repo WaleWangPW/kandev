@@ -113,11 +113,14 @@ describe("Azure DevOps read API", () => {
     fetchSpy.mockResolvedValue(jsonResponse({ id: 101 }));
     await updateAzureDevOpsBoardWorkItem("ws-1", "project-1", "team-1", "board-1", 101, {
       revision: 7,
-      title: "Updated",
+      assigneeAction: "assign_current_user",
     });
     expect(lastCall()).toMatchObject({
       url: `${BASE}/boards/board-1/work-items/101?project=project-1&team=team-1&workspace_id=ws-1`,
-      init: { method: "PATCH", body: JSON.stringify({ revision: 7, title: "Updated" }) },
+      init: {
+        method: "PATCH",
+        body: JSON.stringify({ revision: 7, assigneeAction: "assign_current_user" }),
+      },
     });
   });
 

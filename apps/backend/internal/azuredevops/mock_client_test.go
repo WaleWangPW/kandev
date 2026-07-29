@@ -92,6 +92,11 @@ func TestMockClientBoardReads(t *testing.T) {
 	if err != nil || snapshot == nil || len(snapshot.Items) != 1 {
 		t.Fatalf("snapshot = %+v, %v", snapshot, err)
 	}
+	snapshot.Items[0].Title = "Mutated caller copy"
+	again, err := mock.GetBoardSnapshot(t.Context(), "p1", "team-1", "board-1")
+	if err != nil || again.Items[0].Title == "Mutated caller copy" {
+		t.Fatalf("subsequent snapshot = %+v, %v", again, err)
+	}
 }
 
 func TestMockClientUpdateBoardWorkItem(t *testing.T) {

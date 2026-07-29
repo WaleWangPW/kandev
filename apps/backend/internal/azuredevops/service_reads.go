@@ -121,7 +121,7 @@ func (s *Service) GetWorkItemDetailForWorkspace(ctx context.Context, workspaceID
 	}
 	reader, ok := client.(workItemDetailClient)
 	if !ok {
-		return nil, errors.New("azure devops: work item detail is unavailable")
+		return nil, fmt.Errorf("%w: work item detail is unavailable", ErrNotConfigured)
 	}
 	return reader.GetWorkItemDetail(ctx, projectID, id)
 }
@@ -136,7 +136,7 @@ func (s *Service) ListWorkItemCommentsForWorkspace(ctx context.Context, workspac
 	}
 	reader, ok := client.(workItemDetailClient)
 	if !ok {
-		return nil, errors.New("azure devops: work item discussion is unavailable")
+		return nil, fmt.Errorf("%w: work item discussion is unavailable", ErrNotConfigured)
 	}
 	return reader.ListWorkItemComments(ctx, projectID, id, continuationToken)
 }
@@ -148,7 +148,7 @@ func (s *Service) GetCurrentIdentityForWorkspace(ctx context.Context, workspaceI
 	}
 	reader, ok := client.(workItemDetailClient)
 	if !ok {
-		return nil, errors.New("azure devops: current identity is unavailable")
+		return nil, fmt.Errorf("%w: current identity is unavailable", ErrNotConfigured)
 	}
 	return reader.GetCurrentIdentity(ctx)
 }

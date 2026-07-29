@@ -89,8 +89,9 @@ func (c *MockClient) GetBoardSnapshot(_ context.Context, _, _, boardID string) (
 	if !ok {
 		return nil, fmt.Errorf("azure devops mock board %q not found", boardID)
 	}
-	copy := snapshot
-	return &copy, nil
+	result := snapshot
+	result.Items = append([]BoardWorkItem(nil), snapshot.Items...)
+	return &result, nil
 }
 
 func (c *MockClient) UpdateBoardWorkItem(_ context.Context, _, _, boardID string, id int, request BoardWorkItemUpdateRequest) (*BoardWorkItem, error) {

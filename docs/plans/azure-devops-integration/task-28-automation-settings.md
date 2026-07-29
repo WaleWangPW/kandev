@@ -31,7 +31,7 @@ spec: "../../specs/azure-devops-integration/spec.md"
 ## Verification
 
 - `pnpm --filter @kandev/web test -- --run components/azure-devops/azure-devops-presets-settings.test.tsx components/azure-devops/azure-devops-watch-settings.test.tsx components/azure-devops/azure-devops-watch-form.test.ts` from `apps`.
-- `pnpm --filter @kandev/web typecheck` from `apps`.
+- `pnpm run typecheck` from `apps/web`.
 - `pnpm --filter @kandev/web lint` from `apps`.
 
 ## Files Likely Touched

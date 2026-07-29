@@ -22,7 +22,7 @@ spec: "../../specs/azure-devops-integration/spec.md"
 
 ## Verification
 
-- `go test ./internal/azuredevops -run 'TestTaskWorkItem(Store|Association|Authorization|Cleanup)'` from `apps/backend`.
+- `make -C apps/backend test`.
 - `pnpm --filter @kandev/web test -- --run hooks/domains/azure-devops/use-azure-devops-task-work-items.test.tsx` from `apps`.
 
 ## Files Likely Touched

@@ -466,7 +466,7 @@ hint and revalidated from the configured provider before persistence or clone.
 - **GIVEN** a user chooses an Azure preset or saved view, **WHEN** they search,
   **THEN** Kandev applies the preset's provider-native query while Advanced WIQL
   remains available for custom work-item searches.
-- **GIVEN** a configured default project with an accessible team and
+- **GIVEN** a configured default project with an accessible team and a
   requirement board, **WHEN** a user opens `/azure-devops`, **THEN** Board mode
   loads that board's Azure columns and cards without a separate search action.
 - **GIVEN** an organization with several projects, teams, and boards, **WHEN**

@@ -13,15 +13,10 @@ import { Badge } from "@kandev/ui/badge";
 import { Button } from "@kandev/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@kandev/ui/card";
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from "@kandev/ui/drawer";
-import { Input } from "@kandev/ui/input";
 import { Label } from "@kandev/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@kandev/ui/select";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@kandev/ui/sheet";
-import { Textarea } from "@kandev/ui/textarea";
-import {
-  type AzureDevOpsBoardEditorValues,
-  useAzureDevOpsBoard,
-} from "@/hooks/domains/azure-devops/use-azure-devops-board";
+import { useAzureDevOpsBoard } from "@/hooks/domains/azure-devops/use-azure-devops-board";
 import type { AzureDevOpsBoardPreference } from "@/hooks/domains/azure-devops/use-azure-devops-preferences";
 import { useResponsiveBreakpoint } from "@/hooks/use-responsive-breakpoint";
 import type {
@@ -39,8 +34,6 @@ type Props = {
   initialPreference?: AzureDevOpsBoardPreference;
   onPreferenceChange: (preference: AzureDevOpsBoardPreference) => void;
 };
-
-type EditorValues = { title: string; assignedTo: string; tags: string; columnId: string };
 
 function BoardCard({
   item,
@@ -85,39 +78,33 @@ function BoardCard({
   );
 }
 
-function BoardEditorForm({
+function BoardActionForm({
   item,
   board,
-  onSave,
+  onMove,
+  onAssigneeChange,
   onClose,
 }: {
   item: AzureDevOpsBoardWorkItem;
   board: AzureDevOpsBoard;
-  onSave: (item: AzureDevOpsBoardWorkItem, values: AzureDevOpsBoardEditorValues) => Promise<void>;
+  onMove: (item: AzureDevOpsBoardWorkItem, columnId: string) => Promise<void>;
+  onAssigneeChange: (
+    item: AzureDevOpsBoardWorkItem,
+    action: "assign_current_user" | "unassign",
+  ) => Promise<void>;
   onClose: () => void;
 }) {
-  const [title, setTitle] = useState(item.title);
-  const [assignedTo, setAssignedTo] = useState(item.assignedTo ?? "");
-  const [tags, setTags] = useState(item.tags?.join(", ") ?? "");
   const [columnId, setColumnId] = useState(item.columnId);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const save = async () => {
+  const perform = async (action: () => Promise<void>) => {
     setSaving(true);
     setSaveError(null);
     try {
-      await onSave(item, {
-        title: title.trim(),
-        assignedTo: assignedTo.trim(),
-        tags: tags
-          .split(",")
-          .map((tag) => tag.trim())
-          .filter(Boolean),
-        columnId,
-      });
+      await action();
       onClose();
     } catch (cause) {
-      setSaveError(cause instanceof Error ? cause.message : "Unable to save work item");
+      setSaveError(cause instanceof Error ? cause.message : "Unable to update work item");
     } finally {
       setSaving(false);
     }
@@ -129,75 +116,9 @@ function BoardEditorForm({
           <AlertDescription>{saveError}</AlertDescription>
         </Alert>
       )}
-      <BoardEditorFields
-        board={board}
-        values={{ title, assignedTo, tags, columnId }}
-        onChange={(next) => {
-          if (next.title !== undefined) setTitle(next.title);
-          if (next.assignedTo !== undefined) setAssignedTo(next.assignedTo);
-          if (next.tags !== undefined) setTags(next.tags);
-          if (next.columnId !== undefined) setColumnId(next.columnId);
-        }}
-      />
-      <Button
-        type="button"
-        className="w-full cursor-pointer"
-        disabled={saving || !title.trim()}
-        onClick={save}
-      >
-        {saving ? "Saving…" : "Save changes"}
-      </Button>
-      {item.webUrl && (
-        <Button asChild variant="ghost" className="w-full cursor-pointer">
-          <a href={item.webUrl} target="_blank" rel="noreferrer">
-            Open in Azure DevOps <IconExternalLink className="ml-2 h-4 w-4" />
-          </a>
-        </Button>
-      )}
-    </div>
-  );
-}
-
-function BoardEditorFields({
-  board,
-  values,
-  onChange,
-}: {
-  board: AzureDevOpsBoard;
-  values: EditorValues;
-  onChange: (next: Partial<EditorValues>) => void;
-}) {
-  return (
-    <>
-      <div className="space-y-1.5">
-        <Label htmlFor="azure-board-title">Title</Label>
-        <Input
-          id="azure-board-title"
-          value={values.title}
-          onChange={(event) => onChange({ title: event.target.value })}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="azure-board-assignee">Assignee</Label>
-        <Input
-          id="azure-board-assignee"
-          value={values.assignedTo}
-          onChange={(event) => onChange({ assignedTo: event.target.value })}
-          placeholder="Unassigned"
-        />
-      </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="azure-board-tags">Tags</Label>
-        <Textarea
-          id="azure-board-tags"
-          value={values.tags}
-          onChange={(event) => onChange({ tags: event.target.value })}
-          placeholder="tag-one, tag-two"
-        />
-      </div>
       <div className="space-y-1.5">
         <Label>Column</Label>
-        <Select value={values.columnId} onValueChange={(columnId) => onChange({ columnId })}>
+        <Select value={columnId} onValueChange={setColumnId}>
           <SelectTrigger data-testid="azure-board-column-select">
             <SelectValue />
           </SelectTrigger>
@@ -210,7 +131,42 @@ function BoardEditorFields({
           </SelectContent>
         </Select>
       </div>
-    </>
+      <Button
+        type="button"
+        className="w-full cursor-pointer"
+        disabled={saving || columnId === item.columnId}
+        onClick={() => void perform(() => onMove(item, columnId))}
+      >
+        {saving ? "Updating…" : "Move to column"}
+      </Button>
+      <Button
+        type="button"
+        variant="outline"
+        className="w-full cursor-pointer"
+        disabled={saving}
+        onClick={() => void perform(() => onAssigneeChange(item, "assign_current_user"))}
+      >
+        Assign to me
+      </Button>
+      {item.assignedTo && (
+        <Button
+          type="button"
+          variant="ghost"
+          className="w-full cursor-pointer"
+          disabled={saving}
+          onClick={() => void perform(() => onAssigneeChange(item, "unassign"))}
+        >
+          Unassign
+        </Button>
+      )}
+      {item.webUrl && (
+        <Button asChild variant="ghost" className="w-full cursor-pointer">
+          <a href={item.webUrl} target="_blank" rel="noreferrer">
+            Open in Azure DevOps <IconExternalLink className="ml-2 h-4 w-4" />
+          </a>
+        </Button>
+      )}
+    </div>
   );
 }
 
@@ -218,22 +174,28 @@ function BoardEditor({
   item,
   board,
   onOpenChange,
-  onSave,
+  onMove,
+  onAssigneeChange,
 }: {
   item: AzureDevOpsBoardWorkItem | null;
   board: AzureDevOpsBoard;
   onOpenChange: (open: boolean) => void;
-  onSave: (item: AzureDevOpsBoardWorkItem, values: AzureDevOpsBoardEditorValues) => Promise<void>;
+  onMove: (item: AzureDevOpsBoardWorkItem, columnId: string) => Promise<void>;
+  onAssigneeChange: (
+    item: AzureDevOpsBoardWorkItem,
+    action: "assign_current_user" | "unassign",
+  ) => Promise<void>;
 }) {
   const { isMobile } = useResponsiveBreakpoint();
   if (!item) return null;
-  const title = `Edit work item #${item.id}`;
+  const title = `Work item #${item.id}`;
   const form = (
-    <BoardEditorForm
+    <BoardActionForm
       key={`${item.id}-${item.revision}`}
       item={item}
       board={board}
-      onSave={onSave}
+      onMove={onMove}
+      onAssigneeChange={onAssigneeChange}
       onClose={() => onOpenChange(false)}
     />
   );
@@ -565,7 +527,8 @@ export function AzureDevOpsBoard({
             item={editing}
             board={board.snapshot.board}
             onOpenChange={(open) => !open && setEditing(null)}
-            onSave={board.saveItem}
+            onMove={board.moveItem}
+            onAssigneeChange={board.updateAssignee}
           />
         </>
       )}

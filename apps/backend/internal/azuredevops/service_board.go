@@ -76,7 +76,7 @@ func (s *Service) UpdateBoardWorkItemForWorkspace(ctx context.Context, workspace
 				GetCurrentIdentity(context.Context) (*Identity, error)
 			})
 			if !available {
-				return nil, errors.New("azure devops: current identity is unavailable")
+				return nil, fmt.Errorf("%w: current identity is unavailable", ErrNotConfigured)
 			}
 			identity, identityErr := identityReader.GetCurrentIdentity(ctx)
 			if identityErr != nil {

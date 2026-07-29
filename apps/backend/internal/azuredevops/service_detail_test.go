@@ -2,6 +2,7 @@ package azuredevops
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -52,5 +53,23 @@ func TestServiceGetWorkItemDetail(t *testing.T) {
 	identity, err := service.GetCurrentIdentityForWorkspace(t.Context(), "ws-1")
 	if err != nil || identity.ID != "me" {
 		t.Fatalf("GetCurrentIdentityForWorkspace = %+v, %v", identity, err)
+	}
+}
+
+func TestServiceDetailCapabilitiesReportNotConfigured(t *testing.T) {
+	service, _, _ := newTestService(t, func(*Config, string) Client { return &invalidClient{} })
+	if _, err := service.SetConfigForWorkspace(t.Context(), "ws-1", &SetConfigRequest{
+		OrganizationURL: "https://dev.azure.com/acme", PAT: "pat",
+	}); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+	if _, err := service.GetWorkItemDetailForWorkspace(t.Context(), "ws-1", "project-1", 101); !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("GetWorkItemDetailForWorkspace error = %v, want ErrNotConfigured", err)
+	}
+	if _, err := service.ListWorkItemCommentsForWorkspace(t.Context(), "ws-1", "project-1", 101, ""); !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("ListWorkItemCommentsForWorkspace error = %v, want ErrNotConfigured", err)
+	}
+	if _, err := service.GetCurrentIdentityForWorkspace(t.Context(), "ws-1"); !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("GetCurrentIdentityForWorkspace error = %v, want ErrNotConfigured", err)
 	}
 }
