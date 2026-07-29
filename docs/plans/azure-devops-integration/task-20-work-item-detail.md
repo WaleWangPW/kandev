@@ -22,8 +22,7 @@ spec: "../../specs/azure-devops-integration/spec.md"
 
 ## Verification
 
-- `go test ./internal/azuredevops -run 'TestRESTClient(GetWorkItemDetail|ListWorkItemComments|GetCurrentIdentity)|TestServiceGetWorkItemDetail'` from `apps/backend`.
-- `go test ./internal/azuredevops -run 'TestController(GetWorkItemDetail|ListWorkItemComments|GetIdentity)'` from `apps/backend`.
+- `make -C apps/backend test`.
 
 ## Files Likely Touched
 
