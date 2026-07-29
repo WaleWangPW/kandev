@@ -276,14 +276,16 @@ function PATSetupHelp({ organizationUrl }: { organizationUrl: string }) {
           className="pointer-events-auto max-w-sm space-y-2 p-3 text-left text-xs leading-relaxed"
           data-testid="azure-devops-pat-help"
         >
-          <p className="font-medium text-foreground">Create a read-only personal access token</p>
+          <p className="font-medium text-foreground">
+            Create a personal access token for board editing
+          </p>
           <ol className="list-decimal space-y-1 pl-4 text-muted-foreground">
             <li>Open token settings and select New Token.</li>
             <li>Choose this organization, a short expiration, and Custom defined scopes.</li>
             <li>
-              Under <span className="font-medium text-foreground">Work Items</span>, check Read.
-              Under <span className="font-medium text-foreground">Code</span>, check Read. Leave all
-              other scopes unchecked.
+              Under <span className="font-medium text-foreground">Work Items</span>, check Read
+              &amp; write. Under <span className="font-medium text-foreground">Code</span>, check
+              Read. Leave all other scopes unchecked.
             </li>
             <li>Create the token, copy it, and paste it into this field.</li>
           </ol>
@@ -452,7 +454,7 @@ export function AzureDevOpsConnectionSection({ workspaceId }: { workspaceId: str
     <SettingsSection
       icon={<IconBrandAzure className="h-5 w-5" />}
       title="Azure DevOps integration"
-      description="Azure DevOps Services organization, project, and read-only PAT for this workspace."
+      description="Azure DevOps Services organization, project, and PAT for this workspace."
     >
       <Card>
         <CardContent className="space-y-4 pt-6">

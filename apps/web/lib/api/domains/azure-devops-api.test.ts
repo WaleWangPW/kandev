@@ -12,6 +12,10 @@ import {
   getAzureDevOpsPullRequestFeedback,
   listAzureDevOpsProjects,
   listAzureDevOpsBranches,
+  listAzureDevOpsTeams,
+  listAzureDevOpsBoards,
+  getAzureDevOpsBoardSnapshot,
+  updateAzureDevOpsBoardWorkItem,
   listAzureDevOpsPullRequests,
   listAzureDevOpsRepositories,
   listWorkspaceAzureDevOpsTaskPullRequests,
@@ -89,6 +93,34 @@ describe("Azure DevOps config API", () => {
 });
 
 describe("Azure DevOps read API", () => {
+  it("reads team boards and updates a board work item with workspace scope", async () => {
+    fetchSpy.mockResolvedValue(jsonResponse({ teams: [] }));
+    await listAzureDevOpsTeams("ws-1", "project / one");
+    expect(lastCall().url).toBe(`${BASE}/teams?project=project+%2F+one&workspace_id=ws-1`);
+
+    fetchSpy.mockResolvedValue(jsonResponse({ boards: [] }));
+    await listAzureDevOpsBoards("ws-1", "project-1", "team/one");
+    expect(lastCall().url).toBe(
+      `${BASE}/boards?project=project-1&team=team%2Fone&workspace_id=ws-1`,
+    );
+
+    fetchSpy.mockResolvedValue(jsonResponse({ board: {}, items: [] }));
+    await getAzureDevOpsBoardSnapshot("ws-1", "project-1", "team-1", "board/1");
+    expect(lastCall().url).toBe(
+      `${BASE}/boards/board%2F1?project=project-1&team=team-1&workspace_id=ws-1`,
+    );
+
+    fetchSpy.mockResolvedValue(jsonResponse({ id: 101 }));
+    await updateAzureDevOpsBoardWorkItem("ws-1", "project-1", "team-1", "board-1", 101, {
+      revision: 7,
+      title: "Updated",
+    });
+    expect(lastCall()).toMatchObject({
+      url: `${BASE}/boards/board-1/work-items/101?project=project-1&team=team-1&workspace_id=ws-1`,
+      init: { method: "PATCH", body: JSON.stringify({ revision: 7, title: "Updated" }) },
+    });
+  });
+
   it("encodes project and repository filters with workspace scope", async () => {
     fetchSpy.mockResolvedValueOnce(jsonResponse({ projects: [] }));
     await listAzureDevOpsProjects("ws-1");

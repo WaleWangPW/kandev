@@ -2,10 +2,15 @@ import { fetchJson, type ApiRequestOptions } from "../client";
 import type {
   AssociateAzureDevOpsPullRequestRequest,
   AzureDevOpsConfig,
+  AzureDevOpsBoardReference,
+  AzureDevOpsBoardSnapshot,
+  AzureDevOpsBoardWorkItem,
+  AzureDevOpsBoardWorkItemUpdate,
   AzureDevOpsProject,
   AzureDevOpsPullRequestFeedback,
   AzureDevOpsPullRequestPage,
   AzureDevOpsRepository,
+  AzureDevOpsTeam,
   AzureDevOpsSavedView,
   AzureDevOpsTaskPullRequest,
   AzureDevOpsWorkItem,
@@ -14,6 +19,8 @@ import type {
   TestAzureDevOpsConnectionResult,
 } from "@/lib/types/azure-devops";
 import { invalidateIntegrationAvailabilityAfter } from "@/lib/integrations/integration-availability-events";
+
+/* eslint-disable max-params */
 
 const BASE = "/api/v1/azure-devops";
 
@@ -164,6 +171,62 @@ export function getAzureDevOpsWorkItem(
   const search = new URLSearchParams({ project });
   appendWorkspace(search, workspaceId);
   return fetchJson<AzureDevOpsWorkItem>(`${BASE}/work-items/${id}?${search}`, options);
+}
+
+export function listAzureDevOpsTeams(
+  workspaceId: string,
+  project: string,
+  options?: ApiRequestOptions,
+) {
+  const search = new URLSearchParams({ project });
+  appendWorkspace(search, workspaceId);
+  return fetchJson<{ teams: AzureDevOpsTeam[] }>(`${BASE}/teams?${search}`, options);
+}
+
+export function listAzureDevOpsBoards(
+  workspaceId: string,
+  project: string,
+  team: string,
+  options?: ApiRequestOptions,
+) {
+  const search = new URLSearchParams({ project, team });
+  appendWorkspace(search, workspaceId);
+  return fetchJson<{ boards: AzureDevOpsBoardReference[] }>(`${BASE}/boards?${search}`, options);
+}
+
+export function getAzureDevOpsBoardSnapshot(
+  workspaceId: string,
+  project: string,
+  team: string,
+  board: string,
+  options?: ApiRequestOptions,
+) {
+  const search = new URLSearchParams({ project, team });
+  appendWorkspace(search, workspaceId);
+  return fetchJson<AzureDevOpsBoardSnapshot>(
+    `${BASE}/boards/${encodeURIComponent(board)}?${search}`,
+    options,
+  );
+}
+
+export function updateAzureDevOpsBoardWorkItem(
+  workspaceId: string,
+  project: string,
+  team: string,
+  board: string,
+  id: number,
+  payload: AzureDevOpsBoardWorkItemUpdate,
+  options?: ApiRequestOptions,
+) {
+  const search = new URLSearchParams({ project, team });
+  appendWorkspace(search, workspaceId);
+  return fetchJson<AzureDevOpsBoardWorkItem>(
+    `${BASE}/boards/${encodeURIComponent(board)}/work-items/${id}?${search}`,
+    {
+      ...options,
+      init: { ...options?.init, method: "PATCH", body: JSON.stringify(payload) },
+    },
+  );
 }
 
 export type AzureDevOpsPullRequestFilters = {

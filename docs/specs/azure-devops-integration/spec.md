@@ -13,8 +13,8 @@ Decision: [ADR-2026-07-20-provider-neutral-remote-repositories](../../decisions/
 Teams whose source code and planning work live in Azure DevOps cannot use Kandev's
 GitHub or GitLab browsing surfaces to find work items, inspect pull requests, or
 associate a pull request with a task. Azure users must be able to connect their
-workspace and read Azure Boards and Azure Repos data without installing or
-authenticating the GitHub CLI.
+workspace, work from the same team board they use in Azure DevOps, and inspect
+Azure Repos data without installing or authenticating the GitHub CLI.
 
 ## What
 
@@ -31,6 +31,25 @@ authenticating the GitHub CLI.
 - Users can browse work items returned by WIQL, inspect their core fields, and
   launch the existing task-creation flow with the work-item title, description,
   URL, project, type, state, and identifier available to the launcher.
+- The Azure DevOps browser includes a Board mode alongside Work items and Pull
+  requests. Board mode is the default connected view and selects context in
+  Azure's hierarchy: project, then team, then board/backlog level.
+- Board mode initially selects the configured default project when available,
+  the first accessible team, and the first visible requirement board (falling
+  back to the first visible board). Users can change every level explicitly.
+- The selected board shows Azure's columns, column item counts and limits, and
+  work-item cards with ID, title, type, assignee, and tags.
+- On desktop, users can move cards between board columns by drag and drop. On
+  mobile, the same move is available from the card editor; touch drag is not
+  required.
+- Users can edit a board card's title, assignee, and tags. Card type and ID are
+  visible but read-only. Clearing the assignee unassigns the work item, and an
+  empty tag list clears its tags.
+- Card updates use the displayed Azure revision as an optimistic concurrency
+  guard. Kandev never silently overwrites a newer Azure DevOps edit.
+- Azure board edits are sent through a fixed Kandev field allowlist. The
+  browser cannot submit provider-native JSON Patch paths, bypass Azure rules,
+  or suppress Azure notifications.
 - The work-item and pull-request browse surface leads with named, provider-aware
   presets and supports workspace-scoped saved views. Raw WIQL remains available
   in an Advanced section instead of occupying the primary filter surface.
@@ -63,13 +82,17 @@ authenticating the GitHub CLI.
   remains the responsibility of the selected executor's Git credentials.
 - The Azure DevOps browse and settings surfaces provide equivalent desktop and
   mobile workflows.
+- Desktop Board mode contains horizontal board scrolling inside the board
+  surface. Mobile Board mode shows one focused column at a time with previous,
+  next, and bottom-drawer project/team/board/column navigation; neither mode
+  creates document-level horizontal scrolling.
 - Organization URL inputs accept an optional trailing slash and persist the
   canonical URL without it.
 - PAT setup instructions and the organization-specific token-settings link are
   available from an info control beside the PAT field on hover, focus, or tap.
-- Opening the Azure DevOps browser runs the default work-item query as soon as
-  the connected project's filters are ready; users do not need to submit the
-  initial search manually.
+- Selecting Work items runs the default query as soon as the connected
+  project's filters are ready; users do not need to submit the initial search
+  manually.
 
 ## Data Model
 
@@ -142,6 +165,14 @@ kind (`work_item` or `pull_request`), provider-native query/filter values, and a
 creation timestamp. Invalid entries are ignored when read. Saving a view never
 persists result data or credentials.
 
+### Azure board state
+
+Board definitions, columns, work-item membership, and work-item field values
+remain provider-owned and are fetched on demand. Kandev does not persist a
+board cache or the current browser selection. A board work item includes its
+Azure revision, the board column ID derived from the board's column field, and
+the split-column done value when the board exposes a done field.
+
 ## API Surface
 
 Every route requires `workspace_id` as a query parameter unless the workspace
@@ -155,6 +186,10 @@ is present in the path.
 | `POST`   | `/api/v1/azure-devops/config/test`                                                    | Test submitted or stored credentials without persisting submitted values |
 | `POST`   | `/api/v1/azure-devops/config/copy`                                                    | Copy configuration and credential to another workspace                   |
 | `GET`    | `/api/v1/azure-devops/projects`                                                       | List accessible projects                                                 |
+| `GET`    | `/api/v1/azure-devops/teams`                                                          | List accessible teams for a project                                      |
+| `GET`    | `/api/v1/azure-devops/boards`                                                         | List visible boards/backlog levels for a project and team                 |
+| `GET`    | `/api/v1/azure-devops/boards/:boardId`                                                | Return board columns and hydrated work-item cards                         |
+| `PATCH`  | `/api/v1/azure-devops/boards/:boardId/work-items/:id`                                 | Update an allowed card field or board position with revision protection   |
 | `GET`    | `/api/v1/azure-devops/repositories`                                                   | List repositories, optionally filtered by project                        |
 | `GET`    | `/api/v1/azure-devops/repositories/:projectId/:repositoryId/branches`                 | List repository branches for task creation                               |
 | `GET`    | `/api/v1/azure-devops/views`                                                          | Return workspace-scoped saved Azure views                                |
@@ -172,6 +207,21 @@ Search requests contain `project`, `wiql`, and an optional `top` value. The
 service hydrates WIQL references in batches no larger than 200. Descriptions
 returned as HTML are sanitized before display.
 
+Team requests contain `project`. Board-list requests contain `project` and
+`team`. Board-detail requests use the same query parameters plus the provider
+board/backlog ID in the path. The board-detail response contains board ID/name,
+column definitions (`id`, `name`, type, split flag, and item limit), and
+hydrated work items with revision, core card fields, column ID, and split-column
+done state.
+
+Board work-item updates contain `project`, `team`, `revision`, and at least one
+of `title`, `assignedTo`, `tags`, `columnId`, or `columnDone`. Omitted fields
+remain unchanged; an empty `assignedTo` or `tags` value clears that field. The
+server derives Azure field reference names from the selected board, validates
+the target column, prepends a JSON Patch `test` operation for `/rev`, and
+returns the updated normalized work item. A stale revision returns HTTP 409
+with code `azure_devops_revision_conflict`.
+
 Task repository inputs use the provider-neutral `remote_url` field. The legacy
 `github_url` field remains accepted during migration and is normalized to the
 same internal input. Provider metadata supplied by the browser is treated as a
@@ -182,9 +232,11 @@ hint and revalidated from the configured provider before persistence or clone.
 - Any user who can configure a Kandev workspace can manage that workspace's
   Azure DevOps connection under the same authorization model as Jira and
   Linear configuration.
-- The initial PAT requires read access to Work Items and Code. Kandev does not
-  request or exercise work-item write, thread write, or code write permissions
-  in this release.
+- The board-enabled PAT requires Azure DevOps **Work Items: Read & write** and
+  **Code: Read**. Kandev does not request thread write or code write
+  permissions in this release.
+- Existing Work Items Read PATs can still load boards but receive a permission
+  error and reconnect guidance when attempting an edit.
 - The backend may use the Code Read permission for a one-time authenticated Git
   clone. It supplies the PAT through an ephemeral Git credential mechanism and
   clears that mechanism when the child process exits.
@@ -204,6 +256,17 @@ hint and revalidated from the configured provider before persistence or clone.
   malformed WIQL are rejected without persistence.
 - A WIQL result larger than one batch is hydrated in deterministic batches;
   one omitted/deleted work item does not corrupt the rest of the page.
+- Missing projects, teams, or boards produce an explicit empty state and keep
+  the project/team/board selectors usable.
+- If a board references more than 200 work items, Kandev hydrates them in
+  deterministic batches and preserves the provider's backlog order.
+- A rejected drag or card edit leaves the last confirmed card visible, restores
+  an optimistic desktop move, and shows the provider error without discarding
+  the rest of the loaded board.
+- A stale work-item revision returns a conflict, refreshes the board, and asks
+  the user to retry against the latest fields rather than overwriting them.
+- A 403 received during a card mutation preserves readable board data and
+  directs the user to replace the PAT with Work Items Read & write scope.
 - PR association fails closed when the repository is not attached to the task
   or is not an `azure_devops` repository.
 - A repository selected from an integration is rejected if its canonical URL or
@@ -217,7 +280,8 @@ hint and revalidated from the configured provider before persistence or clone.
 
 - Configuration, connection health, encrypted PATs, and task PR associations
   survive backend restarts.
-- Browse results, PR feedback, and REST response caches are transient.
+- Browse results, board selections, board snapshots, PR feedback, and REST
+  response caches are transient. Successful card edits persist in Azure DevOps.
 - Deleting a workspace follows the existing integration cleanup behavior and
   removes its Azure configuration, PAT, and task PR associations.
 
@@ -262,6 +326,25 @@ hint and revalidated from the configured provider before persistence or clone.
 - **GIVEN** a user chooses an Azure preset or saved view, **WHEN** they search,
   **THEN** Kandev applies the preset's provider-native query while Advanced WIQL
   remains available for custom work-item searches.
+- **GIVEN** a configured default project with an accessible team and
+  requirement board, **WHEN** a user opens `/azure-devops`, **THEN** Board mode
+  loads that board's Azure columns and cards without a separate search action.
+- **GIVEN** an organization with several projects, teams, and boards, **WHEN**
+  the user changes project, team, or board, **THEN** each dependent selector
+  resets to the first valid child and only the selected board's cards appear.
+- **GIVEN** a current board card, **WHEN** a desktop user drags it to another
+  column, **THEN** Azure DevOps is updated and the card remains in that column
+  after a board refresh.
+- **GIVEN** a current board card, **WHEN** a user edits its title, assignee, or
+  tags, **THEN** the returned Azure values replace the card without changing
+  its ID or type.
+- **GIVEN** another client updated a card after Kandev loaded it, **WHEN** the
+  user saves a Kandev edit, **THEN** Kandev reports a conflict, reloads the
+  board, and does not overwrite the newer Azure revision.
+- **GIVEN** a narrow mobile viewport, **WHEN** a user navigates columns, opens a
+  card, edits its core fields, and moves it to another column, **THEN** all
+  actions complete through a focused column and full-height editor without
+  document horizontal scrolling.
 - **GIVEN** a narrow mobile viewport, **WHEN** a user configures Azure DevOps or
   browses work items and PRs, **THEN** all filters and primary actions remain
   reachable without horizontal page scrolling.
@@ -270,7 +353,14 @@ hint and revalidated from the configured provider before persistence or clone.
 
 - Azure DevOps Server or Team Foundation Server installations.
 - Microsoft Entra OAuth, service principals, and managed identities.
-- Creating, updating, or transitioning work items.
+- Creating, deleting, or changing the type of work items.
+- Editing descriptions, priorities, estimates, parent relationships, area
+  paths, iteration paths, or other provider-specific work-item fields.
+- Reordering cards within one column or changing backlog priority.
+- Editing board columns, WIP limits, split-column configuration, swimlanes,
+  card styles, or other board metadata. Existing split-column done state is
+  preserved and may be changed from the card editor, but split subcolumns and
+  swimlane rows are not rendered as separate lanes in this release.
 - Creating, approving, commenting on, abandoning, or completing pull requests.
 - Automatic CI repair, auto-merge, and Azure Pipelines log streaming.
 - Service-hook/webhook ingestion; reads and refreshes use requests, local

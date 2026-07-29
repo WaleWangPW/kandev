@@ -2,13 +2,13 @@
 
 ## Scope
 
-Implement the read-only Azure DevOps Services integration defined in
+Implement the Azure DevOps Services integration defined in
 [`../../specs/azure-devops-integration/spec.md`](../../specs/azure-devops-integration/spec.md):
 workspace-scoped PAT configuration, direct REST work-item and pull-request
 reads, persistent task PR links, responsive settings/browse surfaces, immediate
 integration availability updates, provider-neutral remote repository selection,
-and server-side authenticated Azure clones. No Azure runtime path may require
-`gh` or `az`.
+server-side authenticated Azure clones, and an editable Azure Boards view. No
+Azure runtime path may require `gh` or `az`.
 
 ## Architecture
 
@@ -26,6 +26,13 @@ and server-side authenticated Azure clones. No Azure runtime path may require
   or command output.
 - Use Azure DevOps REST API 7.1, an injected HTTP client for deterministic
   tests, bounded response bodies, context-aware requests, and typed API errors.
+- Discover board context through project teams and team backlog levels, then
+  combine the selected backlog's work-item references with its board column
+  metadata. Hydrate work items through the existing bounded 200-item batches.
+- Keep provider writes behind a fixed server-side field allowlist. Resolve the
+  selected board's column/done reference names on the backend and use an Azure
+  JSON Patch `/rev` test before title, assignee, tags, or board-position
+  operations.
 - Register the service as non-fatal during backend boot and expose mock routes
   only under `KANDEV_MOCK_AZURE_DEVOPS=true`.
 
@@ -48,6 +55,13 @@ and server-side authenticated Azure clones. No Azure runtime path may require
 - Settings route and integration menu entry.
 - `/azure-devops` browse page with a compact work-item/PR segmented view,
   desktop filter rail, and mobile filter sheet.
+- `/azure-devops` Board mode becomes the default connected view. Its project,
+  team, and board selectors share one board view model with a multi-column
+  desktop DnD composition and a focused single-column mobile composition.
+- Desktop card moves are optimistic and roll back on failure. Card editing uses
+  a dialog on wider layouts and a full-height, safe-area-aware mobile surface;
+  the mobile editor includes an explicit column picker instead of requiring
+  touch drag.
 - Task PR summary integration through a provider-tagged view model; Azure
   detail remains in Azure-specific components.
 - A shared integration availability invalidation channel updates every consumer
@@ -74,6 +88,15 @@ and server-side authenticated Azure clones. No Azure runtime path may require
   credential cleanup around Azure clone processes.
 - Component and Playwright coverage for immediate availability, Enabled chips,
   provider grouping, preset/saved-view behavior, and mobile parity.
+- Go REST/service/controller tests for team and board discovery, backlog-order
+  hydration, dynamic column/done fields, allowlisted JSON Patch generation,
+  revision conflicts, and mock mutation.
+- TypeScript API/hook/view-model tests for dependent selector resets, board
+  grouping, optimistic move rollback, conflict refresh, and normalized card
+  updates.
+- Playwright desktop and `mobile-chrome` flows for initial board load, card
+  editing, moving, reload persistence, mobile focused-column navigation, editor
+  containment, and absence of document horizontal overflow.
 
 ## Verification
 
@@ -106,6 +129,16 @@ and server-side authenticated Azure clones. No Azure runtime path may require
 - Remote executors receive credential-free clone URLs. A private Azure repo is
   guaranteed to clone through the backend materialization path; remote executor
   push/clone credentials remain separately configured.
+- Existing workspace PATs may have only Work Items Read. Board reads continue
+  to work, while mutations can return 403 until the user replaces the PAT with
+  Work Items Read & write; the UI must preserve readable board data and show
+  reconnect guidance.
+- Board column and done field reference names are provider data and can differ
+  by team/process. The browser sends column IDs only; the backend must derive
+  and validate all provider-native patch paths and values.
+- Azure board snapshots can exceed one work-item batch and can contain deleted
+  references. Preserve backlog order, omit missing items, and keep the
+  remaining board usable.
 
 ## Task Waves
 
@@ -142,6 +175,19 @@ Wave 6: provider-neutral repository selection
 Wave 7: integrated validation
 
 - [x] [Task 13: Cross-provider E2E, security review, and documentation](task-13-enhancement-validation.md)
+
+Wave 8: editable Azure board backend
+
+- [x] [Task 14: Board discovery and snapshots](task-14-board-discovery.md)
+- [x] [Task 15: Revision-safe work-item mutations](task-15-board-mutations.md)
+
+Wave 9: responsive board UI
+
+- [x] [Task 16: Editable desktop and mobile board](task-16-board-ui.md)
+
+Wave 10: board validation and documentation
+
+- [x] [Task 17: Board E2E, docs, and verification](task-17-board-validation.md)
 
 Tasks within a wave are listed separately for ownership clarity but should run
 sequentially in the current workspace when they touch the same package or state

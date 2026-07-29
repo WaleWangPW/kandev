@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint-disable max-lines, max-lines-per-function */
+
 import Link from "@/components/routing/app-link";
 import { useCallback, useEffect, useRef, useState, type ComponentProps } from "react";
 import { IconAdjustments, IconChevronLeft, IconChevronRight } from "@tabler/icons-react";
@@ -27,6 +29,7 @@ import {
   type AzureDevOpsScopeSelection,
 } from "@/components/azure-devops/azure-devops-scope-bar";
 import { AzureDevOpsSaveViewDialog } from "@/components/azure-devops/azure-devops-save-view-dialog";
+import { AzureDevOpsBoard } from "@/components/azure-devops/azure-devops-board";
 import { presetsForKind } from "@/components/azure-devops/azure-devops-presets";
 import {
   useAzureDevOpsConnection,
@@ -45,6 +48,7 @@ import type { AzureDevOpsPullRequest, AzureDevOpsSavedView } from "@/lib/types/a
 const PAGE_SIZE = 25;
 const WORK_ITEMS_MODE: AzureDevOpsBrowseMode = "work-items";
 const PULL_REQUESTS_MODE: AzureDevOpsBrowseMode = "pull-requests";
+const BOARD_MODE: AzureDevOpsBrowseMode = "board";
 const DEFAULT_WIQL =
   "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project ORDER BY [System.ChangedDate] DESC";
 
@@ -83,6 +87,22 @@ function NotConfigured({ workspaceId }: { workspaceId?: string }) {
   );
 }
 
+function resultLabel(mode: AzureDevOpsBrowseMode): string {
+  if (mode === WORK_ITEMS_MODE) return "Work items";
+  if (mode === PULL_REQUESTS_MODE) return "Pull requests";
+  return "Board";
+}
+
+function resultCount(
+  mode: AzureDevOpsBrowseMode,
+  workItemCount: number,
+  pullRequestCount: number,
+): number {
+  if (mode === WORK_ITEMS_MODE) return workItemCount;
+  if (mode === PULL_REQUESTS_MODE) return pullRequestCount;
+  return 0;
+}
+
 function ResultHeader({
   mode,
   workItemCount,
@@ -92,12 +112,10 @@ function ResultHeader({
   workItemCount: number;
   pullRequestCount: number;
 }) {
-  const count = mode === WORK_ITEMS_MODE ? workItemCount : pullRequestCount;
+  const count = resultCount(mode, workItemCount, pullRequestCount);
   return (
     <div className="flex min-h-12 items-center justify-between border-b px-4">
-      <h2 className="text-sm font-semibold">
-        {mode === WORK_ITEMS_MODE ? "Work items" : "Pull requests"}
-      </h2>
+      <h2 className="text-sm font-semibold">{resultLabel(mode)}</h2>
       <span className="text-xs text-muted-foreground">{count} results</span>
     </div>
   );
@@ -227,10 +245,12 @@ type RunAzureSearch = (
 function useInitialAzureSearch({
   connection,
   filters,
+  mode,
   runSearch,
 }: {
   connection: ReturnType<typeof useAzureDevOpsConnection>;
   filters: AzureDevOpsFiltersState;
+  mode: AzureDevOpsBrowseMode;
   runSearch: RunAzureSearch;
 }) {
   const searchedWorkspace = useRef("");
@@ -239,13 +259,14 @@ function useInitialAzureSearch({
     if (
       !connectedWorkspaceId ||
       !filters.projectId ||
+      mode === BOARD_MODE ||
       searchedWorkspace.current === connectedWorkspaceId
     ) {
       return;
     }
     searchedWorkspace.current = connectedWorkspaceId;
     runSearch(0);
-  }, [connectedWorkspaceId, filters.projectId, runSearch]);
+  }, [connectedWorkspaceId, filters.projectId, mode, runSearch]);
 }
 
 function useAzureScopeControls({
@@ -301,9 +322,11 @@ function useAzureSavedViewControls({
   setSelection: (selection: AzureDevOpsScopeSelection) => void;
 }) {
   const [saveViewOpen, setSaveViewOpen] = useState(false);
-  const canSaveCurrent = Boolean(
-    filters.projectId && (mode === WORK_ITEMS_MODE ? filters.wiql.trim() : filters.repositoryId),
-  );
+  const canSaveCurrent =
+    mode !== BOARD_MODE &&
+    Boolean(
+      filters.projectId && (mode === WORK_ITEMS_MODE ? filters.wiql.trim() : filters.repositoryId),
+    );
   const saveCurrentView = useCallback(
     async (label: string) => {
       const view: AzureDevOpsSavedView = {
@@ -328,7 +351,7 @@ function useAzureSavedViewControls({
 }
 
 function useAzureDevOpsPageState(workspaceId?: string) {
-  const [mode, setMode] = useState<AzureDevOpsBrowseMode>(WORK_ITEMS_MODE);
+  const [mode, setMode] = useState<AzureDevOpsBrowseMode>(BOARD_MODE);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [launchPayload, setLaunchPayload] = useState<AzureDevOpsLaunchPayload | null>(null);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
@@ -362,6 +385,7 @@ function useAzureDevOpsPageState(workspaceId?: string) {
         });
         return;
       }
+      if (searchMode === BOARD_MODE) return;
       setSkip(nextSkip);
       void pullRequests.search({
         project: searchFilters.projectId,
@@ -376,7 +400,7 @@ function useAzureDevOpsPageState(workspaceId?: string) {
     [filters, mode, pullRequests, workItems],
   );
 
-  useInitialAzureSearch({ connection, filters, runSearch });
+  useInitialAzureSearch({ connection, filters, mode, runSearch });
 
   const openFeedback = (pullRequest: AzureDevOpsPullRequest) => {
     setFeedbackOpen(true);
@@ -408,6 +432,7 @@ function useAzureDevOpsPageState(workspaceId?: string) {
 
   return {
     mode,
+    setMode,
     selection: scope.selection,
     selectScope: scope.selectScope,
     saveViewOpen: savedViewControls.saveViewOpen,
@@ -438,6 +463,7 @@ function useAzureDevOpsPageState(workspaceId?: string) {
 type PageState = ReturnType<typeof useAzureDevOpsPageState>;
 
 function BrowseResults({ state }: { state: PageState }) {
+  if (state.mode === BOARD_MODE) return null;
   return (
     <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
       <ResultHeader
@@ -542,11 +568,51 @@ function AzureDevOpsPageContent({ workspaceId, workflows, steps, repositories }:
         canSaveCurrent={state.canSaveCurrent}
         onSaveCurrent={() => state.setSaveViewOpen(true)}
       />
+      <div className="flex items-center gap-1 border-b px-4 py-2">
+        <Button
+          type="button"
+          size="sm"
+          variant={state.mode === BOARD_MODE ? "default" : "ghost"}
+          className="cursor-pointer"
+          onClick={() => state.setMode(BOARD_MODE)}
+          data-testid="azure-devops-board-mode"
+        >
+          Board
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={state.mode === WORK_ITEMS_MODE ? "default" : "ghost"}
+          className="cursor-pointer"
+          onClick={() => state.setMode(WORK_ITEMS_MODE)}
+          data-testid="azure-devops-work-items-mode"
+        >
+          Work items
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={state.mode === PULL_REQUESTS_MODE ? "default" : "ghost"}
+          className="cursor-pointer"
+          onClick={() => state.setMode(PULL_REQUESTS_MODE)}
+          data-testid="azure-devops-pull-requests-mode"
+        >
+          Pull requests
+        </Button>
+      </div>
+      {state.mode === BOARD_MODE && (
+        <AzureDevOpsBoard
+          workspaceId={workspaceId}
+          projectId={state.filters.projectId}
+          projects={state.projectList.data}
+          onProjectChange={(projectId) => state.update("projectId", projectId)}
+        />
+      )}
       <div className="hidden border-b px-4 py-3 md:block">
-        <AzureDevOpsFilters {...filterProps} idSuffix="" compact />
+        {state.mode !== BOARD_MODE && <AzureDevOpsFilters {...filterProps} idSuffix="" compact />}
       </div>
       <BrowseResults state={state} />
-      <MobileFilters state={state} filterProps={filterProps} />
+      {state.mode !== BOARD_MODE && <MobileFilters state={state} filterProps={filterProps} />}
       <AzureDevOpsFeedbackDialog
         open={state.feedbackOpen}
         loading={state.feedback.loading}

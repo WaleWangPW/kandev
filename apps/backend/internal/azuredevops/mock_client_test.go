@@ -46,3 +46,36 @@ func TestMockClientPaginatesPullRequests(t *testing.T) {
 		t.Fatalf("items = %#v, want second pull request only", page.Items)
 	}
 }
+
+func TestMockClientBoardReads(t *testing.T) {
+	mock := NewMockClient()
+	mock.Seed(MockState{
+		Teams:          []Team{{ID: "team-1", Name: "Platform Team", ProjectID: "p1"}},
+		Boards:         []BoardReference{{ID: "board-1", Name: "Stories"}},
+		BoardSnapshots: map[string]BoardSnapshot{"board-1": {Board: Board{ID: "board-1"}, Items: []BoardWorkItem{{WorkItem: WorkItem{ID: 101}}}}},
+	})
+	teams, err := mock.ListTeams(t.Context(), "p1")
+	if err != nil || len(teams) != 1 {
+		t.Fatalf("teams = %+v, %v", teams, err)
+	}
+	boards, err := mock.ListBoards(t.Context(), "p1", "team-1")
+	if err != nil || len(boards) != 1 || boards[0].ID != "board-1" {
+		t.Fatalf("boards = %+v, %v", boards, err)
+	}
+	snapshot, err := mock.GetBoardSnapshot(t.Context(), "p1", "team-1", "board-1")
+	if err != nil || snapshot == nil || len(snapshot.Items) != 1 {
+		t.Fatalf("snapshot = %+v, %v", snapshot, err)
+	}
+}
+
+func TestMockClientUpdateBoardWorkItem(t *testing.T) {
+	mock := NewMockClient()
+	title := "Updated"
+	mock.Seed(MockState{
+		BoardSnapshots: map[string]BoardSnapshot{"board-1": {Board: Board{ID: "board-1"}, Items: []BoardWorkItem{{WorkItem: WorkItem{ID: 101, Revision: 7, Title: "Original"}}}}},
+	})
+	item, err := mock.UpdateBoardWorkItem(t.Context(), "p1", "team-1", "board-1", 101, BoardWorkItemUpdateRequest{Revision: 7, Title: &title})
+	if err != nil || item == nil || item.Title != "Updated" || item.Revision != 8 {
+		t.Fatalf("updated item = %+v, %v", item, err)
+	}
+}

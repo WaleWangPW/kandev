@@ -9,13 +9,16 @@ import (
 
 // MockState is the deterministic E2E data exposed by MockClient.
 type MockState struct {
-	Authenticated bool                        `json:"authenticated"`
-	User          TestConnectionResult        `json:"user"`
-	Projects      []Project                   `json:"projects"`
-	Repositories  []Repository                `json:"repositories"`
-	WorkItems     []WorkItem                  `json:"workItems"`
-	PullRequests  []PullRequest               `json:"pullRequests"`
-	Feedback      map[int]PullRequestFeedback `json:"feedback"`
+	Authenticated  bool                        `json:"authenticated"`
+	User           TestConnectionResult        `json:"user"`
+	Projects       []Project                   `json:"projects"`
+	Teams          []Team                      `json:"teams"`
+	Boards         []BoardReference            `json:"boards"`
+	BoardSnapshots map[string]BoardSnapshot    `json:"boardSnapshots"`
+	Repositories   []Repository                `json:"repositories"`
+	WorkItems      []WorkItem                  `json:"workItems"`
+	PullRequests   []PullRequest               `json:"pullRequests"`
+	Feedback       map[int]PullRequestFeedback `json:"feedback"`
 }
 
 // MockClient implements Client with in-memory state for browser tests.
@@ -35,6 +38,9 @@ func (c *MockClient) Seed(state MockState) {
 	defer c.mu.Unlock()
 	if state.Feedback == nil {
 		state.Feedback = make(map[int]PullRequestFeedback)
+	}
+	if state.BoardSnapshots == nil {
+		state.BoardSnapshots = make(map[string]BoardSnapshot)
 	}
 	c.state = state
 }
@@ -57,6 +63,83 @@ func (c *MockClient) TestAuth(context.Context) (*TestConnectionResult, error) {
 
 func (c *MockClient) ListProjects(context.Context) ([]Project, error) {
 	return c.snapshot().Projects, nil
+}
+
+func (c *MockClient) ListTeams(_ context.Context, projectID string) ([]Team, error) {
+	items := make([]Team, 0)
+	for _, team := range c.snapshot().Teams {
+		if projectID == "" || team.ProjectID == "" || team.ProjectID == projectID {
+			items = append(items, team)
+		}
+	}
+	return items, nil
+}
+
+func (c *MockClient) ListBoards(context.Context, string, string) ([]BoardReference, error) {
+	return c.snapshot().Boards, nil
+}
+
+func (c *MockClient) GetBoardSnapshot(_ context.Context, _, _, boardID string) (*BoardSnapshot, error) {
+	snapshot, ok := c.snapshot().BoardSnapshots[boardID]
+	if !ok {
+		return nil, fmt.Errorf("azure devops mock board %q not found", boardID)
+	}
+	copy := snapshot
+	return &copy, nil
+}
+
+func (c *MockClient) UpdateBoardWorkItem(_ context.Context, _, _, boardID string, id int, request BoardWorkItemUpdateRequest) (*BoardWorkItem, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	snapshot, ok := c.state.BoardSnapshots[boardID]
+	if !ok {
+		return nil, fmt.Errorf("azure devops mock board %q not found", boardID)
+	}
+	for index := range snapshot.Items {
+		item := &snapshot.Items[index]
+		if item.ID != id {
+			continue
+		}
+		if item.Revision != request.Revision {
+			return nil, &APIError{StatusCode: 409, Endpoint: "mock board update", Body: "revision conflict"}
+		}
+		if request.Title != nil {
+			item.Title = *request.Title
+		}
+		if request.AssignedTo != nil {
+			item.AssignedTo = *request.AssignedTo
+		}
+		if request.Tags != nil {
+			item.Tags = append([]string(nil), (*request.Tags)...)
+		}
+		if request.ColumnID != nil {
+			if item.Fields == nil {
+				item.Fields = make(map[string]any)
+			}
+			found := false
+			for _, column := range snapshot.Board.Columns {
+				if column.ID == *request.ColumnID {
+					item.ColumnID = column.ID
+					item.Fields[snapshot.Board.Fields.ColumnField.ReferenceName] = column.Name
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, fmt.Errorf("%w: unknown board column", ErrInvalidConfig)
+			}
+		}
+		if request.ColumnDone != nil {
+			item.ColumnDone = *request.ColumnDone
+			item.Fields[snapshot.Board.Fields.DoneField.ReferenceName] = *request.ColumnDone
+		}
+		item.Revision++
+		snapshot.Items[index] = *item
+		c.state.BoardSnapshots[boardID] = snapshot
+		copy := *item
+		return &copy, nil
+	}
+	return nil, mockNotFound("work item", id)
 }
 
 func (c *MockClient) ListRepositories(_ context.Context, projectID string) ([]Repository, error) {

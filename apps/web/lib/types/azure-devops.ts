@@ -75,9 +75,60 @@ export type AzureDevOpsWorkItem = {
   project?: string;
   areaPath?: string;
   assignedTo?: string;
+  tags?: string[];
   webUrl?: string;
   apiUrl?: string;
   fields?: Record<string, unknown>;
+};
+
+export type AzureDevOpsTeam = {
+  id: string;
+  name: string;
+  projectId: string;
+  projectName?: string;
+};
+
+export type AzureDevOpsBoardReference = { id: string; name: string };
+
+export type AzureDevOpsBoardColumn = {
+  id: string;
+  name: string;
+  columnType?: string;
+  description?: string;
+  isSplit?: boolean;
+  itemLimit?: number;
+  stateMappings?: Record<string, string>;
+};
+
+export type AzureDevOpsBoard = {
+  id: string;
+  name: string;
+  columns: AzureDevOpsBoardColumn[];
+  fields: {
+    columnField: { referenceName: string };
+    doneField: { referenceName: string };
+    rowField: { referenceName: string };
+  };
+  rows?: Array<{ id: string; name: string; color?: string }>;
+};
+
+export type AzureDevOpsBoardWorkItem = AzureDevOpsWorkItem & {
+  columnId: string;
+  columnDone: boolean;
+};
+
+export type AzureDevOpsBoardSnapshot = {
+  board: AzureDevOpsBoard;
+  items: AzureDevOpsBoardWorkItem[];
+};
+
+export type AzureDevOpsBoardWorkItemUpdate = {
+  revision: number;
+  title?: string;
+  assignedTo?: string;
+  tags?: string[];
+  columnId?: string;
+  columnDone?: boolean;
 };
 
 export type AzureDevOpsWorkItemSearchResult = {

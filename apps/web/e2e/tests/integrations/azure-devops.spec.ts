@@ -4,6 +4,40 @@ const MOCK_STATE = {
   authenticated: true,
   user: { ok: true, id: "user-1", displayName: "Ada Reviewer", email: "ada@example.com" },
   projects: [{ id: "project-1", name: "Platform", url: "https://dev.azure.com/acme/Platform" }],
+  teams: [{ id: "team-1", name: "Platform Team", projectId: "project-1", projectName: "Platform" }],
+  boards: [{ id: "board-1", name: "Stories" }],
+  boardSnapshots: {
+    "board-1": {
+      board: {
+        id: "board-1",
+        name: "Stories",
+        fields: {
+          columnField: { referenceName: "System.BoardColumn" },
+          doneField: { referenceName: "System.BoardColumnDone" },
+          rowField: { referenceName: "System.BoardRow" },
+        },
+        columns: [
+          { id: "todo", name: "To Do" },
+          { id: "active", name: "Active" },
+          { id: "done", name: "Done" },
+        ],
+      },
+      items: [
+        {
+          id: 101,
+          revision: 3,
+          title: "Handle token rotation",
+          state: "Active",
+          type: "User Story",
+          project: "project-1",
+          assignedTo: "Ada Reviewer",
+          tags: ["security"],
+          columnId: "todo",
+          columnDone: false,
+        },
+      ],
+    },
+  },
   repositories: [
     {
       id: "azure-repo-1",
@@ -108,7 +142,7 @@ test("connects and browses Azure work items, PRs, and feedback", async ({
     "https://dev.azure.com/acme/_usersSettings/tokens",
   );
   await expect(testPage.getByTestId("azure-devops-pat-help")).toContainText(
-    "Work Items, check Read",
+    "Work Items, check Read & write",
   );
   await expect(testPage.getByTestId("azure-devops-pat-help")).toContainText("Code, check Read");
   await testPage.getByTestId("azure-devops-pat").fill("azure-test-pat");
@@ -119,9 +153,18 @@ test("connects and browses Azure work items, PRs, and feedback", async ({
   await testPage.getByTestId("azure-devops-save-button").click();
 
   await testPage.goto("/azure-devops");
+  await expect(testPage.getByTestId("azure-devops-board")).toBeVisible();
   await expect(testPage.getByText("Handle token rotation")).toBeVisible();
 
-  await testPage.getByRole("button", { name: "Pull requests" }).click();
+  await testPage.getByTestId("azure-board-card-101").click();
+  await testPage.getByLabel("Title").fill("Handle token rotation safely");
+  await testPage.getByRole("button", { name: "Save changes" }).click();
+  await expect(testPage.getByText("Handle token rotation safely")).toBeVisible();
+
+  await testPage.getByTestId("azure-devops-work-items-mode").click();
+  await testPage.getByTestId("azure-devops-search-button").click();
+  await expect(testPage.getByText("Handle token rotation")).toBeVisible();
+  await testPage.getByTestId("azure-devops-pull-requests-mode").click();
   await testPage.getByTestId("azure-devops-search-button").click();
   await expect(testPage.getByText("Rotate integration credentials")).toBeVisible();
   await testPage.getByRole("button", { name: "Feedback" }).click();

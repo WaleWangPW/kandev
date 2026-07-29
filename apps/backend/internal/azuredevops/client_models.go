@@ -46,6 +46,7 @@ type WorkItem struct {
 	Project     string         `json:"project,omitempty"`
 	AreaPath    string         `json:"areaPath,omitempty"`
 	AssignedTo  string         `json:"assignedTo,omitempty"`
+	Tags        []string       `json:"tags,omitempty"`
 	WebURL      string         `json:"webUrl,omitempty"`
 	APIURL      string         `json:"apiUrl,omitempty"`
 	Fields      map[string]any `json:"fields,omitempty"`

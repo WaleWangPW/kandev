@@ -4,6 +4,38 @@ const MOCK_STATE = {
   authenticated: true,
   user: { ok: true, id: "user-1", displayName: "Ada Reviewer" },
   projects: [{ id: "project-1", name: "Platform", url: "https://dev.azure.com/acme/Platform" }],
+  teams: [{ id: "team-1", name: "Platform Team", projectId: "project-1", projectName: "Platform" }],
+  boards: [{ id: "board-1", name: "Stories" }],
+  boardSnapshots: {
+    "board-1": {
+      board: {
+        id: "board-1",
+        name: "Stories",
+        fields: {
+          columnField: { referenceName: "System.BoardColumn" },
+          doneField: { referenceName: "System.BoardColumnDone" },
+          rowField: { referenceName: "System.BoardRow" },
+        },
+        columns: [
+          { id: "todo", name: "To Do" },
+          { id: "active", name: "Active" },
+          { id: "done", name: "Done" },
+        ],
+      },
+      items: [
+        {
+          id: 101,
+          revision: 3,
+          title: "Handle token rotation",
+          state: "Active",
+          type: "User Story",
+          project: "project-1",
+          columnId: "todo",
+          columnDone: false,
+        },
+      ],
+    },
+  },
   repositories: [
     {
       id: "azure-repo-1",
@@ -102,7 +134,7 @@ test("mobile settings explain PAT scopes and link to the organization token page
   expect(viewportFits).toBe(true);
 });
 
-test("mobile filters expose both Azure browse modes without horizontal overflow", async ({
+test("mobile board opens a focused column editor without horizontal overflow", async ({
   apiClient,
   seedData,
   testPage,
@@ -114,12 +146,16 @@ test("mobile filters expose both Azure browse modes without horizontal overflow"
   });
   await testPage.goto("/azure-devops");
 
+  await expect(testPage.getByTestId("azure-devops-board")).toBeVisible();
   await expect(testPage.getByText("Handle token rotation")).toBeVisible();
-  await testPage.getByTestId("azure-devops-mobile-filter-button").click();
-  await expect(testPage.getByTestId("azure-devops-search-button-mobile")).toBeVisible();
-  await testPage.getByTestId("azure-devops-search-button-mobile").click();
+  await testPage.getByTestId("azure-board-card-101").click();
+  await expect(testPage.getByRole("heading", { name: /Edit work item/ })).toBeVisible();
+  await testPage.getByRole("button", { name: "Close" }).click();
 
-  await testPage.getByRole("button", { name: "Pull requests" }).click();
+  await testPage.getByTestId("azure-devops-work-items-mode").click();
+  await testPage.getByTestId("azure-devops-mobile-filter-button").click();
+  await testPage.getByTestId("azure-devops-search-button-mobile").click();
+  await testPage.getByTestId("azure-devops-pull-requests-mode").click();
   await testPage.getByTestId("azure-devops-mobile-filter-button").click();
   await testPage.getByTestId("azure-devops-search-button-mobile").click();
   await expect(testPage.getByText("Rotate integration credentials")).toBeVisible();

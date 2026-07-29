@@ -21,6 +21,10 @@ type fakeReadClient struct {
 	threads    []Thread
 	refs       []WorkItemRef
 	policies   []PolicyEvaluation
+	teams      []Team
+	boards     []BoardReference
+	snapshot   *BoardSnapshot
+	updated    *BoardWorkItem
 	lastFilter PullRequestFilter
 }
 
@@ -32,7 +36,20 @@ func (f *fakeReadClient) ListPullRequests(_ context.Context, filter PullRequestF
 func (f *fakeReadClient) TestAuth(context.Context) (*TestConnectionResult, error) {
 	return &TestConnectionResult{OK: true, ID: "me", DisplayName: "Ada"}, nil
 }
-func (f *fakeReadClient) ListProjects(context.Context) ([]Project, error) { return f.projects, nil }
+func (f *fakeReadClient) ListProjects(context.Context) ([]Project, error)   { return f.projects, nil }
+func (f *fakeReadClient) ListTeams(context.Context, string) ([]Team, error) { return f.teams, nil }
+func (f *fakeReadClient) ListBoards(context.Context, string, string) ([]BoardReference, error) {
+	return f.boards, nil
+}
+func (f *fakeReadClient) GetBoardSnapshot(context.Context, string, string, string) (*BoardSnapshot, error) {
+	return f.snapshot, nil
+}
+func (f *fakeReadClient) UpdateBoardWorkItem(context.Context, string, string, string, int, BoardWorkItemUpdateRequest) (*BoardWorkItem, error) {
+	if f.updated != nil {
+		return f.updated, nil
+	}
+	return &BoardWorkItem{WorkItem: WorkItem{ID: 101, Revision: 8, Title: "Updated"}}, nil
+}
 func (f *fakeReadClient) QueryWIQL(context.Context, string, string, int) (*WorkItemSearchResult, error) {
 	return f.work, nil
 }
@@ -68,6 +85,10 @@ func newControllerFixture(t *testing.T) (*gin.Engine, *Service) {
 		threads:   []Thread{{ID: 7, Status: "active"}},
 		refs:      []WorkItemRef{{ID: 101}},
 		policies:  []PolicyEvaluation{{ID: "p1", Status: "approved", IsBlocking: true}},
+		teams:     []Team{{ID: "team-1", Name: "Platform Team", ProjectID: "project-1"}},
+		boards:    []BoardReference{{ID: "board-1", Name: "Stories"}},
+		snapshot:  &BoardSnapshot{Board: Board{ID: "board-1", Name: "Stories"}, Items: []BoardWorkItem{{WorkItem: WorkItem{ID: 101, Title: "Fix build"}}}},
+		updated:   &BoardWorkItem{WorkItem: WorkItem{ID: 101, Revision: 8, Title: "Updated"}},
 	}
 	service := NewService(store, newFakeSecretStore(), func(*Config, string) Client { return client }, logger.Default())
 	if _, err := service.SetConfigForWorkspace(context.Background(), "ws-1", &SetConfigRequest{
@@ -78,6 +99,32 @@ func newControllerFixture(t *testing.T) (*gin.Engine, *Service) {
 	router := gin.New()
 	RegisterRoutes(router, service, logger.Default())
 	return router, service
+}
+
+func TestControllerBoardReads(t *testing.T) {
+	router, _ := newControllerFixture(t)
+	teams := performRequest(t, router, http.MethodGet, "/api/v1/azure-devops/teams?workspace_id=ws-1&project=project-1", nil)
+	if teams.Code != http.StatusOK || !bytes.Contains(teams.Body.Bytes(), []byte("Platform Team")) {
+		t.Fatalf("teams response %d: %s", teams.Code, teams.Body.String())
+	}
+	boards := performRequest(t, router, http.MethodGet, "/api/v1/azure-devops/boards?workspace_id=ws-1&project=project-1&team=team-1", nil)
+	if boards.Code != http.StatusOK || !bytes.Contains(boards.Body.Bytes(), []byte("Stories")) {
+		t.Fatalf("boards response %d: %s", boards.Code, boards.Body.String())
+	}
+	snapshot := performRequest(t, router, http.MethodGet, "/api/v1/azure-devops/boards/board-1?workspace_id=ws-1&project=project-1&team=team-1", nil)
+	if snapshot.Code != http.StatusOK || !bytes.Contains(snapshot.Body.Bytes(), []byte("Fix build")) {
+		t.Fatalf("snapshot response %d: %s", snapshot.Code, snapshot.Body.String())
+	}
+}
+
+func TestControllerUpdateBoardWorkItem(t *testing.T) {
+	router, _ := newControllerFixture(t)
+	updated := performRequest(t, router, http.MethodPatch, "/api/v1/azure-devops/boards/board-1/work-items/101?workspace_id=ws-1&project=project-1&team=team-1", map[string]any{
+		"revision": 7, "title": "Updated",
+	})
+	if updated.Code != http.StatusOK || !bytes.Contains(updated.Body.Bytes(), []byte("Updated")) {
+		t.Fatalf("updated response %d: %s", updated.Code, updated.Body.String())
+	}
 }
 
 func TestControllerConfigAndWorkspaceScopedReads(t *testing.T) {

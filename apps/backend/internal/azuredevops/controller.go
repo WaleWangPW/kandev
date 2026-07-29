@@ -29,6 +29,10 @@ func RegisterRoutes(router *gin.Engine, service *Service, log *logger.Logger) {
 	api.GET("/views", controller.getSavedViews)
 	api.PUT("/views", controller.setSavedViews)
 	api.GET("/projects", controller.listProjects)
+	api.GET("/teams", controller.listTeams)
+	api.GET("/boards", controller.listBoards)
+	api.GET("/boards/:boardId", controller.getBoardSnapshot)
+	api.PATCH("/boards/:boardId/work-items/:id", controller.updateBoardWorkItem)
 	api.GET("/repositories", controller.listRepositories)
 	api.GET("/branches", controller.listBranches)
 	api.POST("/work-items/search", controller.searchWorkItems)
@@ -142,6 +146,52 @@ func (c *Controller) listProjects(ctx *gin.Context) {
 		return
 	}
 	ctx.JSON(http.StatusOK, gin.H{"projects": projects})
+}
+
+func (c *Controller) listTeams(ctx *gin.Context) {
+	teams, err := c.service.ListTeamsForWorkspace(ctx.Request.Context(), workspaceID(ctx), ctx.Query("project"))
+	if err != nil {
+		c.writeError(ctx, err)
+		return
+	}
+	ctx.JSON(http.StatusOK, gin.H{"teams": teams})
+}
+
+func (c *Controller) listBoards(ctx *gin.Context) {
+	boards, err := c.service.ListBoardsForWorkspace(ctx.Request.Context(), workspaceID(ctx), ctx.Query("project"), ctx.Query("team"))
+	if err != nil {
+		c.writeError(ctx, err)
+		return
+	}
+	ctx.JSON(http.StatusOK, gin.H{"boards": boards})
+}
+
+func (c *Controller) getBoardSnapshot(ctx *gin.Context) {
+	snapshot, err := c.service.GetBoardSnapshotForWorkspace(ctx.Request.Context(), workspaceID(ctx), ctx.Query("project"), ctx.Query("team"), ctx.Param("boardId"))
+	if err != nil {
+		c.writeError(ctx, err)
+		return
+	}
+	ctx.JSON(http.StatusOK, snapshot)
+}
+
+func (c *Controller) updateBoardWorkItem(ctx *gin.Context) {
+	id, err := strconv.Atoi(ctx.Param("id"))
+	if err != nil || id <= 0 {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid work item id"})
+		return
+	}
+	var request BoardWorkItemUpdateRequest
+	if err := ctx.ShouldBindJSON(&request); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+		return
+	}
+	item, err := c.service.UpdateBoardWorkItemForWorkspace(ctx.Request.Context(), workspaceID(ctx), ctx.Query("project"), ctx.Query("team"), ctx.Param("boardId"), id, request)
+	if err != nil {
+		c.writeError(ctx, err)
+		return
+	}
+	ctx.JSON(http.StatusOK, item)
 }
 
 func (c *Controller) listRepositories(ctx *gin.Context) {
@@ -298,7 +348,11 @@ func (c *Controller) writeError(ctx *gin.Context, err error) {
 	default:
 		var apiErr *APIError
 		if errors.As(err, &apiErr) {
-			status = upstreamStatus(apiErr.StatusCode)
+			if apiErr.StatusCode == http.StatusConflict {
+				status, code = http.StatusConflict, "azure_devops_revision_conflict"
+			} else {
+				status = upstreamStatus(apiErr.StatusCode)
+			}
 		}
 	}
 	body := gin.H{"error": err.Error()}
