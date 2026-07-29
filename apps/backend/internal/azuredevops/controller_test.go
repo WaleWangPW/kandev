@@ -25,6 +25,9 @@ type fakeReadClient struct {
 	boards     []BoardReference
 	snapshot   *BoardSnapshot
 	updated    *BoardWorkItem
+	detail     *WorkItemDetail
+	comments   *WorkItemCommentPage
+	identity   *Identity
 	lastFilter PullRequestFilter
 }
 
@@ -52,6 +55,15 @@ func (f *fakeReadClient) UpdateBoardWorkItem(context.Context, string, string, st
 }
 func (f *fakeReadClient) QueryWIQL(context.Context, string, string, int) (*WorkItemSearchResult, error) {
 	return f.work, nil
+}
+func (f *fakeReadClient) GetWorkItemDetail(context.Context, string, int) (*WorkItemDetail, error) {
+	return f.detail, nil
+}
+func (f *fakeReadClient) ListWorkItemComments(context.Context, string, int, string) (*WorkItemCommentPage, error) {
+	return f.comments, nil
+}
+func (f *fakeReadClient) GetCurrentIdentity(context.Context) (*Identity, error) {
+	return f.identity, nil
 }
 func (f *fakeReadClient) GetPullRequest(context.Context, string, string, int) (*PullRequest, error) {
 	return f.pr, nil
@@ -89,6 +101,9 @@ func newControllerFixture(t *testing.T) (*gin.Engine, *Service) {
 		boards:    []BoardReference{{ID: "board-1", Name: "Stories"}},
 		snapshot:  &BoardSnapshot{Board: Board{ID: "board-1", Name: "Stories"}, Items: []BoardWorkItem{{WorkItem: WorkItem{ID: 101, Title: "Fix build"}}}},
 		updated:   &BoardWorkItem{WorkItem: WorkItem{ID: 101, Revision: 8, Title: "Updated"}},
+		detail:    &WorkItemDetail{WorkItem: WorkItem{ID: 101, Revision: 8, Title: "Fix build", Description: "Useful detail"}},
+		comments:  &WorkItemCommentPage{Comments: []WorkItemComment{{ID: 9, Content: "Looks good"}}},
+		identity:  &Identity{ID: "me", DisplayName: "Ada"},
 	}
 	service := NewService(store, newFakeSecretStore(), func(*Config, string) Client { return client }, logger.Default())
 	if _, err := service.SetConfigForWorkspace(context.Background(), "ws-1", &SetConfigRequest{
@@ -99,6 +114,30 @@ func newControllerFixture(t *testing.T) (*gin.Engine, *Service) {
 	router := gin.New()
 	RegisterRoutes(router, service, logger.Default())
 	return router, service
+}
+
+func TestControllerGetWorkItemDetail(t *testing.T) {
+	router, _ := newControllerFixture(t)
+	response := performRequest(t, router, http.MethodGet, "/api/v1/azure-devops/work-items/101?workspace_id=ws-1&project=project-1", nil)
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte("Useful detail")) {
+		t.Fatalf("detail response %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestControllerListWorkItemComments(t *testing.T) {
+	router, _ := newControllerFixture(t)
+	response := performRequest(t, router, http.MethodGet, "/api/v1/azure-devops/work-items/101/comments?workspace_id=ws-1&project=project-1&continuation_token=opaque", nil)
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte("Looks good")) {
+		t.Fatalf("comments response %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestControllerGetIdentity(t *testing.T) {
+	router, _ := newControllerFixture(t)
+	response := performRequest(t, router, http.MethodGet, "/api/v1/azure-devops/identity?workspace_id=ws-1", nil)
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte("Ada")) {
+		t.Fatalf("identity response %d: %s", response.Code, response.Body.String())
+	}
 }
 
 func TestControllerBoardReads(t *testing.T) {
@@ -119,11 +158,28 @@ func TestControllerBoardReads(t *testing.T) {
 
 func TestControllerUpdateBoardWorkItem(t *testing.T) {
 	router, _ := newControllerFixture(t)
+	columnID := "column-active"
 	updated := performRequest(t, router, http.MethodPatch, "/api/v1/azure-devops/boards/board-1/work-items/101?workspace_id=ws-1&project=project-1&team=team-1", map[string]any{
-		"revision": 7, "title": "Updated",
+		"revision": 7, "columnId": columnID,
 	})
 	if updated.Code != http.StatusOK || !bytes.Contains(updated.Body.Bytes(), []byte("Updated")) {
 		t.Fatalf("updated response %d: %s", updated.Code, updated.Body.String())
+	}
+}
+
+func TestControllerRejectsUnsupportedBoardWorkItemFields(t *testing.T) {
+	router, _ := newControllerFixture(t)
+	updated := performRequest(t, router, http.MethodPatch, "/api/v1/azure-devops/boards/board-1/work-items/101?workspace_id=ws-1&project=project-1&team=team-1", map[string]any{
+		"revision": 7, "title": "Cannot edit",
+	})
+	if updated.Code != http.StatusBadRequest {
+		t.Fatalf("updated response %d: %s", updated.Code, updated.Body.String())
+	}
+	unknown := performRequest(t, router, http.MethodPatch, "/api/v1/azure-devops/boards/board-1/work-items/101?workspace_id=ws-1&project=project-1&team=team-1", map[string]any{
+		"revision": 7, "columnId": "column-active", "description": "Cannot edit",
+	})
+	if unknown.Code != http.StatusBadRequest {
+		t.Fatalf("unknown-field response %d: %s", unknown.Code, unknown.Body.String())
 	}
 }
 

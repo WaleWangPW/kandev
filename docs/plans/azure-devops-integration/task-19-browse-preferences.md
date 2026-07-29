@@ -1,7 +1,7 @@
 ---
 id: "19-browse-preferences"
 title: "Portable Azure browse preferences"
-status: pending
+status: done
 wave: 11
 depends_on: []
 plan: "plan.md"

@@ -2,7 +2,7 @@
 
 import Link from "@/components/routing/app-link";
 import { useCallback, useEffect, useRef, useState, type ComponentProps } from "react";
-import { IconAdjustments, IconChevronLeft, IconChevronRight } from "@tabler/icons-react";
+import { IconAdjustments } from "@tabler/icons-react";
 import { Alert, AlertDescription } from "@kandev/ui/alert";
 import { Button } from "@kandev/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@kandev/ui/sheet";
@@ -28,6 +28,7 @@ import {
 } from "@/components/azure-devops/azure-devops-scope-bar";
 import { AzureDevOpsSaveViewDialog } from "@/components/azure-devops/azure-devops-save-view-dialog";
 import { AzureDevOpsBoard } from "@/components/azure-devops/azure-devops-board";
+import { AzureDevOpsPullRequestPagination } from "@/components/azure-devops/azure-devops-pull-request-pagination";
 import { AzureDevOpsModeTabs } from "@/components/azure-devops/azure-devops-mode-tabs";
 import { presetsForKind } from "@/components/azure-devops/azure-devops-presets";
 import {
@@ -41,6 +42,7 @@ import {
   useAzureDevOpsRepositories,
 } from "@/hooks/domains/azure-devops/use-azure-devops-projects";
 import { useAzureDevOpsSavedViews } from "@/hooks/domains/azure-devops/use-azure-devops-saved-views";
+import { useAzureDevOpsPagePreferences } from "@/hooks/domains/azure-devops/use-azure-devops-preferences";
 import type { Repository, Workflow, WorkflowStep } from "@/lib/types/http";
 import type { AzureDevOpsPullRequest, AzureDevOpsSavedView } from "@/lib/types/azure-devops";
 
@@ -116,51 +118,6 @@ function ResultHeader({
     <div className="flex min-h-12 items-center justify-between border-b px-4">
       <h2 className="text-sm font-semibold">{resultLabel(mode)}</h2>
       <span className="text-xs text-muted-foreground">{count} results</span>
-    </div>
-  );
-}
-
-function PullRequestPagination({
-  skip,
-  count,
-  loading,
-  onPage,
-}: {
-  skip: number;
-  count: number;
-  loading: boolean;
-  onPage: (skip: number) => void;
-}) {
-  if (skip === 0 && count < PAGE_SIZE) return null;
-  return (
-    <div className="flex items-center justify-between border-t px-4 py-2">
-      <span className="text-xs text-muted-foreground">
-        {count === 0 ? 0 : skip + 1}-{skip + count}
-      </span>
-      <div className="flex gap-1">
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          onClick={() => onPage(Math.max(0, skip - PAGE_SIZE))}
-          disabled={loading || skip === 0}
-          className="cursor-pointer"
-          aria-label="Previous pull request page"
-        >
-          <IconChevronLeft className="h-4 w-4" />
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          onClick={() => onPage(skip + PAGE_SIZE)}
-          disabled={loading || count < PAGE_SIZE}
-          className="cursor-pointer"
-          aria-label="Next pull request page"
-        >
-          <IconChevronRight className="h-4 w-4" />
-        </Button>
-      </div>
     </div>
   );
 }
@@ -246,16 +203,19 @@ function useInitialAzureSearch({
   filters,
   mode,
   runSearch,
+  ready,
 }: {
   connection: ReturnType<typeof useAzureDevOpsConnection>;
   filters: AzureDevOpsFiltersState;
   mode: AzureDevOpsBrowseMode;
   runSearch: RunAzureSearch;
+  ready: boolean;
 }) {
   const searchedWorkspace = useRef("");
   const connectedWorkspaceId = connection.data?.hasSecret ? connection.data.workspaceId : undefined;
   useEffect(() => {
     if (
+      !ready ||
       !connectedWorkspaceId ||
       !filters.projectId ||
       mode === BOARD_MODE ||
@@ -265,7 +225,7 @@ function useInitialAzureSearch({
     }
     searchedWorkspace.current = connectedWorkspaceId;
     runSearch(0);
-  }, [connectedWorkspaceId, filters.projectId, mode, runSearch]);
+  }, [connectedWorkspaceId, filters.projectId, mode, ready, runSearch]);
 }
 
 function useAzureScopeControls({
@@ -349,26 +309,22 @@ function useAzureSavedViewControls({
   return { saveViewOpen, setSaveViewOpen, canSaveCurrent, saveCurrentView };
 }
 
-function useAzureDevOpsPageState(workspaceId?: string) {
-  const [mode, setMode] = useState<AzureDevOpsBrowseMode>(BOARD_MODE);
-  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
-  const [launchPayload, setLaunchPayload] = useState<AzureDevOpsLaunchPayload | null>(null);
-  const [feedbackOpen, setFeedbackOpen] = useState(false);
-  const [skip, setSkip] = useState(0);
-  const connection = useAzureDevOpsConnection(workspaceId);
-  const projectList = useAzureDevOpsProjects(workspaceId ?? "", !!connection.data?.hasSecret);
-  const { filters, update, replace } = useBrowseFilters(
-    connection.data?.defaultProjectId || projectList.data[0]?.id,
-  );
-  const repositoryList = useAzureDevOpsRepositories(workspaceId ?? "", filters.projectId);
-  const workItems = useAzureDevOpsWorkItemSearch(workspaceId);
-  const pullRequests = useAzureDevOpsPullRequestSearch(workspaceId);
-  const feedback = useAzureDevOpsPullRequestFeedback(workspaceId);
-  const savedViews = useAzureDevOpsSavedViews(workspaceId);
-
-  useDefaultAzureRepository(filters.repositoryId, repositoryList.data, update);
-
-  const runSearch = useCallback(
+function useAzureSearch({
+  mode,
+  filters,
+  workItems,
+  pullRequests,
+  setSkip,
+  setMobileFiltersOpen,
+}: {
+  mode: AzureDevOpsBrowseMode;
+  filters: AzureDevOpsFiltersState;
+  workItems: ReturnType<typeof useAzureDevOpsWorkItemSearch>;
+  pullRequests: ReturnType<typeof useAzureDevOpsPullRequestSearch>;
+  setSkip: (skip: number) => void;
+  setMobileFiltersOpen: (open: boolean) => void;
+}) {
+  return useCallback(
     (
       nextSkip: number = 0,
       override?: { mode: AzureDevOpsBrowseMode; filters: AzureDevOpsFiltersState },
@@ -396,10 +352,37 @@ function useAzureDevOpsPageState(workspaceId?: string) {
         top: PAGE_SIZE,
       });
     },
-    [filters, mode, pullRequests, workItems],
+    [filters, mode, pullRequests, setMobileFiltersOpen, setSkip, workItems],
   );
+}
 
-  useInitialAzureSearch({ connection, filters, mode, runSearch });
+function useAzureDevOpsPageState(workspaceId?: string) {
+  const [mode, setMode] = useState<AzureDevOpsBrowseMode>(BOARD_MODE);
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
+  const [launchPayload, setLaunchPayload] = useState<AzureDevOpsLaunchPayload | null>(null);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [skip, setSkip] = useState(0);
+  const connection = useAzureDevOpsConnection(workspaceId);
+  const projectList = useAzureDevOpsProjects(workspaceId ?? "", !!connection.data?.hasSecret);
+  const { filters, update, replace } = useBrowseFilters(
+    connection.data?.defaultProjectId || projectList.data[0]?.id,
+  );
+  const repositoryList = useAzureDevOpsRepositories(workspaceId ?? "", filters.projectId);
+  const workItems = useAzureDevOpsWorkItemSearch(workspaceId);
+  const pullRequests = useAzureDevOpsPullRequestSearch(workspaceId);
+  const feedback = useAzureDevOpsPullRequestFeedback(workspaceId);
+  const savedViews = useAzureDevOpsSavedViews(workspaceId);
+
+  useDefaultAzureRepository(filters.repositoryId, repositoryList.data, update);
+
+  const runSearch = useAzureSearch({
+    mode,
+    filters,
+    workItems,
+    pullRequests,
+    setSkip,
+    setMobileFiltersOpen,
+  });
 
   const openFeedback = (pullRequest: AzureDevOpsPullRequest) =>
     openAzureDevOpsFeedback(feedback, setFeedbackOpen, pullRequest);
@@ -417,6 +400,24 @@ function useAzureDevOpsPageState(workspaceId?: string) {
     filters,
     savedViews,
     setSelection: scope.setSelection,
+  });
+
+  const pagePreferences = useAzureDevOpsPagePreferences(workspaceId, {
+    mode,
+    setMode,
+    filters,
+    replaceFilters: replace,
+    selection: scope.selection,
+    setSelection: scope.setSelection,
+    defaultFilters: DEFAULT_FILTERS,
+  });
+
+  useInitialAzureSearch({
+    connection,
+    filters,
+    mode,
+    runSearch,
+    ready: pagePreferences.hydrated,
   });
 
   const updateFromUI = useCallback(
@@ -454,6 +455,9 @@ function useAzureDevOpsPageState(workspaceId?: string) {
     savedViews,
     canSaveCurrent: savedViewControls.canSaveCurrent,
     saveCurrentView: savedViewControls.saveCurrentView,
+    preferencesLoaded: pagePreferences.hydrated,
+    boardPreference: pagePreferences.board,
+    setBoardPreference: pagePreferences.setBoard,
   };
 }
 
@@ -498,10 +502,11 @@ function BrowseResults({ state }: { state: PageState }) {
         )}
       </div>
       {state.mode === PULL_REQUESTS_MODE && (
-        <PullRequestPagination
+        <AzureDevOpsPullRequestPagination
           skip={state.skip}
           count={state.pullRequests.data.length}
           loading={state.pullRequests.loading}
+          pageSize={PAGE_SIZE}
           onPage={state.runSearch}
         />
       )}
@@ -531,6 +536,7 @@ function MobileFilters({
 function AzureDevOpsPageContent({ workspaceId, workflows, steps, repositories }: PageProps) {
   const state = useAzureDevOpsPageState(workspaceId);
 
+  if (!state.preferencesLoaded) return null;
   if (state.connection.loading) return null;
   if (!state.connection.data?.hasSecret) return <NotConfigured workspaceId={workspaceId} />;
 
@@ -581,6 +587,8 @@ function AzureDevOpsPageContent({ workspaceId, workflows, steps, repositories }:
           projectId={state.filters.projectId}
           projects={state.projectList.data}
           onProjectChange={(projectId) => state.update("projectId", projectId)}
+          initialPreference={state.boardPreference}
+          onPreferenceChange={state.setBoardPreference}
         />
       )}
       <div className="hidden border-b px-4 py-3 md:block">

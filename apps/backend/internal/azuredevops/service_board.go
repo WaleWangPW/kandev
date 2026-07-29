@@ -2,6 +2,7 @@ package azuredevops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -55,8 +56,8 @@ func (s *Service) UpdateBoardWorkItemForWorkspace(ctx context.Context, workspace
 	if strings.TrimSpace(projectID) == "" || strings.TrimSpace(teamID) == "" || strings.TrimSpace(boardID) == "" || id <= 0 {
 		return nil, fmt.Errorf("%w: project, team, board, and positive work item id required", ErrInvalidConfig)
 	}
-	if request.Revision <= 0 {
-		return nil, fmt.Errorf("%w: revision required", ErrInvalidConfig)
+	if err := validateBoardWorkItemUpdate(request); err != nil {
+		return nil, err
 	}
 	client, err := s.clientForWorkspace(ctx, workspaceID)
 	if err != nil {
@@ -66,5 +67,43 @@ func (s *Service) UpdateBoardWorkItemForWorkspace(ctx context.Context, workspace
 	if !ok {
 		return nil, fmt.Errorf("%w: board updates are unavailable", ErrNotConfigured)
 	}
+	if request.AssigneeAction != nil {
+		switch *request.AssigneeAction {
+		case unassignAction:
+			request.hasResolvedAssignee = true
+		case assignCurrentUserAction:
+			identityReader, available := client.(interface {
+				GetCurrentIdentity(context.Context) (*Identity, error)
+			})
+			if !available {
+				return nil, errors.New("azure devops: current identity is unavailable")
+			}
+			identity, identityErr := identityReader.GetCurrentIdentity(ctx)
+			if identityErr != nil {
+				return nil, identityErr
+			}
+			assignee := strings.TrimSpace(identity.UniqueName)
+			if assignee == "" {
+				assignee = strings.TrimSpace(identity.DisplayName)
+			}
+			if assignee == "" {
+				return nil, errors.New("azure devops: current identity has no assignable name")
+			}
+			request.resolvedAssignee, request.hasResolvedAssignee = assignee, true
+		}
+	}
 	return writer.UpdateBoardWorkItem(ctx, projectID, teamID, boardID, id, request)
+}
+
+func validateBoardWorkItemUpdate(request BoardWorkItemUpdateRequest) error {
+	if request.Revision <= 0 {
+		return fmt.Errorf("%w: revision required", ErrInvalidConfig)
+	}
+	if request.AssigneeAction != nil && *request.AssigneeAction != assignCurrentUserAction && *request.AssigneeAction != unassignAction {
+		return fmt.Errorf("%w: unsupported assignee action", ErrInvalidConfig)
+	}
+	if request.AssigneeAction == nil && request.ColumnID == nil && request.ColumnDone == nil {
+		return fmt.Errorf("%w: an assignee action, column, or split state is required", ErrInvalidConfig)
+	}
+	return nil
 }

@@ -2,6 +2,11 @@ package azuredevops
 
 import "context"
 
+const (
+	assignCurrentUserAction = "assign_current_user"
+	unassignAction          = "unassign"
+)
+
 // Team is an Azure DevOps team that owns one or more boards.
 type Team struct {
 	ID          string `json:"id"`
@@ -71,12 +76,13 @@ type BoardReader interface {
 }
 
 type BoardWorkItemUpdateRequest struct {
-	Revision   int       `json:"revision"`
-	Title      *string   `json:"title,omitempty"`
-	AssignedTo *string   `json:"assignedTo,omitempty"`
-	Tags       *[]string `json:"tags,omitempty"`
-	ColumnID   *string   `json:"columnId,omitempty"`
-	ColumnDone *bool     `json:"columnDone,omitempty"`
+	Revision       int     `json:"revision"`
+	AssigneeAction *string `json:"assigneeAction,omitempty"`
+	ColumnID       *string `json:"columnId,omitempty"`
+	ColumnDone     *bool   `json:"columnDone,omitempty"`
+
+	resolvedAssignee    string
+	hasResolvedAssignee bool
 }
 
 type BoardWriter interface {

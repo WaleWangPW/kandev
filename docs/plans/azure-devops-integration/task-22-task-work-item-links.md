@@ -1,7 +1,7 @@
 ---
 id: "22-task-work-item-links"
 title: "Task work-item associations"
-status: pending
+status: in_progress
 wave: 11
 depends_on: ["20-work-item-detail"]
 plan: "plan.md"

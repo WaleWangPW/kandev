@@ -144,6 +144,20 @@ describe("buildCoreFields", () => {
   });
 });
 
+describe("Azure DevOps browse preferences", () => {
+  it("maps portable workspace preferences", () => {
+    const preferences = { "workspace-a": { mode: "board", projectId: "project-a" } };
+    const settings = {
+      azure_devops_browse_preferences: preferences,
+    } as unknown as Parameters<typeof buildCoreFields>[0];
+
+    expect(
+      (buildCoreFields(settings) as unknown as { azureDevOpsBrowsePreferences?: unknown })
+        .azureDevOpsBrowsePreferences,
+    ).toEqual(preferences);
+  });
+});
+
 describe("buildTerminalFields via buildCoreFields", () => {
   it("maps terminal_font_size to terminalFontSize", () => {
     const settings = {

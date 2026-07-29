@@ -2,6 +2,7 @@ package azuredevops
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -36,7 +37,11 @@ func RegisterRoutes(router *gin.Engine, service *Service, log *logger.Logger) {
 	api.GET("/repositories", controller.listRepositories)
 	api.GET("/branches", controller.listBranches)
 	api.POST("/work-items/search", controller.searchWorkItems)
+	api.GET("/work-items/:id/comments", controller.listWorkItemComments)
 	api.GET("/work-items/:id", controller.getWorkItem)
+	api.GET("/identity", controller.getIdentity)
+	api.GET("/workspaces/:workspaceId/task-work-items", controller.listWorkspaceTaskWorkItems)
+	api.POST("/tasks/:taskId/work-items", controller.associateTaskWorkItem)
 	api.GET("/pull-requests", controller.listPullRequests)
 	api.GET("/pull-requests/:projectId/:repositoryId/:pullRequestId", controller.getPullRequest)
 	api.GET("/pull-requests/:projectId/:repositoryId/:pullRequestId/feedback", controller.getPullRequestFeedback)
@@ -182,7 +187,9 @@ func (c *Controller) updateBoardWorkItem(ctx *gin.Context) {
 		return
 	}
 	var request BoardWorkItemUpdateRequest
-	if err := ctx.ShouldBindJSON(&request); err != nil {
+	decoder := json.NewDecoder(ctx.Request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
 		return
 	}
@@ -243,7 +250,7 @@ func (c *Controller) getWorkItem(ctx *gin.Context) {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid work item id"})
 		return
 	}
-	item, err := c.service.GetWorkItemForWorkspace(
+	item, err := c.service.GetWorkItemDetailForWorkspace(
 		ctx.Request.Context(), workspaceID(ctx), ctx.Query("project"), id,
 	)
 	if err != nil {
@@ -251,6 +258,31 @@ func (c *Controller) getWorkItem(ctx *gin.Context) {
 		return
 	}
 	ctx.JSON(http.StatusOK, item)
+}
+
+func (c *Controller) listWorkItemComments(ctx *gin.Context) {
+	id, err := strconv.Atoi(ctx.Param("id"))
+	if err != nil || id <= 0 {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid work item id"})
+		return
+	}
+	page, err := c.service.ListWorkItemCommentsForWorkspace(
+		ctx.Request.Context(), workspaceID(ctx), ctx.Query("project"), id, ctx.Query("continuation_token"),
+	)
+	if err != nil {
+		c.writeError(ctx, err)
+		return
+	}
+	ctx.JSON(http.StatusOK, page)
+}
+
+func (c *Controller) getIdentity(ctx *gin.Context) {
+	identity, err := c.service.GetCurrentIdentityForWorkspace(ctx.Request.Context(), workspaceID(ctx))
+	if err != nil {
+		c.writeError(ctx, err)
+		return
+	}
+	ctx.JSON(http.StatusOK, identity)
 }
 
 func (c *Controller) listPullRequests(ctx *gin.Context) {
@@ -297,6 +329,34 @@ func (c *Controller) getPullRequestFeedback(ctx *gin.Context) {
 type taskPRRequest struct {
 	RepositoryID  string `json:"repositoryId" binding:"required"`
 	PullRequestID int    `json:"pullRequestId" binding:"required"`
+}
+
+type taskWorkItemRequest struct {
+	ProjectID  string `json:"projectId" binding:"required"`
+	WorkItemID int    `json:"workItemId" binding:"required"`
+}
+
+func (c *Controller) listWorkspaceTaskWorkItems(ctx *gin.Context) {
+	rows, err := c.service.ListTaskWorkItemsByWorkspace(ctx.Request.Context(), ctx.Param("workspaceId"))
+	if err != nil {
+		c.writeError(ctx, err)
+		return
+	}
+	ctx.JSON(http.StatusOK, TaskWorkItemsResponse{TaskWorkItems: rows})
+}
+
+func (c *Controller) associateTaskWorkItem(ctx *gin.Context) {
+	var request taskWorkItemRequest
+	if err := ctx.ShouldBindJSON(&request); err != nil || request.WorkItemID <= 0 {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "projectId and positive workItemId are required"})
+		return
+	}
+	row, err := c.service.AssociateTaskWorkItem(ctx.Request.Context(), workspaceID(ctx), ctx.Param("taskId"), request.ProjectID, request.WorkItemID)
+	if err != nil {
+		c.writeError(ctx, err)
+		return
+	}
+	ctx.JSON(http.StatusOK, row)
 }
 
 func (c *Controller) listWorkspaceTaskPRs(ctx *gin.Context) {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   IconChevronLeft,
   IconChevronRight,
@@ -22,6 +22,7 @@ import {
   type AzureDevOpsBoardEditorValues,
   useAzureDevOpsBoard,
 } from "@/hooks/domains/azure-devops/use-azure-devops-board";
+import type { AzureDevOpsBoardPreference } from "@/hooks/domains/azure-devops/use-azure-devops-preferences";
 import { useResponsiveBreakpoint } from "@/hooks/use-responsive-breakpoint";
 import type {
   AzureDevOpsBoard,
@@ -35,6 +36,8 @@ type Props = {
   projectId: string;
   projects: AzureDevOpsProject[];
   onProjectChange: (projectId: string) => void;
+  initialPreference?: AzureDevOpsBoardPreference;
+  onPreferenceChange: (preference: AzureDevOpsBoardPreference) => void;
 };
 
 type EditorValues = { title: string; assignedTo: string; tags: string; columnId: string };
@@ -401,25 +404,89 @@ function BoardSelectors({
   );
 }
 
-export function AzureDevOpsBoard({ workspaceId, projectId, projects, onProjectChange }: Props) {
-  const { isMobile } = useResponsiveBreakpoint();
-  const board = useAzureDevOpsBoard(workspaceId, projectId);
+function preferredColumn(
+  columns: AzureDevOpsBoard["columns"],
+  selectedColumn: string,
+  initialPreference: AzureDevOpsBoardPreference | undefined,
+): string {
+  if (columns.some((column) => column.id === selectedColumn)) return selectedColumn;
+  if (columns.some((column) => column.id === initialPreference?.focusedColumnId)) {
+    return initialPreference?.focusedColumnId ?? "";
+  }
+  return columns[0]?.id ?? "";
+}
+
+function useBoardPreference(
+  board: ReturnType<typeof useAzureDevOpsBoard>,
+  columns: AzureDevOpsBoard["columns"],
+  initialPreference: AzureDevOpsBoardPreference | undefined,
+  onPreferenceChange: (preference: AzureDevOpsBoardPreference) => void,
+) {
   const [selectedColumn, setSelectedColumn] = useState("");
+  const effectiveColumn = preferredColumn(columns, selectedColumn, initialPreference);
+
+  useEffect(() => {
+    if (effectiveColumn !== selectedColumn) setSelectedColumn(effectiveColumn);
+  }, [effectiveColumn, selectedColumn]);
+
+  useEffect(() => {
+    if (!board.teamId || !board.boardId || !effectiveColumn) return;
+    onPreferenceChange({
+      teamId: board.teamId,
+      boardId: board.boardId,
+      focusedColumnId: effectiveColumn,
+    });
+  }, [board.boardId, board.teamId, effectiveColumn, onPreferenceChange]);
+
+  return { effectiveColumn, setSelectedColumn };
+}
+
+function useBoardGroups(snapshot: ReturnType<typeof useAzureDevOpsBoard>["snapshot"]) {
+  return useMemo(
+    () =>
+      snapshot
+        ? groupAzureDevOpsBoardItems(snapshot.board, snapshot.items)
+        : new Map<string, AzureDevOpsBoardWorkItem[]>(),
+    [snapshot],
+  );
+}
+
+function useBoardPresentation(
+  board: ReturnType<typeof useAzureDevOpsBoard>,
+  initialPreference: AzureDevOpsBoardPreference | undefined,
+  onPreferenceChange: (preference: AzureDevOpsBoardPreference) => void,
+) {
+  const groups = useBoardGroups(board.snapshot);
+  const columns = board.snapshot?.board.columns ?? [];
+  const columnPreference = useBoardPreference(
+    board,
+    columns,
+    initialPreference,
+    onPreferenceChange,
+  );
+  return { groups, columns, columnPreference };
+}
+
+function BoardEmptyState() {
+  return (
+    <div className="p-6 text-sm text-muted-foreground">Select a project to view its board.</div>
+  );
+}
+
+export function AzureDevOpsBoard({
+  workspaceId,
+  projectId,
+  projects,
+  onProjectChange,
+  initialPreference,
+  onPreferenceChange,
+}: Props) {
+  const { isMobile } = useResponsiveBreakpoint();
+  const board = useAzureDevOpsBoard(workspaceId, projectId, initialPreference);
   const [editing, setEditing] = useState<AzureDevOpsBoardWorkItem | null>(null);
   const [dragged, setDragged] = useState<AzureDevOpsBoardWorkItem | null>(null);
-  const groups = useMemo(
-    () =>
-      board.snapshot
-        ? groupAzureDevOpsBoardItems(board.snapshot.board, board.snapshot.items)
-        : new Map<string, AzureDevOpsBoardWorkItem[]>(),
-    [board.snapshot],
-  );
-  const columns = board.snapshot?.board.columns ?? [];
-  const effectiveColumn = selectedColumn || columns[0]?.id || "";
-  if (!projectId)
-    return (
-      <div className="p-6 text-sm text-muted-foreground">Select a project to view its board.</div>
-    );
+  const presentation = useBoardPresentation(board, initialPreference, onPreferenceChange);
+  if (!projectId) return <BoardEmptyState />;
   return (
     <section
       className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-4"
@@ -446,10 +513,10 @@ export function AzureDevOpsBoard({ workspaceId, projectId, projects, onProjectCh
         <>
           {isMobile && (
             <MobileColumnNavigator
-              columns={columns}
-              selectedColumn={effectiveColumn}
-              counts={groups}
-              onChange={setSelectedColumn}
+              columns={presentation.columns}
+              selectedColumn={presentation.columnPreference.effectiveColumn}
+              counts={presentation.groups}
+              onChange={presentation.columnPreference.setSelectedColumn}
             />
           )}
           <div
@@ -459,8 +526,11 @@ export function AzureDevOpsBoard({ workspaceId, projectId, projects, onProjectCh
                 : "grid min-h-0 flex-1 auto-cols-fr grid-flow-col gap-3 overflow-x-auto"
             }
           >
-            {columns
-              .filter((column) => !isMobile || column.id === effectiveColumn)
+            {presentation.columns
+              .filter(
+                (column) =>
+                  !isMobile || column.id === presentation.columnPreference.effectiveColumn,
+              )
               .map((column) => (
                 <div
                   key={column.id}
@@ -474,10 +544,12 @@ export function AzureDevOpsBoard({ workspaceId, projectId, projects, onProjectCh
                 >
                   <div className="flex items-center justify-between px-1 text-sm font-semibold">
                     <span>{column.name}</span>
-                    <Badge variant="secondary">{groups.get(column.id)?.length ?? 0}</Badge>
+                    <Badge variant="secondary">
+                      {presentation.groups.get(column.id)?.length ?? 0}
+                    </Badge>
                   </div>
                   <div className="space-y-2">
-                    {(groups.get(column.id) ?? []).map((item) => (
+                    {(presentation.groups.get(column.id) ?? []).map((item) => (
                       <BoardCard
                         key={item.id}
                         item={item}

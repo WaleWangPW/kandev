@@ -29,6 +29,32 @@ func TestMockClientSeedsWorkspaceReadState(t *testing.T) {
 	}
 }
 
+func TestMockClientProvidesWorkItemDetailDiscussionAndIdentity(t *testing.T) {
+	mock := NewMockClient()
+	mock.Seed(MockState{
+		Authenticated: true,
+		User:          TestConnectionResult{OK: true, ID: "me", DisplayName: "Ada", Email: "ada@example.com"},
+		WorkItems: []WorkItem{{
+			ID: 101, Description: "<p>Useful</p><script>alert('xss')</script>",
+			Fields: map[string]any{"Microsoft.VSTS.Scheduling.Effort": 5},
+		}},
+		WorkItemComments: map[int][]WorkItemComment{101: {{ID: 2, Content: "Newest"}, {ID: 1, Content: "Older"}}},
+	})
+
+	detail, err := mock.GetWorkItemDetail(t.Context(), "p1", 101)
+	if err != nil || detail.Description != "Useful" || len(detail.PlanningFields) != 1 {
+		t.Fatalf("detail = %+v, %v", detail, err)
+	}
+	comments, err := mock.ListWorkItemComments(t.Context(), "p1", 101, "opaque")
+	if err != nil || len(comments.Comments) != 2 || comments.Comments[0].ID != 2 {
+		t.Fatalf("comments = %+v, %v", comments, err)
+	}
+	identity, err := mock.GetCurrentIdentity(t.Context())
+	if err != nil || identity.ID != "me" || identity.UniqueName != "ada@example.com" {
+		t.Fatalf("identity = %+v, %v", identity, err)
+	}
+}
+
 func TestMockClientPaginatesPullRequests(t *testing.T) {
 	mock := NewMockClient()
 	mock.Seed(MockState{PullRequests: []PullRequest{
@@ -70,12 +96,14 @@ func TestMockClientBoardReads(t *testing.T) {
 
 func TestMockClientUpdateBoardWorkItem(t *testing.T) {
 	mock := NewMockClient()
-	title := "Updated"
+	action := "assign_current_user"
 	mock.Seed(MockState{
+		Authenticated:  true,
+		User:           TestConnectionResult{OK: true, ID: "me", DisplayName: "Ada"},
 		BoardSnapshots: map[string]BoardSnapshot{"board-1": {Board: Board{ID: "board-1"}, Items: []BoardWorkItem{{WorkItem: WorkItem{ID: 101, Revision: 7, Title: "Original"}}}}},
 	})
-	item, err := mock.UpdateBoardWorkItem(t.Context(), "p1", "team-1", "board-1", 101, BoardWorkItemUpdateRequest{Revision: 7, Title: &title})
-	if err != nil || item == nil || item.Title != "Updated" || item.Revision != 8 {
+	item, err := mock.UpdateBoardWorkItem(t.Context(), "p1", "team-1", "board-1", 101, BoardWorkItemUpdateRequest{Revision: 7, AssigneeAction: &action})
+	if err != nil || item == nil || item.AssignedTo != "Ada" || item.Revision != 8 {
 		t.Fatalf("updated item = %+v, %v", item, err)
 	}
 }
@@ -98,8 +126,10 @@ func TestMockClientUpdateBoardWorkItemInitializesFieldsForDoneOnlyUpdate(t *test
 
 func TestMockClientBoardUpdateKeepsWorkItemReadsInSync(t *testing.T) {
 	mock := NewMockClient()
-	title := "Updated"
+	action := "assign_current_user"
 	mock.Seed(MockState{
+		Authenticated: true,
+		User:          TestConnectionResult{OK: true, ID: "me", DisplayName: "Ada"},
 		BoardSnapshots: map[string]BoardSnapshot{"board-1": {
 			Board: Board{ID: "board-1"},
 			Items: []BoardWorkItem{{WorkItem: WorkItem{ID: 101, Revision: 7, Title: "Original"}}},
@@ -107,11 +137,11 @@ func TestMockClientBoardUpdateKeepsWorkItemReadsInSync(t *testing.T) {
 		WorkItems: []WorkItem{{ID: 101, Revision: 7, Title: "Original"}},
 	})
 
-	if _, err := mock.UpdateBoardWorkItem(t.Context(), "p1", "team-1", "board-1", 101, BoardWorkItemUpdateRequest{Revision: 7, Title: &title}); err != nil {
+	if _, err := mock.UpdateBoardWorkItem(t.Context(), "p1", "team-1", "board-1", 101, BoardWorkItemUpdateRequest{Revision: 7, AssigneeAction: &action}); err != nil {
 		t.Fatalf("update board item: %v", err)
 	}
 	item, err := mock.GetWorkItem(t.Context(), "p1", 101)
-	if err != nil || item.Title != "Updated" || item.Revision != 8 {
+	if err != nil || item.AssignedTo != "Ada" || item.Revision != 8 {
 		t.Fatalf("work item = %+v, %v", item, err)
 	}
 }

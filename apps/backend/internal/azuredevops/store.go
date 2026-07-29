@@ -56,7 +56,25 @@ const createTaskPRTableSQL = `
 		UNIQUE(task_id, repository_id, azure_repository_id, pull_request_id)
 	);
 	CREATE INDEX IF NOT EXISTS idx_azure_devops_task_prs_task_id
-		ON azure_devops_task_prs(task_id)`
+	ON azure_devops_task_prs(task_id)`
+
+const createTaskWorkItemTableSQL = `
+CREATE TABLE IF NOT EXISTS azure_devops_task_work_items (
+	id TEXT PRIMARY KEY,
+	task_id TEXT NOT NULL,
+	workspace_id TEXT NOT NULL,
+	project_id TEXT NOT NULL,
+	work_item_id INTEGER NOT NULL,
+	work_item_url TEXT NOT NULL,
+	title TEXT NOT NULL,
+	state TEXT NOT NULL,
+	type TEXT NOT NULL,
+	created_at DATETIME NOT NULL,
+	updated_at DATETIME NOT NULL,
+	UNIQUE(task_id, workspace_id, project_id, work_item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_azure_devops_task_work_items_task_id ON azure_devops_task_work_items(task_id);
+CREATE INDEX IF NOT EXISTS idx_azure_devops_task_work_items_workspace_id ON azure_devops_task_work_items(workspace_id)`
 
 const selectConfigColumns = `workspace_id, organization_url, default_project_id,
 	default_project_name, auth_method, last_checked_at, last_ok, last_error,
@@ -79,6 +97,9 @@ func NewStore(writer, reader *sqlx.DB) (*Store, error) {
 	}
 	if _, err := store.db.Exec(createTaskPRTableSQL); err != nil {
 		return nil, fmt.Errorf("azure devops task PR schema init: %w", err)
+	}
+	if _, err := store.db.Exec(createTaskWorkItemTableSQL); err != nil {
+		return nil, fmt.Errorf("azure devops task work item schema init: %w", err)
 	}
 	return store, nil
 }

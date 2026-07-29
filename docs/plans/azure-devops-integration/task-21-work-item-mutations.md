@@ -1,7 +1,7 @@
 ---
 id: "21-work-item-mutations"
 title: "Constrained work-item mutations"
-status: pending
+status: done
 wave: 11
 depends_on: ["20-work-item-detail"]
 plan: "plan.md"

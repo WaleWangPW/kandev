@@ -2,6 +2,7 @@ package azuredevops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -9,16 +10,17 @@ import (
 
 // MockState is the deterministic E2E data exposed by MockClient.
 type MockState struct {
-	Authenticated  bool                        `json:"authenticated"`
-	User           TestConnectionResult        `json:"user"`
-	Projects       []Project                   `json:"projects"`
-	Teams          []Team                      `json:"teams"`
-	Boards         []BoardReference            `json:"boards"`
-	BoardSnapshots map[string]BoardSnapshot    `json:"boardSnapshots"`
-	Repositories   []Repository                `json:"repositories"`
-	WorkItems      []WorkItem                  `json:"workItems"`
-	PullRequests   []PullRequest               `json:"pullRequests"`
-	Feedback       map[int]PullRequestFeedback `json:"feedback"`
+	Authenticated    bool                        `json:"authenticated"`
+	User             TestConnectionResult        `json:"user"`
+	Projects         []Project                   `json:"projects"`
+	Teams            []Team                      `json:"teams"`
+	Boards           []BoardReference            `json:"boards"`
+	BoardSnapshots   map[string]BoardSnapshot    `json:"boardSnapshots"`
+	Repositories     []Repository                `json:"repositories"`
+	WorkItems        []WorkItem                  `json:"workItems"`
+	WorkItemComments map[int][]WorkItemComment   `json:"workItemComments"`
+	PullRequests     []PullRequest               `json:"pullRequests"`
+	Feedback         map[int]PullRequestFeedback `json:"feedback"`
 }
 
 // MockClient implements Client with in-memory state for browser tests.
@@ -41,6 +43,9 @@ func (c *MockClient) Seed(state MockState) {
 	}
 	if state.BoardSnapshots == nil {
 		state.BoardSnapshots = make(map[string]BoardSnapshot)
+	}
+	if state.WorkItemComments == nil {
+		state.WorkItemComments = make(map[int][]WorkItemComment)
 	}
 	c.state = state
 }
@@ -89,8 +94,20 @@ func (c *MockClient) GetBoardSnapshot(_ context.Context, _, _, boardID string) (
 }
 
 func (c *MockClient) UpdateBoardWorkItem(_ context.Context, _, _, boardID string, id int, request BoardWorkItemUpdateRequest) (*BoardWorkItem, error) {
+	if err := validateBoardWorkItemUpdate(request); err != nil {
+		return nil, err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if request.AssigneeAction != nil && !request.hasResolvedAssignee {
+		request.hasResolvedAssignee = true
+		if *request.AssigneeAction == assignCurrentUserAction {
+			request.resolvedAssignee = strings.TrimSpace(c.state.User.Email)
+			if request.resolvedAssignee == "" {
+				request.resolvedAssignee = c.state.User.DisplayName
+			}
+		}
+	}
 	snapshot, ok := c.state.BoardSnapshots[boardID]
 	if !ok {
 		return nil, fmt.Errorf("azure devops mock board %q not found", boardID)
@@ -122,14 +139,8 @@ func (c *MockClient) UpdateBoardWorkItem(_ context.Context, _, _, boardID string
 }
 
 func applyMockBoardWorkItemUpdate(item *BoardWorkItem, board Board, request BoardWorkItemUpdateRequest) error {
-	if request.Title != nil {
-		item.Title = *request.Title
-	}
-	if request.AssignedTo != nil {
-		item.AssignedTo = *request.AssignedTo
-	}
-	if request.Tags != nil {
-		item.Tags = append([]string(nil), (*request.Tags)...)
+	if request.hasResolvedAssignee {
+		item.AssignedTo = request.resolvedAssignee
 	}
 	if request.ColumnID != nil {
 		column, ok := boardColumnByID(board.Columns, *request.ColumnID)
@@ -205,6 +216,29 @@ func (c *MockClient) GetWorkItem(_ context.Context, _ string, id int) (*WorkItem
 		}
 	}
 	return nil, mockNotFound("work item", id)
+}
+
+func (c *MockClient) GetWorkItemDetail(ctx context.Context, projectID string, id int) (*WorkItemDetail, error) {
+	item, err := c.GetWorkItem(ctx, projectID, id)
+	if err != nil {
+		return nil, err
+	}
+	detail := &WorkItemDetail{WorkItem: *item, PlanningFields: planningFields(item.Fields)}
+	detail.Description = sanitizeDescriptionHTML(detail.Description)
+	return detail, nil
+}
+
+func (c *MockClient) ListWorkItemComments(_ context.Context, _ string, id int, _ string) (*WorkItemCommentPage, error) {
+	comments := append([]WorkItemComment(nil), c.snapshot().WorkItemComments[id]...)
+	return &WorkItemCommentPage{Comments: comments}, nil
+}
+
+func (c *MockClient) GetCurrentIdentity(context.Context) (*Identity, error) {
+	state := c.snapshot()
+	if !state.Authenticated {
+		return nil, errors.New("azure devops mock is not authenticated")
+	}
+	return &Identity{ID: state.User.ID, DisplayName: state.User.DisplayName, UniqueName: state.User.Email}, nil
 }
 
 func (c *MockClient) ListPullRequests(_ context.Context, filter PullRequestFilter) (*PullRequestPage, error) {

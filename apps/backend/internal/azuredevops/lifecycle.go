@@ -46,6 +46,9 @@ func (s *Service) handleTaskDeleted(ctx context.Context, event *bus.Event) error
 	if err := s.store.DeleteTaskPRsByTask(ctx, taskID); err != nil {
 		return fmt.Errorf("delete Azure DevOps task PRs for task %q: %w", taskID, err)
 	}
+	if err := s.store.DeleteTaskWorkItemsByTask(ctx, taskID); err != nil {
+		return fmt.Errorf("delete Azure DevOps task work items for task %q: %w", taskID, err)
+	}
 	return nil
 }
 
@@ -53,6 +56,9 @@ func (s *Service) handleWorkspaceDeleted(ctx context.Context, event *bus.Event) 
 	workspaceID := lifecycleResourceID(event, "id")
 	if workspaceID == "" {
 		return nil
+	}
+	if err := s.store.DeleteTaskWorkItemsByWorkspace(ctx, workspaceID); err != nil {
+		return fmt.Errorf("delete Azure DevOps task work items for workspace %q: %w", workspaceID, err)
 	}
 	if err := s.DeleteConfigForWorkspace(ctx, workspaceID); err != nil {
 		return fmt.Errorf("delete Azure DevOps config for workspace %q: %w", workspaceID, err)

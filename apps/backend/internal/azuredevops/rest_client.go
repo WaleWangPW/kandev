@@ -10,9 +10,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/net/html"
 )
 
 const (
@@ -23,6 +26,7 @@ const (
 	workItemBatchSize    = 200
 	branchResultLimit    = 1000
 	defaultPRPageSize    = 50
+	workItemCommentLimit = 100
 )
 
 // APIError is a bounded, credential-redacted Azure DevOps response error.
@@ -162,6 +166,60 @@ func (c *RESTClient) GetWorkItem(ctx context.Context, projectID string, id int) 
 	}
 	item := convertWorkItem(raw)
 	return &item, nil
+}
+
+func (c *RESTClient) GetWorkItemDetail(ctx context.Context, projectID string, id int) (*WorkItemDetail, error) {
+	item, err := c.GetWorkItem(ctx, projectID, id)
+	if err != nil {
+		return nil, err
+	}
+	detail := &WorkItemDetail{WorkItem: *item, PlanningFields: planningFields(item.Fields)}
+	detail.Description = sanitizeDescriptionHTML(detail.Description)
+	return detail, nil
+}
+
+func (c *RESTClient) ListWorkItemComments(ctx context.Context, projectID string, id int, continuationToken string) (*WorkItemCommentPage, error) {
+	query := url.Values{}
+	query.Set("$top", strconv.Itoa(workItemCommentLimit))
+	query.Set("api-version", "7.1-preview.4")
+	if strings.TrimSpace(continuationToken) != "" {
+		query.Set("continuationToken", continuationToken)
+	}
+	endpoint := fmt.Sprintf("/%s/_apis/wit/workItems/%d/comments?%s", pathPart(projectID), id, query.Encode())
+	var response struct {
+		Comments []struct {
+			ID           int       `json:"id"`
+			Text         string    `json:"text"`
+			IsDeleted    bool      `json:"isDeleted"`
+			CreatedDate  time.Time `json:"createdDate"`
+			ModifiedDate time.Time `json:"modifiedDate"`
+			CreatedBy    Identity  `json:"createdBy"`
+		} `json:"comments"`
+	}
+	var headers http.Header
+	if err := c.doJSONWithResponseHeaders(ctx, http.MethodGet, endpoint, nil, &response, &headers); err != nil {
+		return nil, err
+	}
+	comments := make([]WorkItemComment, 0, len(response.Comments))
+	for _, comment := range response.Comments {
+		if comment.IsDeleted {
+			continue
+		}
+		comments = append(comments, WorkItemComment{
+			ID: comment.ID, Content: comment.Text, Author: comment.CreatedBy,
+			PublishedAt: comment.CreatedDate, UpdatedAt: comment.ModifiedDate,
+		})
+	}
+	sort.SliceStable(comments, func(i, j int) bool { return comments[i].PublishedAt.After(comments[j].PublishedAt) })
+	return &WorkItemCommentPage{Comments: comments, ContinuationToken: headers.Get("x-ms-continuationtoken")}, nil
+}
+
+func (c *RESTClient) GetCurrentIdentity(ctx context.Context) (*Identity, error) {
+	auth, err := c.TestAuth(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &Identity{ID: auth.ID, DisplayName: auth.DisplayName, UniqueName: auth.Email}, nil
 }
 
 func (c *RESTClient) ListTeams(ctx context.Context, projectID string) ([]Team, error) {
@@ -314,6 +372,12 @@ func boardWorkItemPatch(board struct {
 	Columns []BoardColumn `json:"columns"`
 	Fields  BoardFields   `json:"fields"`
 }, request BoardWorkItemUpdateRequest) ([]map[string]any, error) {
+	if err := validateBoardWorkItemUpdate(request); err != nil {
+		return nil, err
+	}
+	if request.AssigneeAction != nil && !request.hasResolvedAssignee {
+		return nil, fmt.Errorf("%w: assignee action must be resolved server-side", ErrInvalidConfig)
+	}
 	patch := []map[string]any{{"op": "test", "path": "/rev", "value": request.Revision}}
 	appendField := func(path string, value any) {
 		patch = append(patch, map[string]any{"op": "replace", "path": path, "value": value})
@@ -325,14 +389,8 @@ func boardWorkItemPatch(board struct {
 		}
 		patch = append(patch, map[string]any{"op": "add", "path": path, "value": value})
 	}
-	if request.Title != nil {
-		appendField("/fields/System.Title", *request.Title)
-	}
-	if request.AssignedTo != nil {
-		appendOptionalField("/fields/System.AssignedTo", *request.AssignedTo)
-	}
-	if request.Tags != nil {
-		appendOptionalField("/fields/System.Tags", strings.Join(*request.Tags, "; "))
+	if request.hasResolvedAssignee {
+		appendOptionalField("/fields/System.AssignedTo", request.resolvedAssignee)
 	}
 	if request.ColumnID != nil {
 		columnName := ""
@@ -512,7 +570,15 @@ func (c *RESTClient) doJSON(ctx context.Context, method, endpoint string, reques
 	return c.doJSONWithContentType(ctx, method, endpoint, requestBody, responseBody, "application/json")
 }
 
+func (c *RESTClient) doJSONWithResponseHeaders(ctx context.Context, method, endpoint string, requestBody, responseBody any, responseHeaders *http.Header) error {
+	return c.doJSONWithContentTypeAndResponseHeaders(ctx, method, endpoint, requestBody, responseBody, "application/json", responseHeaders)
+}
+
 func (c *RESTClient) doJSONWithContentType(ctx context.Context, method, endpoint string, requestBody, responseBody any, contentType string) error {
+	return c.doJSONWithContentTypeAndResponseHeaders(ctx, method, endpoint, requestBody, responseBody, contentType, nil)
+}
+
+func (c *RESTClient) doJSONWithContentTypeAndResponseHeaders(ctx context.Context, method, endpoint string, requestBody, responseBody any, contentType string, responseHeaders *http.Header) error {
 	if c.initErr != nil {
 		return c.initErr
 	}
@@ -541,6 +607,9 @@ func (c *RESTClient) doJSONWithContentType(ctx context.Context, method, endpoint
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return c.decodeAPIError(resp, endpointPath(endpoint))
+	}
+	if responseHeaders != nil {
+		*responseHeaders = resp.Header.Clone()
 	}
 	limited := io.LimitReader(resp.Body, maxResponseBodyBytes+1)
 	data, err := io.ReadAll(limited)
@@ -636,6 +705,57 @@ func convertWorkItem(raw rawWorkItem) WorkItem {
 		AssignedTo: identityDisplayField(raw.Fields, "System.AssignedTo"), Tags: tags, WebURL: raw.Links.HTML.Href,
 		APIURL: raw.URL, Fields: raw.Fields,
 	}
+}
+
+var supportedPlanningFields = []struct {
+	ReferenceName string
+	Label         string
+}{
+	{ReferenceName: "Microsoft.VSTS.Scheduling.Effort", Label: "Effort"},
+	{ReferenceName: "Microsoft.VSTS.Scheduling.StoryPoints", Label: "Story points"},
+	{ReferenceName: "Microsoft.VSTS.Scheduling.Size", Label: "Size"},
+	{ReferenceName: "Microsoft.VSTS.Scheduling.RemainingWork", Label: "Remaining work"},
+	{ReferenceName: "Microsoft.VSTS.Scheduling.OriginalEstimate", Label: "Original estimate"},
+	{ReferenceName: "Microsoft.VSTS.Scheduling.CompletedWork", Label: "Completed work"},
+}
+
+func planningFields(fields map[string]any) []PlanningField {
+	result := make([]PlanningField, 0, len(supportedPlanningFields))
+	for _, field := range supportedPlanningFields {
+		value, ok := fields[field.ReferenceName]
+		if !ok || value == nil {
+			continue
+		}
+		formatted := strings.TrimSpace(fmt.Sprint(value))
+		if formatted == "" {
+			continue
+		}
+		result = append(result, PlanningField{ReferenceName: field.ReferenceName, Label: field.Label, Value: formatted})
+	}
+	return result
+}
+
+func sanitizeDescriptionHTML(value string) string {
+	node, err := html.Parse(strings.NewReader(value))
+	if err != nil {
+		return ""
+	}
+	var text strings.Builder
+	var visit func(*html.Node)
+	visit = func(current *html.Node) {
+		if current.Type == html.ElementNode && (current.Data == "script" || current.Data == "style") {
+			return
+		}
+		if current.Type == html.TextNode {
+			text.WriteString(current.Data)
+			text.WriteByte(' ')
+		}
+		for child := current.FirstChild; child != nil; child = child.NextSibling {
+			visit(child)
+		}
+	}
+	visit(node)
+	return strings.Join(strings.Fields(text.String()), " ")
 }
 
 func boardItemPlacement(board Board, item WorkItem) (string, bool) {

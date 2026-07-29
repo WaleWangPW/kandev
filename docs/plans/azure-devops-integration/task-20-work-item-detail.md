@@ -1,7 +1,7 @@
 ---
 id: "20-work-item-detail"
 title: "Work-item detail contracts"
-status: pending
+status: done
 wave: 11
 depends_on: []
 plan: "plan.md"

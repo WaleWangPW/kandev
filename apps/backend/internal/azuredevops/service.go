@@ -195,6 +195,7 @@ func (s *Service) finishConfigUpdate(
 		if err := s.store.ResetAuthHealth(ctx, workspaceID); err != nil {
 			return nil, fmt.Errorf("reset azure devops auth health: %w", err)
 		}
+		s.RecordAuthHealthForWorkspace(ctx, workspaceID)
 	}
 	return s.GetConfigForWorkspace(ctx, workspaceID)
 }

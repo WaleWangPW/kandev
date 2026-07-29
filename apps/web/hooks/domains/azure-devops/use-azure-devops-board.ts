@@ -38,7 +38,12 @@ function replaceBoardItem(
   };
 }
 
-function useBoardDiscovery(workspaceId: string | undefined, projectId: string) {
+function useBoardDiscovery(
+  workspaceId: string | undefined,
+  projectId: string,
+  preferredTeamId?: string,
+  preferredBoardId?: string,
+) {
   const [teams, setTeams] = useState<AzureDevOpsTeam[]>([]);
   const [boards, setBoards] = useState<AzureDevOpsBoardReference[]>([]);
   const [teamId, setTeamId] = useState("");
@@ -60,14 +65,18 @@ function useBoardDiscovery(workspaceId: string | undefined, projectId: string) {
       .then((result) => {
         if (!cancelled) {
           setTeams(result.teams);
-          setTeamId(result.teams[0]?.id ?? "");
+          setTeamId(
+            result.teams.some((team) => team.id === preferredTeamId)
+              ? (preferredTeamId ?? "")
+              : (result.teams[0]?.id ?? ""),
+          );
         }
       })
       .catch((cause) => !cancelled && setError(errorMessage(cause, "Unable to load teams")));
     return () => {
       cancelled = true;
     };
-  }, [projectId, workspaceId]);
+  }, [preferredTeamId, projectId, workspaceId]);
 
   useEffect(() => {
     if (!workspaceId || !projectId || !teamId) {
@@ -81,20 +90,45 @@ function useBoardDiscovery(workspaceId: string | undefined, projectId: string) {
       .then((result) => {
         if (!cancelled) {
           setBoards(result.boards);
-          setBoardId(result.boards[0]?.id ?? "");
+          setBoardId(
+            result.boards.some((board) => board.id === preferredBoardId)
+              ? (preferredBoardId ?? "")
+              : (result.boards[0]?.id ?? ""),
+          );
         }
       })
       .catch((cause) => !cancelled && setError(errorMessage(cause, "Unable to load boards")));
     return () => {
       cancelled = true;
     };
-  }, [projectId, teamId, workspaceId]);
+  }, [preferredBoardId, projectId, teamId, workspaceId]);
+
+  useEffect(() => {
+    if (preferredTeamId && teams.some((team) => team.id === preferredTeamId)) {
+      setTeamId(preferredTeamId);
+    }
+  }, [preferredTeamId, teams]);
+
+  useEffect(() => {
+    if (preferredBoardId && boards.some((board) => board.id === preferredBoardId)) {
+      setBoardId(preferredBoardId);
+    }
+  }, [boards, preferredBoardId]);
 
   return { teams, boards, teamId, setTeamId, boardId, setBoardId, error };
 }
 
-export function useAzureDevOpsBoard(workspaceId: string | undefined, projectId: string) {
-  const discovery = useBoardDiscovery(workspaceId, projectId);
+export function useAzureDevOpsBoard(
+  workspaceId: string | undefined,
+  projectId: string,
+  preference?: { teamId?: string; boardId?: string },
+) {
+  const discovery = useBoardDiscovery(
+    workspaceId,
+    projectId,
+    preference?.teamId,
+    preference?.boardId,
+  );
   const { teamId, boardId } = discovery;
   const [snapshot, setSnapshot] = useState<AzureDevOpsBoardSnapshot | null>(null);
   const [loading, setLoading] = useState(false);

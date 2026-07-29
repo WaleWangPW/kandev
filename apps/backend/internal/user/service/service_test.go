@@ -1292,6 +1292,20 @@ func TestApplyUserPreferenceBlobsValidation(t *testing.T) {
 			t.Fatalf("expected explicit null to clear blob, got %s", string(settings.JiraSavedViews))
 		}
 	})
+
+}
+
+func TestAzureDevOpsBrowsePreferencesArePatched(t *testing.T) {
+	settings := &models.UserSettings{}
+	preferences := json.RawMessage(`{"workspace-a":{"mode":"board","projectId":"project-a"}}`)
+	if err := applyUserPreferenceBlobs(settings, &UpdateUserSettingsRequest{
+		AzureDevOpsBrowsePreferences: rawPatch(preferences),
+	}); err != nil {
+		t.Fatalf("apply Azure DevOps preferences: %v", err)
+	}
+	if string(settings.AzureDevOpsBrowsePreferences) != string(preferences) {
+		t.Fatalf("AzureDevOpsBrowsePreferences = %s, want %s", settings.AzureDevOpsBrowsePreferences, preferences)
+	}
 }
 
 type recordingUserRepository struct {

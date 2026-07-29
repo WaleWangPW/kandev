@@ -21,6 +21,7 @@ func TestServiceBoardReadsAuthorizeWorkspaceBeforeCreatingClient(t *testing.T) {
 	if _, err := service.SetConfigForWorkspace(t.Context(), "ws-1", &SetConfigRequest{OrganizationURL: "https://dev.azure.com/acme", PAT: "pat"}); err != nil {
 		t.Fatalf("set config: %v", err)
 	}
+	clientCalls = 0
 	denied := errors.New("workspace denied")
 	service.SetWorkspaceAuthorizer(func(context.Context, string) error { return denied })
 
@@ -40,7 +41,8 @@ func TestServiceBoardCapabilitiesReportNotConfigured(t *testing.T) {
 	if _, err := service.ListTeamsForWorkspace(t.Context(), "ws-1", "project-1"); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("ListTeamsForWorkspace error = %v, want ErrNotConfigured", err)
 	}
-	if _, err := service.UpdateBoardWorkItemForWorkspace(t.Context(), "ws-1", "project-1", "team-1", "board-1", 101, BoardWorkItemUpdateRequest{Revision: 7}); !errors.Is(err, ErrNotConfigured) {
+	column := "column-1"
+	if _, err := service.UpdateBoardWorkItemForWorkspace(t.Context(), "ws-1", "project-1", "team-1", "board-1", 101, BoardWorkItemUpdateRequest{Revision: 7, ColumnID: &column}); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("UpdateBoardWorkItemForWorkspace error = %v, want ErrNotConfigured", err)
 	}
 }
@@ -48,6 +50,10 @@ func TestServiceBoardCapabilitiesReportNotConfigured(t *testing.T) {
 type fakeBoardWriter struct {
 	*fakeBoardReader
 	request BoardWorkItemUpdateRequest
+}
+
+func (f *fakeBoardWriter) GetCurrentIdentity(context.Context) (*Identity, error) {
+	return &Identity{ID: "me", DisplayName: "Ada"}, nil
 }
 
 func (f *fakeBoardWriter) UpdateBoardWorkItem(_ context.Context, _, _, _ string, _ int, request BoardWorkItemUpdateRequest) (*BoardWorkItem, error) {
@@ -94,7 +100,7 @@ func TestServiceBoardReads(t *testing.T) {
 	}
 }
 
-func TestServiceUpdateBoardWorkItem(t *testing.T) {
+func TestServiceUpdateBoardWorkItemIdentity(t *testing.T) {
 	reader := &fakeBoardReader{snapshot: &BoardSnapshot{Board: Board{ID: "board-1"}}}
 	writer := &fakeBoardWriter{fakeBoardReader: reader}
 	service, _, _ := newTestService(t, func(*Config, string) Client {
@@ -106,9 +112,15 @@ func TestServiceUpdateBoardWorkItem(t *testing.T) {
 	if _, err := service.SetConfigForWorkspace(t.Context(), "ws-1", &SetConfigRequest{OrganizationURL: "https://dev.azure.com/acme", PAT: "pat"}); err != nil {
 		t.Fatalf("set config: %v", err)
 	}
-	title := "Updated"
-	item, err := service.UpdateBoardWorkItemForWorkspace(t.Context(), "ws-1", "project-1", "team-1", "board-1", 101, BoardWorkItemUpdateRequest{Revision: 7, Title: &title})
-	if err != nil || item == nil || writer.request.Revision != 7 || writer.request.Title == nil || *writer.request.Title != "Updated" {
+	assign := "assign_current_user"
+	item, err := service.UpdateBoardWorkItemForWorkspace(t.Context(), "ws-1", "project-1", "team-1", "board-1", 101, BoardWorkItemUpdateRequest{Revision: 7, AssigneeAction: &assign})
+	if err != nil || item == nil || writer.request.Revision != 7 || writer.request.resolvedAssignee != "Ada" {
 		t.Fatalf("updated item = %+v, request=%+v, err=%v", item, writer.request, err)
+	}
+}
+
+func TestServiceUpdateBoardWorkItemRejectsUnsupportedFields(t *testing.T) {
+	if err := validateBoardWorkItemUpdate(BoardWorkItemUpdateRequest{Revision: 7}); err == nil {
+		t.Fatal("validateBoardWorkItemUpdate accepted an empty mutation")
 	}
 }

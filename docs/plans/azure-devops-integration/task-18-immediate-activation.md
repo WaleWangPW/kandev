@@ -1,7 +1,7 @@
 ---
 id: "18-immediate-activation"
 title: "Immediate connection activation"
-status: pending
+status: done
 wave: 11
 depends_on: []
 plan: "plan.md"

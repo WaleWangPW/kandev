@@ -257,10 +257,10 @@ Wave 10: board validation and documentation
 
 Wave 11: connection, preference, and work-item contracts
 
-- [ ] [Task 18: Immediate connection activation](task-18-immediate-activation.md)
-- [ ] [Task 19: Portable Azure browse preferences](task-19-browse-preferences.md)
-- [ ] [Task 20: Work-item detail contracts](task-20-work-item-detail.md)
-- [ ] [Task 21: Constrained work-item mutations](task-21-work-item-mutations.md)
+- [x] [Task 18: Immediate connection activation](task-18-immediate-activation.md)
+- [x] [Task 19: Portable Azure browse preferences](task-19-browse-preferences.md)
+- [x] [Task 20: Work-item detail contracts](task-20-work-item-detail.md)
+- [x] [Task 21: Constrained work-item mutations](task-21-work-item-mutations.md)
 - [ ] [Task 22: Task work-item associations](task-22-task-work-item-links.md)
 - [ ] [Task 23: Azure provider presets](task-23-provider-presets.md)
 
