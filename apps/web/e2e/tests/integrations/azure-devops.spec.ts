@@ -116,6 +116,7 @@ test("connects and browses Azure work items, PRs, and feedback", async ({
   apiClient,
   seedData,
   testPage,
+  prCapture,
 }) => {
   await apiClient.mockAzureDevOpsSeed(MOCK_STATE);
   await testPage.goto(
@@ -155,6 +156,9 @@ test("connects and browses Azure work items, PRs, and feedback", async ({
   await testPage.goto("/azure-devops");
   await expect(testPage.getByTestId("azure-devops-board")).toBeVisible();
   await expect(testPage.getByText("Handle token rotation")).toBeVisible();
+  await prCapture.screenshot("board-desktop", {
+    caption: "Azure DevOps board with columns and cards",
+  });
 
   await testPage.getByTestId("azure-board-card-101").click();
   await testPage.getByLabel("Title").fill("Handle token rotation safely");

@@ -138,6 +138,7 @@ test("mobile board opens a focused column editor without horizontal overflow", a
   apiClient,
   seedData,
   testPage,
+  prCapture,
 }) => {
   await apiClient.mockAzureDevOpsSeed(MOCK_STATE);
   await apiClient.setAzureDevOpsConfig(seedData.workspaceId, {
@@ -148,6 +149,9 @@ test("mobile board opens a focused column editor without horizontal overflow", a
 
   await expect(testPage.getByTestId("azure-devops-board")).toBeVisible();
   await expect(testPage.getByText("Handle token rotation")).toBeVisible();
+  await prCapture.screenshot("board-mobile", {
+    caption: "Azure DevOps focused mobile board column",
+  });
   await testPage.getByTestId("azure-board-card-101").click();
   await expect(testPage.getByRole("heading", { name: /Edit work item/ })).toBeVisible();
   await testPage.getByRole("button", { name: "Close" }).click();
