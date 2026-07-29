@@ -1,7 +1,5 @@
 "use client";
 
-/* eslint-disable max-lines, max-lines-per-function */
-
 import Link from "@/components/routing/app-link";
 import { useCallback, useEffect, useRef, useState, type ComponentProps } from "react";
 import { IconAdjustments, IconChevronLeft, IconChevronRight } from "@tabler/icons-react";
@@ -30,6 +28,7 @@ import {
 } from "@/components/azure-devops/azure-devops-scope-bar";
 import { AzureDevOpsSaveViewDialog } from "@/components/azure-devops/azure-devops-save-view-dialog";
 import { AzureDevOpsBoard } from "@/components/azure-devops/azure-devops-board";
+import { AzureDevOpsModeTabs } from "@/components/azure-devops/azure-devops-mode-tabs";
 import { presetsForKind } from "@/components/azure-devops/azure-devops-presets";
 import {
   useAzureDevOpsConnection,
@@ -402,10 +401,8 @@ function useAzureDevOpsPageState(workspaceId?: string) {
 
   useInitialAzureSearch({ connection, filters, mode, runSearch });
 
-  const openFeedback = (pullRequest: AzureDevOpsPullRequest) => {
-    setFeedbackOpen(true);
-    void feedback.load(pullRequest);
-  };
+  const openFeedback = (pullRequest: AzureDevOpsPullRequest) =>
+    openAzureDevOpsFeedback(feedback, setFeedbackOpen, pullRequest);
 
   const scope = useAzureScopeControls({
     filters,
@@ -458,6 +455,15 @@ function useAzureDevOpsPageState(workspaceId?: string) {
     canSaveCurrent: savedViewControls.canSaveCurrent,
     saveCurrentView: savedViewControls.saveCurrentView,
   };
+}
+
+function openAzureDevOpsFeedback(
+  feedback: ReturnType<typeof useAzureDevOpsPullRequestFeedback>,
+  setFeedbackOpen: (open: boolean) => void,
+  pullRequest: AzureDevOpsPullRequest,
+) {
+  setFeedbackOpen(true);
+  void feedback.load(pullRequest);
 }
 
 type PageState = ReturnType<typeof useAzureDevOpsPageState>;
@@ -568,38 +574,7 @@ function AzureDevOpsPageContent({ workspaceId, workflows, steps, repositories }:
         canSaveCurrent={state.canSaveCurrent}
         onSaveCurrent={() => state.setSaveViewOpen(true)}
       />
-      <div className="flex items-center gap-1 border-b px-4 py-2">
-        <Button
-          type="button"
-          size="sm"
-          variant={state.mode === BOARD_MODE ? "default" : "ghost"}
-          className="cursor-pointer"
-          onClick={() => state.setMode(BOARD_MODE)}
-          data-testid="azure-devops-board-mode"
-        >
-          Board
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant={state.mode === WORK_ITEMS_MODE ? "default" : "ghost"}
-          className="cursor-pointer"
-          onClick={() => state.setMode(WORK_ITEMS_MODE)}
-          data-testid="azure-devops-work-items-mode"
-        >
-          Work items
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant={state.mode === PULL_REQUESTS_MODE ? "default" : "ghost"}
-          className="cursor-pointer"
-          onClick={() => state.setMode(PULL_REQUESTS_MODE)}
-          data-testid="azure-devops-pull-requests-mode"
-        >
-          Pull requests
-        </Button>
-      </div>
+      <AzureDevOpsModeTabs mode={state.mode} onModeChange={state.setMode} />
       {state.mode === BOARD_MODE && (
         <AzureDevOpsBoard
           workspaceId={workspaceId}
