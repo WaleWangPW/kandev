@@ -167,12 +167,10 @@ func (c *RESTClient) GetWorkItem(ctx context.Context, projectID string, id int) 
 func (c *RESTClient) ListTeams(ctx context.Context, projectID string) ([]Team, error) {
 	var response struct {
 		Value []struct {
-			ID      string `json:"id"`
-			Name    string `json:"name"`
-			Project struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
-			} `json:"project"`
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			ProjectID   string `json:"projectId"`
+			ProjectName string `json:"projectName"`
 		} `json:"value"`
 	}
 	endpoint := fmt.Sprintf("/_apis/projects/%s/teams?api-version=%s", pathPart(projectID), restAPIVersion)
@@ -181,7 +179,7 @@ func (c *RESTClient) ListTeams(ctx context.Context, projectID string) ([]Team, e
 	}
 	teams := make([]Team, 0, len(response.Value))
 	for _, raw := range response.Value {
-		teams = append(teams, Team{ID: raw.ID, Name: raw.Name, ProjectID: raw.Project.ID, ProjectName: raw.Project.Name})
+		teams = append(teams, Team{ID: raw.ID, Name: raw.Name, ProjectID: raw.ProjectID, ProjectName: raw.ProjectName})
 	}
 	return teams, nil
 }
@@ -320,18 +318,21 @@ func boardWorkItemPatch(board struct {
 	appendField := func(path string, value any) {
 		patch = append(patch, map[string]any{"op": "replace", "path": path, "value": value})
 	}
+	appendOptionalField := func(path, value string) {
+		if value == "" {
+			patch = append(patch, map[string]any{"op": "remove", "path": path})
+			return
+		}
+		patch = append(patch, map[string]any{"op": "add", "path": path, "value": value})
+	}
 	if request.Title != nil {
 		appendField("/fields/System.Title", *request.Title)
 	}
 	if request.AssignedTo != nil {
-		value := any(*request.AssignedTo)
-		if *request.AssignedTo == "" {
-			value = nil
-		}
-		appendField("/fields/System.AssignedTo", value)
+		appendOptionalField("/fields/System.AssignedTo", *request.AssignedTo)
 	}
 	if request.Tags != nil {
-		appendField("/fields/System.Tags", strings.Join(*request.Tags, "; "))
+		appendOptionalField("/fields/System.Tags", strings.Join(*request.Tags, "; "))
 	}
 	if request.ColumnID != nil {
 		columnName := ""

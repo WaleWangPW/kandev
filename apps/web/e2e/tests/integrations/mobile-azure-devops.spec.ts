@@ -30,6 +30,8 @@ const MOCK_STATE = {
           state: "Active",
           type: "User Story",
           project: "project-1",
+          assignedTo: "Ada Reviewer",
+          tags: ["security"],
           columnId: "todo",
           columnDone: false,
         },
@@ -154,7 +156,13 @@ test("mobile board opens a focused column editor without horizontal overflow", a
   });
   await testPage.getByTestId("azure-board-card-101").click();
   await expect(testPage.getByRole("heading", { name: /Edit work item/ })).toBeVisible();
-  await testPage.getByRole("button", { name: "Close" }).click();
+  await testPage.getByLabel("Title").fill("Handle token rotation safely");
+  await testPage.getByTestId("azure-board-column-select").click();
+  await testPage.getByRole("option", { name: "Active" }).click();
+  await testPage.getByRole("button", { name: "Save changes" }).click();
+  await testPage.getByTestId("azure-board-column-picker").click();
+  await testPage.getByRole("button", { name: /Active 1/ }).click();
+  await expect(testPage.getByText("Handle token rotation safely")).toBeVisible();
 
   await testPage.getByTestId("azure-devops-work-items-mode").click();
   await testPage.getByTestId("azure-devops-mobile-filter-button").click();

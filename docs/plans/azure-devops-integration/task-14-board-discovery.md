@@ -22,7 +22,7 @@ spec: "../../specs/azure-devops-integration/spec.md"
 
 ## Verification
 
-- `rtk go test ./internal/azuredevops/... -run 'Test(RESTClientBoardReads|ServiceBoardReads|ControllerBoardReads|MockClientBoard)'` from `apps/backend`.
+- `rtk make -C apps/backend test` (including `TestRESTClientBoardReads`, `TestServiceBoardReads`, `TestControllerBoardReads`, and `TestMockClientBoard`) from the repository root.
 
 ## Files Likely Touched
 

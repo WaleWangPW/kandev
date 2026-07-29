@@ -79,3 +79,39 @@ func TestMockClientUpdateBoardWorkItem(t *testing.T) {
 		t.Fatalf("updated item = %+v, %v", item, err)
 	}
 }
+
+func TestMockClientUpdateBoardWorkItemInitializesFieldsForDoneOnlyUpdate(t *testing.T) {
+	mock := NewMockClient()
+	done := true
+	mock.Seed(MockState{
+		BoardSnapshots: map[string]BoardSnapshot{"board-1": {
+			Board: Board{ID: "board-1", Fields: BoardFields{DoneField: FieldReference{ReferenceName: "System.BoardDone"}}},
+			Items: []BoardWorkItem{{WorkItem: WorkItem{ID: 101, Revision: 7}}},
+		}},
+	})
+
+	item, err := mock.UpdateBoardWorkItem(t.Context(), "p1", "team-1", "board-1", 101, BoardWorkItemUpdateRequest{Revision: 7, ColumnDone: &done})
+	if err != nil || item == nil || !item.ColumnDone || item.Fields["System.BoardDone"] != true {
+		t.Fatalf("updated item = %+v, %v", item, err)
+	}
+}
+
+func TestMockClientBoardUpdateKeepsWorkItemReadsInSync(t *testing.T) {
+	mock := NewMockClient()
+	title := "Updated"
+	mock.Seed(MockState{
+		BoardSnapshots: map[string]BoardSnapshot{"board-1": {
+			Board: Board{ID: "board-1"},
+			Items: []BoardWorkItem{{WorkItem: WorkItem{ID: 101, Revision: 7, Title: "Original"}}},
+		}},
+		WorkItems: []WorkItem{{ID: 101, Revision: 7, Title: "Original"}},
+	})
+
+	if _, err := mock.UpdateBoardWorkItem(t.Context(), "p1", "team-1", "board-1", 101, BoardWorkItemUpdateRequest{Revision: 7, Title: &title}); err != nil {
+		t.Fatalf("update board item: %v", err)
+	}
+	item, err := mock.GetWorkItem(t.Context(), "p1", 101)
+	if err != nil || item.Title != "Updated" || item.Revision != 8 {
+		t.Fatalf("work item = %+v, %v", item, err)
+	}
+}

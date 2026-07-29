@@ -80,7 +80,7 @@ func TestRESTClientBoardReads(t *testing.T) {
 
 	client := newTestRESTClient(t, server, "pat")
 	teams, err := client.ListTeams(context.Background(), "project-1")
-	if err != nil || len(teams) != 1 || teams[0].Name != "Platform Team" {
+	if err != nil || len(teams) != 1 || teams[0].Name != "Platform Team" || teams[0].ProjectID != "project-1" || teams[0].ProjectName != "Platform" {
 		t.Fatalf("ListTeams = %+v, %v", teams, err)
 	}
 	boards, err := client.ListBoards(context.Background(), "project-1", "team-1")
@@ -99,6 +99,21 @@ func TestRESTClientBoardReads(t *testing.T) {
 	}
 	if snapshot.Items[1].ID != 1 || snapshot.Items[1].ColumnID != "column-todo" || len(snapshot.Items[1].Tags) != 2 {
 		t.Fatalf("second board item = %+v", snapshot.Items[1])
+	}
+}
+
+func TestBoardWorkItemPatchClearsOptionalFieldsWithRemove(t *testing.T) {
+	assignedTo := ""
+	tags := []string{}
+	patch, err := boardWorkItemPatch(struct {
+		Columns []BoardColumn `json:"columns"`
+		Fields  BoardFields   `json:"fields"`
+	}{}, BoardWorkItemUpdateRequest{Revision: 7, AssignedTo: &assignedTo, Tags: &tags})
+	if err != nil {
+		t.Fatalf("boardWorkItemPatch: %v", err)
+	}
+	if len(patch) != 3 || patch[1]["op"] != "remove" || patch[1]["path"] != "/fields/System.AssignedTo" || patch[2]["op"] != "remove" || patch[2]["path"] != "/fields/System.Tags" {
+		t.Fatalf("patch = %#v", patch)
 	}
 }
 

@@ -2,6 +2,7 @@ package azuredevops
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -9,6 +10,39 @@ type fakeBoardReader struct {
 	teams    []Team
 	boards   []BoardReference
 	snapshot *BoardSnapshot
+}
+
+func TestServiceBoardReadsAuthorizeWorkspaceBeforeCreatingClient(t *testing.T) {
+	clientCalls := 0
+	service, _, _ := newTestService(t, func(*Config, string) Client {
+		clientCalls++
+		return &invalidClient{}
+	})
+	if _, err := service.SetConfigForWorkspace(t.Context(), "ws-1", &SetConfigRequest{OrganizationURL: "https://dev.azure.com/acme", PAT: "pat"}); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+	denied := errors.New("workspace denied")
+	service.SetWorkspaceAuthorizer(func(context.Context, string) error { return denied })
+
+	if _, err := service.ListTeamsForWorkspace(t.Context(), "ws-1", "project-1"); !errors.Is(err, denied) {
+		t.Fatalf("ListTeamsForWorkspace error = %v, want authorization denial", err)
+	}
+	if clientCalls != 0 {
+		t.Fatalf("client factory calls = %d, want 0", clientCalls)
+	}
+}
+
+func TestServiceBoardCapabilitiesReportNotConfigured(t *testing.T) {
+	service, _, _ := newTestService(t, func(*Config, string) Client { return &invalidClient{} })
+	if _, err := service.SetConfigForWorkspace(t.Context(), "ws-1", &SetConfigRequest{OrganizationURL: "https://dev.azure.com/acme", PAT: "pat"}); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+	if _, err := service.ListTeamsForWorkspace(t.Context(), "ws-1", "project-1"); !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("ListTeamsForWorkspace error = %v, want ErrNotConfigured", err)
+	}
+	if _, err := service.UpdateBoardWorkItemForWorkspace(t.Context(), "ws-1", "project-1", "team-1", "board-1", 101, BoardWorkItemUpdateRequest{Revision: 7}); !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("UpdateBoardWorkItemForWorkspace error = %v, want ErrNotConfigured", err)
+	}
 }
 
 type fakeBoardWriter struct {

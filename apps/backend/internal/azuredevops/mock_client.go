@@ -103,43 +103,63 @@ func (c *MockClient) UpdateBoardWorkItem(_ context.Context, _, _, boardID string
 		if item.Revision != request.Revision {
 			return nil, &APIError{StatusCode: 409, Endpoint: "mock board update", Body: "revision conflict"}
 		}
-		if request.Title != nil {
-			item.Title = *request.Title
-		}
-		if request.AssignedTo != nil {
-			item.AssignedTo = *request.AssignedTo
-		}
-		if request.Tags != nil {
-			item.Tags = append([]string(nil), (*request.Tags)...)
-		}
-		if request.ColumnID != nil {
-			if item.Fields == nil {
-				item.Fields = make(map[string]any)
-			}
-			found := false
-			for _, column := range snapshot.Board.Columns {
-				if column.ID == *request.ColumnID {
-					item.ColumnID = column.ID
-					item.Fields[snapshot.Board.Fields.ColumnField.ReferenceName] = column.Name
-					found = true
-					break
-				}
-			}
-			if !found {
-				return nil, fmt.Errorf("%w: unknown board column", ErrInvalidConfig)
-			}
-		}
-		if request.ColumnDone != nil {
-			item.ColumnDone = *request.ColumnDone
-			item.Fields[snapshot.Board.Fields.DoneField.ReferenceName] = *request.ColumnDone
+		if err := applyMockBoardWorkItemUpdate(item, snapshot.Board, request); err != nil {
+			return nil, err
 		}
 		item.Revision++
 		snapshot.Items[index] = *item
 		c.state.BoardSnapshots[boardID] = snapshot
+		for workItemIndex := range c.state.WorkItems {
+			if c.state.WorkItems[workItemIndex].ID == id {
+				c.state.WorkItems[workItemIndex] = item.WorkItem
+				break
+			}
+		}
 		copy := *item
 		return &copy, nil
 	}
 	return nil, mockNotFound("work item", id)
+}
+
+func applyMockBoardWorkItemUpdate(item *BoardWorkItem, board Board, request BoardWorkItemUpdateRequest) error {
+	if request.Title != nil {
+		item.Title = *request.Title
+	}
+	if request.AssignedTo != nil {
+		item.AssignedTo = *request.AssignedTo
+	}
+	if request.Tags != nil {
+		item.Tags = append([]string(nil), (*request.Tags)...)
+	}
+	if request.ColumnID != nil {
+		column, ok := boardColumnByID(board.Columns, *request.ColumnID)
+		if !ok {
+			return fmt.Errorf("%w: unknown board column", ErrInvalidConfig)
+		}
+		item.ColumnID = column.ID
+		mockBoardFields(item)[board.Fields.ColumnField.ReferenceName] = column.Name
+	}
+	if request.ColumnDone != nil {
+		item.ColumnDone = *request.ColumnDone
+		mockBoardFields(item)[board.Fields.DoneField.ReferenceName] = *request.ColumnDone
+	}
+	return nil
+}
+
+func boardColumnByID(columns []BoardColumn, id string) (BoardColumn, bool) {
+	for _, column := range columns {
+		if column.ID == id {
+			return column, true
+		}
+	}
+	return BoardColumn{}, false
+}
+
+func mockBoardFields(item *BoardWorkItem) map[string]any {
+	if item.Fields == nil {
+		item.Fields = make(map[string]any)
+	}
+	return item.Fields
 }
 
 func (c *MockClient) ListRepositories(_ context.Context, projectID string) ([]Repository, error) {

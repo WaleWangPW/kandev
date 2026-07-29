@@ -25,7 +25,7 @@ spec: "../../specs/azure-devops-integration/spec.md"
 
 ## Verification
 
-- `rtk go test ./internal/azuredevops/... -run 'Test(RESTClientUpdateBoardWorkItem|ServiceUpdateBoardWorkItem|ControllerUpdateBoardWorkItem|MockClientUpdateBoardWorkItem)'` from `apps/backend`.
+- `rtk make -C apps/backend test` (including `TestRESTClientUpdateBoardWorkItem`, `TestServiceUpdateBoardWorkItem`, `TestControllerUpdateBoardWorkItem`, and `TestMockClientUpdateBoardWorkItem`) from the repository root.
 
 ## Files Likely Touched
 

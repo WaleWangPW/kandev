@@ -46,10 +46,28 @@ type Service struct {
 	log        *logger.Logger
 	mock       *MockClient
 	repoLookup RepositoryLookup
+	// workspaceAuthorizer is wired to the task service when per-user auth is
+	// enabled. A nil authorizer preserves the unscoped local-development path.
+	workspaceAuthorizer func(context.Context, string) error
 }
 
 // MockClient returns the E2E mock when the provider is in mock mode.
 func (s *Service) MockClient() *MockClient { return s.mock }
+
+// SetWorkspaceAuthorizer installs the per-user workspace access boundary for
+// Azure DevOps configuration and provider operations.
+func (s *Service) SetWorkspaceAuthorizer(authorizer func(context.Context, string) error) {
+	if s != nil {
+		s.workspaceAuthorizer = authorizer
+	}
+}
+
+func (s *Service) authorizeWorkspaceAccess(ctx context.Context, workspaceID string) error {
+	if s == nil || s.workspaceAuthorizer == nil {
+		return nil
+	}
+	return s.workspaceAuthorizer(ctx, workspaceID)
+}
 
 // NewService constructs the Azure DevOps configuration service.
 func NewService(store *Store, secrets SecretStore, clientFn ClientFactory, log *logger.Logger) *Service {
@@ -90,6 +108,9 @@ func (s *Service) GetConfigForWorkspace(ctx context.Context, workspaceID string)
 	if err := validateWorkspaceID(workspaceID); err != nil {
 		return nil, err
 	}
+	if err := s.authorizeWorkspaceAccess(ctx, workspaceID); err != nil {
+		return nil, err
+	}
 	cfg, err := s.store.GetConfig(ctx, workspaceID)
 	if err != nil || cfg == nil || s.secrets == nil {
 		return cfg, err
@@ -109,6 +130,9 @@ func (s *Service) SetConfigForWorkspace(
 	req *SetConfigRequest,
 ) (*Config, error) {
 	if err := validateWorkspaceID(workspaceID); err != nil {
+		return nil, err
+	}
+	if err := s.authorizeWorkspaceAccess(ctx, workspaceID); err != nil {
 		return nil, err
 	}
 	cfg, err := configFromRequest(workspaceID, req)
@@ -178,6 +202,9 @@ func (s *Service) finishConfigUpdate(
 // DeleteConfigForWorkspace removes both configuration and its encrypted PAT.
 func (s *Service) DeleteConfigForWorkspace(ctx context.Context, workspaceID string) error {
 	if err := validateWorkspaceID(workspaceID); err != nil {
+		return err
+	}
+	if err := s.authorizeWorkspaceAccess(ctx, workspaceID); err != nil {
 		return err
 	}
 	previous, err := s.readStoredPAT(ctx, workspaceID)
@@ -293,6 +320,9 @@ func (s *Service) resolveCredentials(
 	req *SetConfigRequest,
 ) (*Config, string, error) {
 	if err := validateWorkspaceID(workspaceID); err != nil {
+		return nil, "", err
+	}
+	if err := s.authorizeWorkspaceAccess(ctx, workspaceID); err != nil {
 		return nil, "", err
 	}
 	if req == nil {

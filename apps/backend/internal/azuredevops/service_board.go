@@ -2,7 +2,6 @@ package azuredevops
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 )
@@ -14,7 +13,7 @@ func (s *Service) boardReaderForWorkspace(ctx context.Context, workspaceID strin
 	}
 	reader, ok := client.(BoardReader)
 	if !ok {
-		return nil, errors.New("azure devops: board listing is unavailable")
+		return nil, fmt.Errorf("%w: board listing is unavailable", ErrNotConfigured)
 	}
 	return reader, nil
 }
@@ -65,7 +64,7 @@ func (s *Service) UpdateBoardWorkItemForWorkspace(ctx context.Context, workspace
 	}
 	writer, ok := client.(BoardWriter)
 	if !ok {
-		return nil, errors.New("azure devops: board updates are unavailable")
+		return nil, fmt.Errorf("%w: board updates are unavailable", ErrNotConfigured)
 	}
 	return writer.UpdateBoardWorkItem(ctx, projectID, teamID, boardID, id, request)
 }
