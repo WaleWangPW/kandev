@@ -29,6 +29,8 @@ func RegisterRoutes(router *gin.Engine, service *Service, log *logger.Logger) {
 	api.POST("/config/copy", controller.copyConfig)
 	api.GET("/views", controller.getSavedViews)
 	api.PUT("/views", controller.setSavedViews)
+	api.GET("/workspace-settings", controller.getWorkspaceSettings)
+	api.PATCH("/workspace-settings", controller.updateWorkspaceSettings)
 	api.GET("/projects", controller.listProjects)
 	api.GET("/teams", controller.listTeams)
 	api.GET("/boards", controller.listBoards)
@@ -48,6 +50,30 @@ func RegisterRoutes(router *gin.Engine, service *Service, log *logger.Logger) {
 	api.GET("/workspaces/:workspaceId/task-prs", controller.listWorkspaceTaskPRs)
 	api.POST("/tasks/:taskId/pull-requests", controller.associateTaskPR)
 	api.POST("/tasks/:taskId/pull-requests/sync", controller.syncTaskPR)
+}
+
+func (c *Controller) getWorkspaceSettings(ctx *gin.Context) {
+	settings, err := c.service.GetWorkspaceSettings(ctx.Request.Context(), workspaceID(ctx))
+	if err != nil {
+		c.writeError(ctx, err)
+		return
+	}
+	ctx.JSON(http.StatusOK, settings)
+}
+
+func (c *Controller) updateWorkspaceSettings(ctx *gin.Context) {
+	var request UpdateWorkspaceSettingsRequest
+	if err := ctx.ShouldBindJSON(&request); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
+		return
+	}
+	request.WorkspaceID = workspaceID(ctx)
+	settings, err := c.service.UpdateWorkspaceSettings(ctx.Request.Context(), &request)
+	if err != nil {
+		c.writeError(ctx, err)
+		return
+	}
+	ctx.JSON(http.StatusOK, settings)
 }
 
 func (c *Controller) getSavedViews(ctx *gin.Context) {

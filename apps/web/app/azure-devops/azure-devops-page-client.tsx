@@ -43,6 +43,7 @@ import {
 } from "@/hooks/domains/azure-devops/use-azure-devops-projects";
 import { useAzureDevOpsSavedViews } from "@/hooks/domains/azure-devops/use-azure-devops-saved-views";
 import { useAzureDevOpsPagePreferences } from "@/hooks/domains/azure-devops/use-azure-devops-preferences";
+import { useAzureDevOpsWorkspaceActions } from "@/hooks/domains/azure-devops/use-azure-devops-workspace-actions";
 import type { Repository, Workflow, WorkflowStep } from "@/lib/types/http";
 import type { AzureDevOpsPullRequest, AzureDevOpsSavedView } from "@/lib/types/azure-devops";
 
@@ -88,35 +89,16 @@ function NotConfigured({ workspaceId }: { workspaceId?: string }) {
   );
 }
 
-function resultLabel(mode: AzureDevOpsBrowseMode): string {
-  if (mode === WORK_ITEMS_MODE) return "Work items";
-  if (mode === PULL_REQUESTS_MODE) return "Pull requests";
-  return "Board";
-}
+const RESULT_LABELS: Record<AzureDevOpsBrowseMode, string> = {
+  [WORK_ITEMS_MODE]: "Work items",
+  [PULL_REQUESTS_MODE]: "Pull requests",
+  [BOARD_MODE]: "Board",
+};
 
-function resultCount(
-  mode: AzureDevOpsBrowseMode,
-  workItemCount: number,
-  pullRequestCount: number,
-): number {
-  if (mode === WORK_ITEMS_MODE) return workItemCount;
-  if (mode === PULL_REQUESTS_MODE) return pullRequestCount;
-  return 0;
-}
-
-function ResultHeader({
-  mode,
-  workItemCount,
-  pullRequestCount,
-}: {
-  mode: AzureDevOpsBrowseMode;
-  workItemCount: number;
-  pullRequestCount: number;
-}) {
-  const count = resultCount(mode, workItemCount, pullRequestCount);
+function ResultHeader({ mode, count }: { mode: AzureDevOpsBrowseMode; count: number }) {
   return (
     <div className="flex min-h-12 items-center justify-between border-b px-4">
-      <h2 className="text-sm font-semibold">{resultLabel(mode)}</h2>
+      <h2 className="text-sm font-semibold">{RESULT_LABELS[mode]}</h2>
       <span className="text-xs text-muted-foreground">{count} results</span>
     </div>
   );
@@ -372,6 +354,7 @@ function useAzureDevOpsPageState(workspaceId?: string) {
   const pullRequests = useAzureDevOpsPullRequestSearch(workspaceId);
   const feedback = useAzureDevOpsPullRequestFeedback(workspaceId);
   const savedViews = useAzureDevOpsSavedViews(workspaceId);
+  const { workItemActions, pullRequestActions } = useAzureDevOpsWorkspaceActions(workspaceId);
 
   useDefaultAzureRepository(filters.repositoryId, repositoryList.data, update);
 
@@ -458,6 +441,8 @@ function useAzureDevOpsPageState(workspaceId?: string) {
     preferencesLoaded: pagePreferences.hydrated,
     boardPreference: pagePreferences.board,
     setBoardPreference: pagePreferences.setBoard,
+    workItemActions,
+    pullRequestActions,
   };
 }
 
@@ -478,8 +463,11 @@ function BrowseResults({ state }: { state: PageState }) {
     <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
       <ResultHeader
         mode={state.mode}
-        workItemCount={state.workItems.data.length}
-        pullRequestCount={state.pullRequests.data.length}
+        count={
+          state.mode === WORK_ITEMS_MODE
+            ? state.workItems.data.length
+            : state.pullRequests.data.length
+        }
       />
       <div className="min-h-0 flex-1 overflow-y-auto">
         {state.mode === WORK_ITEMS_MODE ? (
@@ -488,6 +476,10 @@ function BrowseResults({ state }: { state: PageState }) {
             loading={state.workItems.loading}
             error={state.workItems.error}
             onStartTask={(item) => state.setLaunchPayload({ kind: "work-item", item })}
+            quickActions={state.workItemActions}
+            onQuickAction={(item, action) =>
+              state.setLaunchPayload({ kind: "work-item", item, action })
+            }
           />
         ) : (
           <AzureDevOpsPullRequestResults
@@ -497,6 +489,10 @@ function BrowseResults({ state }: { state: PageState }) {
             onFeedback={state.openFeedback}
             onStartTask={(pullRequest) =>
               state.setLaunchPayload({ kind: "pull-request", pullRequest })
+            }
+            quickActions={state.pullRequestActions}
+            onQuickAction={(pullRequest, action) =>
+              state.setLaunchPayload({ kind: "pull-request", pullRequest, action })
             }
           />
         )}

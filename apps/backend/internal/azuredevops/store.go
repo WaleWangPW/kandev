@@ -95,6 +95,9 @@ func NewStore(writer, reader *sqlx.DB) (*Store, error) {
 	if err := store.ensureSavedViewsColumn(); err != nil {
 		return nil, fmt.Errorf("azure devops saved views schema init: %w", err)
 	}
+	if err := store.ensureWorkspaceSettingsColumn(); err != nil {
+		return nil, fmt.Errorf("azure devops workspace settings schema init: %w", err)
+	}
 	if _, err := store.db.Exec(createTaskPRTableSQL); err != nil {
 		return nil, fmt.Errorf("azure devops task PR schema init: %w", err)
 	}
@@ -102,6 +105,31 @@ func NewStore(writer, reader *sqlx.DB) (*Store, error) {
 		return nil, fmt.Errorf("azure devops task work item schema init: %w", err)
 	}
 	return store, nil
+}
+
+func (s *Store) ensureWorkspaceSettingsColumn() error {
+	rows, err := s.db.Query(`PRAGMA table_info(azure_devops_configs)`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if scanErr := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); scanErr != nil {
+			return scanErr
+		}
+		if name == "workspace_settings" {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE azure_devops_configs ADD COLUMN workspace_settings TEXT NOT NULL DEFAULT '{}'`)
+	return err
 }
 
 func (s *Store) ensureSavedViewsColumn() error {
@@ -245,6 +273,39 @@ func (s *Store) PutSavedViewsJSON(ctx context.Context, workspaceID, raw string) 
 	}
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE azure_devops_configs SET saved_views = ?, updated_at = ?
+		WHERE workspace_id = ?`, raw, time.Now().UTC(), workspaceID)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated == 0 {
+		return ErrNotConfigured
+	}
+	return nil
+}
+
+func (s *Store) GetWorkspaceSettingsJSON(ctx context.Context, workspaceID string) (string, error) {
+	if err := validateWorkspaceID(workspaceID); err != nil {
+		return "", err
+	}
+	var raw string
+	err := s.ro.GetContext(ctx, &raw,
+		`SELECT workspace_settings FROM azure_devops_configs WHERE workspace_id = ?`, workspaceID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotConfigured
+	}
+	return raw, err
+}
+
+func (s *Store) PutWorkspaceSettingsJSON(ctx context.Context, workspaceID, raw string) error {
+	if err := validateWorkspaceID(workspaceID); err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE azure_devops_configs SET workspace_settings = ?, updated_at = ?
 		WHERE workspace_id = ?`, raw, time.Now().UTC(), workspaceID)
 	if err != nil {
 		return err

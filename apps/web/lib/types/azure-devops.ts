@@ -228,3 +228,49 @@ export type AssociateAzureDevOpsPullRequestRequest = {
   repositoryId: string;
   pullRequestId: number;
 };
+
+export type AzureDevOpsTaskWorkItem = {
+  id: string;
+  taskId: string;
+  workspaceId: string;
+  projectId: string;
+  workItemId: number;
+  workItemUrl: string;
+  title: string;
+  state: string;
+  type: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AssociateAzureDevOpsWorkItemRequest = {
+  projectId: string;
+  workItemId: number;
+};
+
+export type AzureDevOpsQueryPreset = {
+  id: string;
+  label: string;
+  group: string;
+  filters: Record<string, unknown>;
+};
+
+export type AzureDevOpsActionPreset = {
+  id: string;
+  label: string;
+  hint: string;
+  icon: string;
+  promptTemplate: string;
+};
+
+export type AzureDevOpsWorkspaceSettings = {
+  workspaceId: string;
+  workItemQueries: AzureDevOpsQueryPreset[];
+  pullRequestQueries: AzureDevOpsQueryPreset[];
+  workItemActions: AzureDevOpsActionPreset[];
+  pullRequestActions: AzureDevOpsActionPreset[];
+};
+
+export type UpdateAzureDevOpsWorkspaceSettingsRequest = Partial<
+  Omit<AzureDevOpsWorkspaceSettings, "workspaceId">
+>;

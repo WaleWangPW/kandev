@@ -22,6 +22,7 @@ import {
   type IntegrationAuthHealth,
 } from "@/components/integrations/auth-status-banner";
 import { WorkspaceScopedSection } from "@/components/integrations/workspace-scoped-section";
+import { AzureDevOpsQuickActionsSection } from "@/components/azure-devops/azure-devops-quick-actions";
 import { SettingsSection } from "@/components/settings/settings-section";
 import { useToast } from "@/components/toast-provider";
 import { INTEGRATION_STATUS_REFRESH_MS } from "@/hooks/domains/integrations/use-integration-availability";
@@ -478,7 +479,13 @@ export function AzureDevOpsIntegrationPage({ workspaceId }: { workspaceId?: stri
   return (
     <WorkspaceScopedSection workspaceId={workspaceId}>
       {(selectedWorkspaceId) => (
-        <AzureDevOpsConnectionSection key={selectedWorkspaceId} workspaceId={selectedWorkspaceId} />
+        <div className="space-y-6">
+          <AzureDevOpsConnectionSection
+            key={selectedWorkspaceId}
+            workspaceId={selectedWorkspaceId}
+          />
+          <AzureDevOpsQuickActionsSection workspaceId={selectedWorkspaceId} />
+        </div>
       )}
     </WorkspaceScopedSection>
   );

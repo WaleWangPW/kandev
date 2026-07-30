@@ -13,10 +13,14 @@ import type {
   AzureDevOpsTeam,
   AzureDevOpsSavedView,
   AzureDevOpsTaskPullRequest,
+  AzureDevOpsTaskWorkItem,
   AzureDevOpsWorkItem,
   AzureDevOpsWorkItemSearchResult,
+  AzureDevOpsWorkspaceSettings,
+  AssociateAzureDevOpsWorkItemRequest,
   SetAzureDevOpsConfigRequest,
   TestAzureDevOpsConnectionResult,
+  UpdateAzureDevOpsWorkspaceSettingsRequest,
 } from "@/lib/types/azure-devops";
 import { invalidateIntegrationAvailabilityAfter } from "@/lib/integrations/integration-availability-events";
 
@@ -146,6 +150,27 @@ export function setAzureDevOpsSavedViews(
     ...options,
     init: { ...options?.init, method: "PUT", body: JSON.stringify({ views }) },
   });
+}
+
+export function getAzureDevOpsWorkspaceSettings(workspaceId: string, options?: ApiRequestOptions) {
+  return fetchJson<AzureDevOpsWorkspaceSettings>(
+    withWorkspace(`${BASE}/workspace-settings`, workspaceId),
+    options,
+  );
+}
+
+export function updateAzureDevOpsWorkspaceSettings(
+  workspaceId: string,
+  payload: UpdateAzureDevOpsWorkspaceSettingsRequest,
+  options?: ApiRequestOptions,
+) {
+  return fetchJson<AzureDevOpsWorkspaceSettings>(
+    withWorkspace(`${BASE}/workspace-settings`, workspaceId),
+    {
+      ...options,
+      init: { ...options?.init, method: "PATCH", body: JSON.stringify(payload) },
+    },
+  );
 }
 
 export function searchAzureDevOpsWorkItems(
@@ -340,4 +365,29 @@ export function syncAzureDevOpsTaskPullRequest(
   options?: ApiRequestOptions,
 ) {
   return taskPullRequestMutation("sync", workspaceId, taskId, payload, options);
+}
+
+export function listWorkspaceAzureDevOpsTaskWorkItems(
+  workspaceId: string,
+  options?: ApiRequestOptions,
+) {
+  return fetchJson<{ taskWorkItems: Record<string, AzureDevOpsTaskWorkItem[]> }>(
+    `${BASE}/workspaces/${encodeURIComponent(workspaceId)}/task-work-items`,
+    options,
+  );
+}
+
+export function associateAzureDevOpsWorkItem(
+  workspaceId: string,
+  taskId: string,
+  payload: AssociateAzureDevOpsWorkItemRequest,
+  options?: ApiRequestOptions,
+) {
+  return fetchJson<AzureDevOpsTaskWorkItem>(
+    withWorkspace(`${BASE}/tasks/${encodeURIComponent(taskId)}/work-items`, workspaceId),
+    {
+      ...options,
+      init: { ...options?.init, method: "POST", body: JSON.stringify(payload) },
+    },
+  );
 }

@@ -1,7 +1,7 @@
 ---
 id: "23-provider-presets"
 title: "Azure provider presets"
-status: pending
+status: in_progress
 wave: 11
 depends_on: []
 plan: "plan.md"

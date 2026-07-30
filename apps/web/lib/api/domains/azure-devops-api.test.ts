@@ -6,9 +6,11 @@ vi.mock("@/lib/config", () => ({
 
 import {
   associateAzureDevOpsPullRequest,
+  associateAzureDevOpsWorkItem,
   copyAzureDevOpsConfig,
   deleteAzureDevOpsConfig,
   getAzureDevOpsConfig,
+  getAzureDevOpsWorkspaceSettings,
   getAzureDevOpsPullRequestFeedback,
   listAzureDevOpsProjects,
   listAzureDevOpsBranches,
@@ -19,8 +21,10 @@ import {
   listAzureDevOpsPullRequests,
   listAzureDevOpsRepositories,
   listWorkspaceAzureDevOpsTaskPullRequests,
+  listWorkspaceAzureDevOpsTaskWorkItems,
   searchAzureDevOpsWorkItems,
   setAzureDevOpsConfig,
+  updateAzureDevOpsWorkspaceSettings,
   syncAzureDevOpsTaskPullRequest,
   testAzureDevOpsConnection,
 } from "./azure-devops-api";
@@ -89,6 +93,21 @@ describe("Azure DevOps config API", () => {
 
     await deleteAzureDevOpsConfig("source");
     expect(lastCall().init?.method).toBe("DELETE");
+  });
+});
+
+describe("Azure DevOps workspace settings API", () => {
+  it("reads and patches workspace-scoped query and action presets", async () => {
+    fetchSpy.mockImplementation(async () => jsonResponse({ workspaceId: "ws-1" }));
+    await getAzureDevOpsWorkspaceSettings("ws / one");
+    expect(lastCall().url).toBe(`${BASE}/workspace-settings?workspace_id=ws+%2F+one`);
+
+    const payload = { workItemActions: [] };
+    await updateAzureDevOpsWorkspaceSettings("ws-1", payload);
+    expect(lastCall()).toMatchObject({
+      url: `${BASE}/workspace-settings?workspace_id=ws-1`,
+      init: { method: "PATCH", body: JSON.stringify(payload) },
+    });
   });
 });
 
@@ -214,5 +233,21 @@ describe("Azure DevOps task pull request API", () => {
 
     await syncAzureDevOpsTaskPullRequest("ws-1", "task/1", payload);
     expect(lastCall().url).toBe(`${BASE}/tasks/task%2F1/pull-requests/sync?workspace_id=ws-1`);
+  });
+});
+
+describe("Azure DevOps task work-item API", () => {
+  it("lists and associates work items with explicit workspace scope", async () => {
+    fetchSpy.mockImplementation(async () => jsonResponse({ taskWorkItems: {} }));
+
+    await listWorkspaceAzureDevOpsTaskWorkItems("ws / one");
+    expect(lastCall().url).toBe(`${BASE}/workspaces/ws%20%2F%20one/task-work-items`);
+
+    const payload = { projectId: "project-1", workItemId: 42 };
+    await associateAzureDevOpsWorkItem("ws-1", "task/1", payload);
+    expect(lastCall()).toMatchObject({
+      url: `${BASE}/tasks/task%2F1/work-items?workspace_id=ws-1`,
+      init: { method: "POST", body: JSON.stringify(payload) },
+    });
   });
 });
