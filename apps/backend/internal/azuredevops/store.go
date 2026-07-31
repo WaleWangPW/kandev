@@ -76,6 +76,90 @@ CREATE TABLE IF NOT EXISTS azure_devops_task_work_items (
 CREATE INDEX IF NOT EXISTS idx_azure_devops_task_work_items_task_id ON azure_devops_task_work_items(task_id);
 CREATE INDEX IF NOT EXISTS idx_azure_devops_task_work_items_workspace_id ON azure_devops_task_work_items(workspace_id)`
 
+const createWatchTablesSQL = `
+CREATE TABLE IF NOT EXISTS azure_devops_work_item_watches (
+	id TEXT PRIMARY KEY,
+	workspace_id TEXT NOT NULL,
+	workflow_id TEXT NOT NULL DEFAULT '',
+	workflow_step_id TEXT NOT NULL DEFAULT '',
+	project_id TEXT NOT NULL,
+	wiql TEXT NOT NULL,
+	repository_id TEXT NOT NULL DEFAULT '',
+	base_branch TEXT NOT NULL DEFAULT '',
+	agent_profile_id TEXT NOT NULL DEFAULT '',
+	executor_profile_id TEXT NOT NULL DEFAULT '',
+	prompt TEXT NOT NULL DEFAULT '',
+	enabled BOOLEAN NOT NULL DEFAULT 1,
+	poll_interval_seconds INTEGER NOT NULL DEFAULT 300,
+	cleanup_policy TEXT NOT NULL DEFAULT 'auto',
+	max_inflight_tasks INTEGER,
+	generation INTEGER NOT NULL DEFAULT 1,
+	deleting BOOLEAN NOT NULL DEFAULT 0,
+	last_error TEXT NOT NULL DEFAULT '',
+	last_error_at DATETIME,
+	last_polled_at DATETIME,
+	created_at DATETIME NOT NULL,
+	updated_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_azure_devops_work_item_watches_workspace
+	ON azure_devops_work_item_watches(workspace_id);
+CREATE TABLE IF NOT EXISTS azure_devops_pull_request_watches (
+	id TEXT PRIMARY KEY,
+	workspace_id TEXT NOT NULL,
+	workflow_id TEXT NOT NULL DEFAULT '',
+	workflow_step_id TEXT NOT NULL DEFAULT '',
+	project_id TEXT NOT NULL,
+	azure_repository_id TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT 'active',
+	creator_id TEXT NOT NULL DEFAULT '',
+	reviewer_id TEXT NOT NULL DEFAULT '',
+	repository_id TEXT NOT NULL DEFAULT '',
+	base_branch TEXT NOT NULL DEFAULT '',
+	agent_profile_id TEXT NOT NULL DEFAULT '',
+	executor_profile_id TEXT NOT NULL DEFAULT '',
+	prompt TEXT NOT NULL DEFAULT '',
+	enabled BOOLEAN NOT NULL DEFAULT 1,
+	poll_interval_seconds INTEGER NOT NULL DEFAULT 300,
+	cleanup_policy TEXT NOT NULL DEFAULT 'auto',
+	max_inflight_tasks INTEGER,
+	generation INTEGER NOT NULL DEFAULT 1,
+	deleting BOOLEAN NOT NULL DEFAULT 0,
+	last_error TEXT NOT NULL DEFAULT '',
+	last_error_at DATETIME,
+	last_polled_at DATETIME,
+	created_at DATETIME NOT NULL,
+	updated_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_azure_devops_pull_request_watches_workspace
+	ON azure_devops_pull_request_watches(workspace_id);
+CREATE TABLE IF NOT EXISTS azure_devops_work_item_watch_tasks (
+	id TEXT PRIMARY KEY,
+	watch_id TEXT NOT NULL,
+	project_id TEXT NOT NULL,
+	work_item_id INTEGER NOT NULL,
+	work_item_url TEXT NOT NULL,
+	task_id TEXT NOT NULL DEFAULT '',
+	generation INTEGER NOT NULL,
+	created_at DATETIME NOT NULL,
+	UNIQUE(watch_id, generation, project_id, work_item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_azure_devops_work_item_watch_tasks_watch
+	ON azure_devops_work_item_watch_tasks(watch_id);
+CREATE TABLE IF NOT EXISTS azure_devops_pull_request_watch_tasks (
+	id TEXT PRIMARY KEY,
+	watch_id TEXT NOT NULL,
+	project_id TEXT NOT NULL,
+	azure_repository_id TEXT NOT NULL,
+	pull_request_id INTEGER NOT NULL,
+	pull_request_url TEXT NOT NULL,
+	task_id TEXT NOT NULL DEFAULT '',
+	generation INTEGER NOT NULL,
+	created_at DATETIME NOT NULL,
+	UNIQUE(watch_id, generation, project_id, azure_repository_id, pull_request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_azure_devops_pull_request_watch_tasks_watch
+	ON azure_devops_pull_request_watch_tasks(watch_id)`
+
 const selectConfigColumns = `workspace_id, organization_url, default_project_id,
 	default_project_name, auth_method, last_checked_at, last_ok, last_error,
 	created_at, updated_at, saved_views`
@@ -103,6 +187,9 @@ func NewStore(writer, reader *sqlx.DB) (*Store, error) {
 	}
 	if _, err := store.db.Exec(createTaskWorkItemTableSQL); err != nil {
 		return nil, fmt.Errorf("azure devops task work item schema init: %w", err)
+	}
+	if _, err := store.db.Exec(createWatchTablesSQL); err != nil {
+		return nil, fmt.Errorf("azure devops watcher schema init: %w", err)
 	}
 	return store, nil
 }

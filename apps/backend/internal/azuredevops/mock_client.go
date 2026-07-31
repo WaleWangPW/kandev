@@ -139,6 +139,47 @@ func (c *MockClient) UpdateBoardWorkItem(_ context.Context, _, _, boardID string
 	return nil, mockNotFound("work item", id)
 }
 
+func (c *MockClient) UpdateWorkItem(_ context.Context, _ string, id int, request WorkItemAssignmentRequest) (*WorkItem, error) {
+	if err := validateWorkItemAssignment(request); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if request.AssigneeAction != nil && *request.AssigneeAction == assignCurrentUserAction && !request.hasResolvedAssignee {
+		request.hasResolvedAssignee = true
+		request.resolvedAssignee = strings.TrimSpace(c.state.User.Email)
+		if request.resolvedAssignee == "" {
+			request.resolvedAssignee = c.state.User.DisplayName
+		}
+	}
+	for index := range c.state.WorkItems {
+		item := &c.state.WorkItems[index]
+		if item.ID != id {
+			continue
+		}
+		if item.Revision != request.Revision {
+			return nil, &APIError{StatusCode: 409, Endpoint: "mock work item update", Body: "revision conflict"}
+		}
+		if request.hasResolvedAssignee {
+			item.AssignedTo = request.resolvedAssignee
+		}
+		item.Revision++
+		for boardID, snapshot := range c.state.BoardSnapshots {
+			for itemIndex := range snapshot.Items {
+				if snapshot.Items[itemIndex].ID == id {
+					snapshot.Items[itemIndex].AssignedTo = item.AssignedTo
+					snapshot.Items[itemIndex].Revision = item.Revision
+				}
+			}
+			c.state.BoardSnapshots[boardID] = snapshot
+		}
+		copy := *item
+		copy.Tags = append([]string(nil), item.Tags...)
+		return &copy, nil
+	}
+	return nil, mockNotFound("work item", id)
+}
+
 func applyMockBoardWorkItemUpdate(item *BoardWorkItem, board Board, request BoardWorkItemUpdateRequest) error {
 	if request.hasResolvedAssignee {
 		item.AssignedTo = request.resolvedAssignee

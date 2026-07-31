@@ -25,14 +25,20 @@ type fakeReadClient struct {
 	boards     []BoardReference
 	snapshot   *BoardSnapshot
 	updated    *BoardWorkItem
+	assigned   *WorkItem
+	assignment *WorkItemAssignmentRequest
 	detail     *WorkItemDetail
 	comments   *WorkItemCommentPage
 	identity   *Identity
 	lastFilter PullRequestFilter
+	prPage     *PullRequestPage
 }
 
 func (f *fakeReadClient) ListPullRequests(_ context.Context, filter PullRequestFilter) (*PullRequestPage, error) {
 	f.lastFilter = filter
+	if f.prPage != nil {
+		return f.prPage, nil
+	}
 	return &PullRequestPage{}, nil
 }
 
@@ -52,6 +58,15 @@ func (f *fakeReadClient) UpdateBoardWorkItem(context.Context, string, string, st
 		return f.updated, nil
 	}
 	return &BoardWorkItem{WorkItem: WorkItem{ID: 101, Revision: 8, Title: "Updated"}}, nil
+}
+func (f *fakeReadClient) UpdateWorkItem(_ context.Context, _ string, id int, request WorkItemAssignmentRequest) (*WorkItem, error) {
+	f.assignment = &request
+	if f.assigned != nil {
+		copy := *f.assigned
+		copy.ID = id
+		return &copy, nil
+	}
+	return &WorkItem{ID: id, Revision: request.Revision + 1, AssignedTo: "Ada"}, nil
 }
 func (f *fakeReadClient) QueryWIQL(context.Context, string, string, int) (*WorkItemSearchResult, error) {
 	return f.work, nil
@@ -183,6 +198,22 @@ func TestControllerRejectsUnsupportedBoardWorkItemFields(t *testing.T) {
 	}
 }
 
+func TestControllerUpdatesWorkItemAssignmentWithoutEditingFields(t *testing.T) {
+	router, _ := newControllerFixture(t)
+	updated := performRequest(t, router, http.MethodPatch, "/api/v1/azure-devops/work-items/101?workspace_id=ws-1&project=project-1", map[string]any{
+		"revision": 7, "assigneeAction": assignCurrentUserAction,
+	})
+	if updated.Code != http.StatusOK || !bytes.Contains(updated.Body.Bytes(), []byte("Ada")) {
+		t.Fatalf("assignment response %d: %s", updated.Code, updated.Body.String())
+	}
+	invalid := performRequest(t, router, http.MethodPatch, "/api/v1/azure-devops/work-items/101?workspace_id=ws-1&project=project-1", map[string]any{
+		"revision": 7, "title": "Cannot edit",
+	})
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("unsupported field response %d: %s", invalid.Code, invalid.Body.String())
+	}
+}
+
 func TestControllerConfigAndWorkspaceScopedReads(t *testing.T) {
 	router, _ := newControllerFixture(t)
 
@@ -199,6 +230,44 @@ func TestControllerConfigAndWorkspaceScopedReads(t *testing.T) {
 	})
 	if search.Code != http.StatusOK || !bytes.Contains(search.Body.Bytes(), []byte("Fix build")) {
 		t.Fatalf("search response %d: %s", search.Code, search.Body.String())
+	}
+}
+
+func TestControllerWorkItemWatchCRUDAndReset(t *testing.T) {
+	router, _ := newControllerFixture(t)
+	path := "/api/v1/azure-devops/watches/work-items"
+	query := "?workspace_id=ws-1"
+	created := performRequest(t, router, http.MethodPost, path+query, map[string]any{
+		"workflowId": "wf-1", "workflowStepId": "step-1", "projectId": "project-1",
+		"wiql": "SELECT [System.Id] FROM WorkItems", "repositoryId": "repo-1",
+		"baseBranch": "main", "agentProfileId": "agent-1", "executorProfileId": "executor-1",
+		"prompt": "Fix {{title}}", "pollIntervalSeconds": 1,
+	})
+	if created.Code != http.StatusOK || !bytes.Contains(created.Body.Bytes(), []byte("project-1")) {
+		t.Fatalf("create watch response %d: %s", created.Code, created.Body.String())
+	}
+	var watch WorkItemWatch
+	if err := json.Unmarshal(created.Body.Bytes(), &watch); err != nil {
+		t.Fatalf("decode watch: %v", err)
+	}
+	if watch.ID == "" || !watch.Enabled || watch.PollIntervalSeconds != minWatchPollIntervalSeconds {
+		t.Fatalf("created watch = %+v", watch)
+	}
+	listed := performRequest(t, router, http.MethodGet, path+query, nil)
+	if listed.Code != http.StatusOK || !bytes.Contains(listed.Body.Bytes(), []byte(watch.ID)) {
+		t.Fatalf("list watch response %d: %s", listed.Code, listed.Body.String())
+	}
+	updated := performRequest(t, router, http.MethodPatch, path+"/"+watch.ID+query, map[string]any{"enabled": false})
+	if updated.Code != http.StatusOK || bytes.Contains(updated.Body.Bytes(), []byte(`"enabled":true`)) {
+		t.Fatalf("update watch response %d: %s", updated.Code, updated.Body.String())
+	}
+	preview := performRequest(t, router, http.MethodGet, path+"/"+watch.ID+"/reset/preview"+query, nil)
+	if preview.Code != http.StatusOK || !bytes.Contains(preview.Body.Bytes(), []byte(`"taskCount":0`)) {
+		t.Fatalf("reset preview response %d: %s", preview.Code, preview.Body.String())
+	}
+	reset := performRequest(t, router, http.MethodPost, path+"/"+watch.ID+"/reset"+query, nil)
+	if reset.Code != http.StatusOK || !bytes.Contains(reset.Body.Bytes(), []byte(`"generation":2`)) {
+		t.Fatalf("reset response %d: %s", reset.Code, reset.Body.String())
 	}
 }
 

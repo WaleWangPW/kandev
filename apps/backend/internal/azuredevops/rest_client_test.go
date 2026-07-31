@@ -229,6 +229,29 @@ func TestRESTClientUpdateBoardWorkItem(t *testing.T) {
 	}
 }
 
+func TestRESTClientUpdateWorkItemAssignment(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/acme/project-1/_apis/wit/workitems/101" || r.Method != http.MethodPatch {
+			t.Fatalf("assignment request = %s %s", r.Method, r.URL.Path)
+		}
+		var patch []map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+			t.Fatalf("decode patch: %v", err)
+		}
+		if len(patch) != 2 || patch[0]["path"] != "/rev" || patch[0]["value"] != float64(7) || patch[1]["path"] != "/fields/System.AssignedTo" || patch[1]["value"] != "ada@example.com" {
+			t.Fatalf("patch = %#v", patch)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":101,"rev":8,"fields":{"System.Title":"Fix build","System.AssignedTo":"Ada"}}`))
+	}))
+	t.Cleanup(server.Close)
+	action := assignCurrentUserAction
+	item, err := newTestRESTClient(t, server, "pat").UpdateWorkItem(context.Background(), "project-1", 101, WorkItemAssignmentRequest{Revision: 7, AssigneeAction: &action, resolvedAssignee: "ada@example.com", hasResolvedAssignee: true})
+	if err != nil || item == nil || item.Revision != 8 || item.AssignedTo != "Ada" {
+		t.Fatalf("updated item = %+v, %v", item, err)
+	}
+}
+
 func TestRESTClientQueryWIQLBatchesAndPreservesOrder(t *testing.T) {
 	var mu sync.Mutex
 	var batches [][]int

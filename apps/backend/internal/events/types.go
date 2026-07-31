@@ -107,6 +107,12 @@ const (
 	RepositoryDeleted = "repository.deleted"
 )
 
+// Event types emitted by Azure DevOps watcher polling.
+const (
+	AzureDevOpsWorkItemWatchMatch    = "azure_devops.work_item_watch.match"
+	AzureDevOpsPullRequestWatchMatch = "azure_devops.pull_request_watch.match"
+)
+
 // Event types for repository scripts
 const (
 	RepositoryScriptCreated = "repository.script.created"

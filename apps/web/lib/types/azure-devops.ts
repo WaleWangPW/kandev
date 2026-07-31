@@ -81,6 +81,34 @@ export type AzureDevOpsWorkItem = {
   fields?: Record<string, unknown>;
 };
 
+export type AzureDevOpsPlanningField = {
+  referenceName: string;
+  label: string;
+  value: string;
+};
+
+export type AzureDevOpsWorkItemDetail = AzureDevOpsWorkItem & {
+  planningFields: AzureDevOpsPlanningField[];
+};
+
+export type AzureDevOpsWorkItemComment = {
+  id: number;
+  content: string;
+  author: AzureDevOpsIdentity;
+  publishedAt?: string;
+  updatedAt?: string;
+};
+
+export type AzureDevOpsWorkItemCommentPage = {
+  comments: AzureDevOpsWorkItemComment[];
+  continuationToken?: string;
+};
+
+export type AzureDevOpsWorkItemAssignmentUpdate = {
+  revision: number;
+  assigneeAction: "assign_current_user" | "unassign";
+};
+
 export type AzureDevOpsTeam = {
   id: string;
   name: string;
@@ -274,3 +302,80 @@ export type AzureDevOpsWorkspaceSettings = {
 export type UpdateAzureDevOpsWorkspaceSettingsRequest = Partial<
   Omit<AzureDevOpsWorkspaceSettings, "workspaceId">
 >;
+
+export type AzureDevOpsCleanupPolicy = "auto" | "always" | "never";
+
+export type AzureDevOpsWorkItemWatch = {
+  id: string;
+  workspaceId: string;
+  workflowId: string;
+  workflowStepId: string;
+  projectId: string;
+  wiql: string;
+  repositoryId: string;
+  baseBranch: string;
+  agentProfileId: string;
+  executorProfileId: string;
+  prompt: string;
+  enabled: boolean;
+  pollIntervalSeconds: number;
+  cleanupPolicy: AzureDevOpsCleanupPolicy;
+  maxInflightTasks?: number;
+  lastError?: string;
+  lastErrorAt?: string | null;
+  lastPolledAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AzureDevOpsPullRequestWatch = {
+  id: string;
+  workspaceId: string;
+  workflowId: string;
+  workflowStepId: string;
+  projectId: string;
+  azureRepositoryId?: string;
+  status: string;
+  creatorId?: string;
+  reviewerId?: string;
+  repositoryId: string;
+  baseBranch: string;
+  agentProfileId: string;
+  executorProfileId: string;
+  prompt: string;
+  enabled: boolean;
+  pollIntervalSeconds: number;
+  cleanupPolicy: AzureDevOpsCleanupPolicy;
+  maxInflightTasks?: number;
+  lastError?: string;
+  lastErrorAt?: string | null;
+  lastPolledAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AzureDevOpsWorkItemWatchInput = Omit<
+  AzureDevOpsWorkItemWatch,
+  | "id"
+  | "workspaceId"
+  | "enabled"
+  | "lastError"
+  | "lastErrorAt"
+  | "lastPolledAt"
+  | "createdAt"
+  | "updatedAt"
+>;
+
+export type AzureDevOpsPullRequestWatchInput = Omit<
+  AzureDevOpsPullRequestWatch,
+  | "id"
+  | "workspaceId"
+  | "enabled"
+  | "lastError"
+  | "lastErrorAt"
+  | "lastPolledAt"
+  | "createdAt"
+  | "updatedAt"
+>;
+
+export type AzureDevOpsWatchResetResult = { generation: number; taskCount: number };

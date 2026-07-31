@@ -15,6 +15,14 @@ import type {
   AzureDevOpsTaskPullRequest,
   AzureDevOpsTaskWorkItem,
   AzureDevOpsWorkItem,
+  AzureDevOpsWorkItemAssignmentUpdate,
+  AzureDevOpsWorkItemCommentPage,
+  AzureDevOpsWorkItemDetail,
+  AzureDevOpsWorkItemWatch,
+  AzureDevOpsWorkItemWatchInput,
+  AzureDevOpsPullRequestWatch,
+  AzureDevOpsPullRequestWatchInput,
+  AzureDevOpsWatchResetResult,
   AzureDevOpsWorkItemSearchResult,
   AzureDevOpsWorkspaceSettings,
   AssociateAzureDevOpsWorkItemRequest,
@@ -196,6 +204,211 @@ export function getAzureDevOpsWorkItem(
   const search = new URLSearchParams({ project });
   appendWorkspace(search, workspaceId);
   return fetchJson<AzureDevOpsWorkItem>(`${BASE}/work-items/${id}?${search}`, options);
+}
+
+export function getAzureDevOpsWorkItemDetail(
+  workspaceId: string,
+  project: string,
+  id: number,
+  options?: ApiRequestOptions,
+) {
+  const search = new URLSearchParams({ project });
+  appendWorkspace(search, workspaceId);
+  return fetchJson<AzureDevOpsWorkItemDetail>(`${BASE}/work-items/${id}?${search}`, options);
+}
+
+export function listAzureDevOpsWorkItemComments(
+  workspaceId: string,
+  project: string,
+  id: number,
+  continuationToken?: string,
+  options?: ApiRequestOptions,
+) {
+  const search = new URLSearchParams({ project });
+  appendWorkspace(search, workspaceId);
+  if (continuationToken) search.set("continuation_token", continuationToken);
+  return fetchJson<AzureDevOpsWorkItemCommentPage>(
+    `${BASE}/work-items/${id}/comments?${search}`,
+    options,
+  );
+}
+
+export function updateAzureDevOpsWorkItemAssignment(
+  workspaceId: string,
+  project: string,
+  id: number,
+  payload: AzureDevOpsWorkItemAssignmentUpdate,
+  options?: ApiRequestOptions,
+) {
+  const search = new URLSearchParams({ project });
+  appendWorkspace(search, workspaceId);
+  return fetchJson<AzureDevOpsWorkItem>(`${BASE}/work-items/${id}?${search}`, {
+    ...options,
+    init: { ...options?.init, method: "PATCH", body: JSON.stringify(payload) },
+  });
+}
+
+export function listAzureDevOpsWorkItemWatches(workspaceId: string, options?: ApiRequestOptions) {
+  return fetchJson<{ watches: AzureDevOpsWorkItemWatch[] }>(
+    withWorkspace(`${BASE}/watches/work-items`, workspaceId),
+    options,
+  );
+}
+
+export function createAzureDevOpsWorkItemWatch(
+  workspaceId: string,
+  payload: AzureDevOpsWorkItemWatchInput,
+  options?: ApiRequestOptions,
+) {
+  return fetchJson<AzureDevOpsWorkItemWatch>(
+    withWorkspace(`${BASE}/watches/work-items`, workspaceId),
+    {
+      ...options,
+      init: { ...options?.init, method: "POST", body: JSON.stringify(payload) },
+    },
+  );
+}
+
+export function updateAzureDevOpsWorkItemWatch(
+  workspaceId: string,
+  id: string,
+  payload: Partial<AzureDevOpsWorkItemWatchInput> & { enabled?: boolean },
+  options?: ApiRequestOptions,
+) {
+  return fetchJson<AzureDevOpsWorkItemWatch>(
+    withWorkspace(`${BASE}/watches/work-items/${encodeURIComponent(id)}`, workspaceId),
+    {
+      ...options,
+      init: { ...options?.init, method: "PATCH", body: JSON.stringify(payload) },
+    },
+  );
+}
+
+export function deleteAzureDevOpsWorkItemWatch(
+  workspaceId: string,
+  id: string,
+  options?: ApiRequestOptions,
+) {
+  return fetchJson<{ deleted: boolean }>(
+    withWorkspace(`${BASE}/watches/work-items/${encodeURIComponent(id)}`, workspaceId),
+    { ...options, init: { ...options?.init, method: "DELETE" } },
+  );
+}
+
+export function triggerAzureDevOpsWorkItemWatch(
+  workspaceId: string,
+  id: string,
+  options?: ApiRequestOptions,
+) {
+  return fetchJson<{ matched: number }>(
+    withWorkspace(`${BASE}/watches/work-items/${encodeURIComponent(id)}/trigger`, workspaceId),
+    { ...options, init: { ...options?.init, method: "POST" } },
+  );
+}
+
+export function previewAzureDevOpsWorkItemWatchReset(
+  workspaceId: string,
+  id: string,
+  options?: ApiRequestOptions,
+) {
+  return fetchJson<{ taskCount: number }>(
+    withWorkspace(
+      `${BASE}/watches/work-items/${encodeURIComponent(id)}/reset/preview`,
+      workspaceId,
+    ),
+    options,
+  );
+}
+
+export function resetAzureDevOpsWorkItemWatch(
+  workspaceId: string,
+  id: string,
+  options?: ApiRequestOptions,
+) {
+  return fetchJson<AzureDevOpsWatchResetResult>(
+    withWorkspace(`${BASE}/watches/work-items/${encodeURIComponent(id)}/reset`, workspaceId),
+    { ...options, init: { ...options?.init, method: "POST" } },
+  );
+}
+
+export function listAzureDevOpsPullRequestWatches(
+  workspaceId: string,
+  options?: ApiRequestOptions,
+) {
+  return fetchJson<{ watches: AzureDevOpsPullRequestWatch[] }>(
+    withWorkspace(`${BASE}/watches/pull-requests`, workspaceId),
+    options,
+  );
+}
+
+export function createAzureDevOpsPullRequestWatch(
+  workspaceId: string,
+  payload: AzureDevOpsPullRequestWatchInput,
+  options?: ApiRequestOptions,
+) {
+  return fetchJson<AzureDevOpsPullRequestWatch>(
+    withWorkspace(`${BASE}/watches/pull-requests`, workspaceId),
+    { ...options, init: { ...options?.init, method: "POST", body: JSON.stringify(payload) } },
+  );
+}
+
+export function updateAzureDevOpsPullRequestWatch(
+  workspaceId: string,
+  id: string,
+  payload: Partial<AzureDevOpsPullRequestWatchInput> & { enabled?: boolean },
+  options?: ApiRequestOptions,
+) {
+  return fetchJson<AzureDevOpsPullRequestWatch>(
+    withWorkspace(`${BASE}/watches/pull-requests/${encodeURIComponent(id)}`, workspaceId),
+    { ...options, init: { ...options?.init, method: "PATCH", body: JSON.stringify(payload) } },
+  );
+}
+
+export function deleteAzureDevOpsPullRequestWatch(
+  workspaceId: string,
+  id: string,
+  options?: ApiRequestOptions,
+) {
+  return fetchJson<{ deleted: boolean }>(
+    withWorkspace(`${BASE}/watches/pull-requests/${encodeURIComponent(id)}`, workspaceId),
+    { ...options, init: { ...options?.init, method: "DELETE" } },
+  );
+}
+
+export function triggerAzureDevOpsPullRequestWatch(
+  workspaceId: string,
+  id: string,
+  options?: ApiRequestOptions,
+) {
+  return fetchJson<{ matched: number }>(
+    withWorkspace(`${BASE}/watches/pull-requests/${encodeURIComponent(id)}/trigger`, workspaceId),
+    { ...options, init: { ...options?.init, method: "POST" } },
+  );
+}
+
+export function previewAzureDevOpsPullRequestWatchReset(
+  workspaceId: string,
+  id: string,
+  options?: ApiRequestOptions,
+) {
+  return fetchJson<{ taskCount: number }>(
+    withWorkspace(
+      `${BASE}/watches/pull-requests/${encodeURIComponent(id)}/reset/preview`,
+      workspaceId,
+    ),
+    options,
+  );
+}
+
+export function resetAzureDevOpsPullRequestWatch(
+  workspaceId: string,
+  id: string,
+  options?: ApiRequestOptions,
+) {
+  return fetchJson<AzureDevOpsWatchResetResult>(
+    withWorkspace(`${BASE}/watches/pull-requests/${encodeURIComponent(id)}/reset`, workspaceId),
+    { ...options, init: { ...options?.init, method: "POST" } },
+  );
 }
 
 export function listAzureDevOpsTeams(

@@ -1,30 +1,25 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import {
-  IconChevronLeft,
-  IconChevronRight,
-  IconExternalLink,
-  IconGripVertical,
-  IconList,
-} from "@tabler/icons-react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import { IconChevronLeft, IconChevronRight, IconGripVertical, IconList } from "@tabler/icons-react";
 import { Alert, AlertDescription } from "@kandev/ui/alert";
 import { Badge } from "@kandev/ui/badge";
 import { Button } from "@kandev/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@kandev/ui/card";
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from "@kandev/ui/drawer";
-import { Label } from "@kandev/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@kandev/ui/select";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@kandev/ui/sheet";
 import { useAzureDevOpsBoard } from "@/hooks/domains/azure-devops/use-azure-devops-board";
 import type { AzureDevOpsBoardPreference } from "@/hooks/domains/azure-devops/use-azure-devops-preferences";
 import { useResponsiveBreakpoint } from "@/hooks/use-responsive-breakpoint";
 import type {
+  AzureDevOpsActionPreset,
   AzureDevOpsBoard,
   AzureDevOpsBoardWorkItem,
   AzureDevOpsProject,
+  AzureDevOpsWorkItem,
 } from "@/lib/types/azure-devops";
 import { groupAzureDevOpsBoardItems } from "./azure-devops-board-view";
+import { AzureDevOpsWorkItemDetail } from "./azure-devops-work-item-detail";
 
 type Props = {
   workspaceId?: string;
@@ -33,6 +28,8 @@ type Props = {
   onProjectChange: (projectId: string) => void;
   initialPreference?: AzureDevOpsBoardPreference;
   onPreferenceChange: (preference: AzureDevOpsBoardPreference) => void;
+  quickActions?: AzureDevOpsActionPreset[];
+  onStartTask?: (item: AzureDevOpsWorkItem, action?: AzureDevOpsActionPreset) => void;
 };
 
 function BoardCard({
@@ -44,12 +41,23 @@ function BoardCard({
   onOpen: () => void;
   onDragStart: () => void;
 }) {
+  const pointerStart = useRef<{ x: number; y: number } | null>(null);
+  const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    pointerStart.current = { x: event.clientX, y: event.clientY };
+  };
+  const handlePointerUp = (event: PointerEvent<HTMLDivElement>) => {
+    const start = pointerStart.current;
+    pointerStart.current = null;
+    if (!start || Math.hypot(event.clientX - start.x, event.clientY - start.y) < 6) onOpen();
+  };
   return (
     <Card
       draggable
       role="button"
       tabIndex={0}
       onDragStart={onDragStart}
+      onPointerDown={handlePointerDown}
+      onPointerUp={handlePointerUp}
       onClick={onOpen}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
@@ -75,150 +83,6 @@ function BoardCard({
         {!!item.tags?.length && <div className="truncate">{item.tags.join(" · ")}</div>}
       </CardContent>
     </Card>
-  );
-}
-
-function BoardActionForm({
-  item,
-  board,
-  onMove,
-  onAssigneeChange,
-  onClose,
-}: {
-  item: AzureDevOpsBoardWorkItem;
-  board: AzureDevOpsBoard;
-  onMove: (item: AzureDevOpsBoardWorkItem, columnId: string) => Promise<void>;
-  onAssigneeChange: (
-    item: AzureDevOpsBoardWorkItem,
-    action: "assign_current_user" | "unassign",
-  ) => Promise<void>;
-  onClose: () => void;
-}) {
-  const [columnId, setColumnId] = useState(item.columnId);
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const perform = async (action: () => Promise<void>) => {
-    setSaving(true);
-    setSaveError(null);
-    try {
-      await action();
-      onClose();
-    } catch (cause) {
-      setSaveError(cause instanceof Error ? cause.message : "Unable to update work item");
-    } finally {
-      setSaving(false);
-    }
-  };
-  return (
-    <div className="space-y-4 p-4">
-      {saveError && (
-        <Alert variant="destructive">
-          <AlertDescription>{saveError}</AlertDescription>
-        </Alert>
-      )}
-      <div className="space-y-1.5">
-        <Label>Column</Label>
-        <Select value={columnId} onValueChange={setColumnId}>
-          <SelectTrigger data-testid="azure-board-column-select">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {board.columns.map((column) => (
-              <SelectItem key={column.id} value={column.id}>
-                {column.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-      <Button
-        type="button"
-        className="w-full cursor-pointer"
-        disabled={saving || columnId === item.columnId}
-        onClick={() => void perform(() => onMove(item, columnId))}
-      >
-        {saving ? "Updating…" : "Move to column"}
-      </Button>
-      <Button
-        type="button"
-        variant="outline"
-        className="w-full cursor-pointer"
-        disabled={saving}
-        onClick={() => void perform(() => onAssigneeChange(item, "assign_current_user"))}
-      >
-        Assign to me
-      </Button>
-      {item.assignedTo && (
-        <Button
-          type="button"
-          variant="ghost"
-          className="w-full cursor-pointer"
-          disabled={saving}
-          onClick={() => void perform(() => onAssigneeChange(item, "unassign"))}
-        >
-          Unassign
-        </Button>
-      )}
-      {item.webUrl && (
-        <Button asChild variant="ghost" className="w-full cursor-pointer">
-          <a href={item.webUrl} target="_blank" rel="noreferrer">
-            Open in Azure DevOps <IconExternalLink className="ml-2 h-4 w-4" />
-          </a>
-        </Button>
-      )}
-    </div>
-  );
-}
-
-function BoardEditor({
-  item,
-  board,
-  onOpenChange,
-  onMove,
-  onAssigneeChange,
-}: {
-  item: AzureDevOpsBoardWorkItem | null;
-  board: AzureDevOpsBoard;
-  onOpenChange: (open: boolean) => void;
-  onMove: (item: AzureDevOpsBoardWorkItem, columnId: string) => Promise<void>;
-  onAssigneeChange: (
-    item: AzureDevOpsBoardWorkItem,
-    action: "assign_current_user" | "unassign",
-  ) => Promise<void>;
-}) {
-  const { isMobile } = useResponsiveBreakpoint();
-  if (!item) return null;
-  const title = `Work item #${item.id}`;
-  const form = (
-    <BoardActionForm
-      key={`${item.id}-${item.revision}`}
-      item={item}
-      board={board}
-      onMove={onMove}
-      onAssigneeChange={onAssigneeChange}
-      onClose={() => onOpenChange(false)}
-    />
-  );
-  if (isMobile)
-    return (
-      <Drawer open onOpenChange={onOpenChange}>
-        <DrawerContent className="max-h-[min(44rem,calc(100dvh-16px-env(safe-area-inset-bottom,0px)))]">
-          <DrawerHeader>
-            <DrawerTitle>{title}</DrawerTitle>
-          </DrawerHeader>
-          <div className="min-h-0 overflow-y-auto pb-[env(safe-area-inset-bottom,0px)]">{form}</div>
-        </DrawerContent>
-      </Drawer>
-    );
-  return (
-    <Sheet open onOpenChange={onOpenChange}>
-      <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-lg">
-        <SheetHeader>
-          <SheetTitle>{title}</SheetTitle>
-        </SheetHeader>
-        {form}
-      </SheetContent>
-    </Sheet>
   );
 }
 
@@ -290,6 +154,7 @@ function MobileColumnNavigator({
                 type="button"
                 variant={candidate.id === selectedColumn ? "default" : "outline"}
                 className="mb-2 min-h-11 w-full cursor-pointer justify-between"
+                data-testid={`azure-board-column-option-${candidate.id}`}
                 onClick={() => select(candidate.id)}
               >
                 <span>{candidate.name}</span>
@@ -435,6 +300,7 @@ function BoardEmptyState() {
   );
 }
 
+// eslint-disable-next-line max-lines-per-function -- board rendering coordinates drag/drop, responsive columns, and detail state.
 export function AzureDevOpsBoard({
   workspaceId,
   projectId,
@@ -442,6 +308,8 @@ export function AzureDevOpsBoard({
   onProjectChange,
   initialPreference,
   onPreferenceChange,
+  quickActions = [],
+  onStartTask,
 }: Props) {
   const { isMobile } = useResponsiveBreakpoint();
   const board = useAzureDevOpsBoard(workspaceId, projectId, initialPreference);
@@ -523,12 +391,30 @@ export function AzureDevOpsBoard({
                 </div>
               ))}
           </div>
-          <BoardEditor
-            item={editing}
-            board={board.snapshot.board}
+          <AzureDevOpsWorkItemDetail
+            open={!!editing}
+            workspaceId={workspaceId}
+            projectId={projectId}
+            initialItem={editing}
             onOpenChange={(open) => !open && setEditing(null)}
-            onMove={board.moveItem}
-            onAssigneeChange={board.updateAssignee}
+            boardContext={
+              editing
+                ? {
+                    board: board.snapshot.board,
+                    item: editing,
+                    onMove: board.moveItem,
+                    onItemUpdated: (item) => {
+                      board.mergeItem(item);
+                      setEditing(item);
+                      if (isMobile) {
+                        presentation.columnPreference.setSelectedColumn(item.columnId);
+                      }
+                    },
+                  }
+                : undefined
+            }
+            quickActions={quickActions}
+            onStartTask={onStartTask}
           />
         </>
       )}

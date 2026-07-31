@@ -7,11 +7,14 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/kandev/kandev/internal/common/logger"
+	"github.com/kandev/kandev/internal/events/bus"
+	"github.com/kandev/kandev/internal/watchreset"
 )
 
 var (
@@ -40,15 +43,70 @@ type SecretStore interface {
 // Service coordinates workspace configuration, encrypted PATs, and auth
 // probes.
 type Service struct {
-	store      *Store
-	secrets    SecretStore
-	clientFn   ClientFactory
-	log        *logger.Logger
-	mock       *MockClient
-	repoLookup RepositoryLookup
+	store                    *Store
+	secrets                  SecretStore
+	clientFn                 ClientFactory
+	log                      *logger.Logger
+	mock                     *MockClient
+	repoLookup               RepositoryLookup
+	watchRepositoryLookup    WatchRepositoryLookup
+	watchDependencyValidator WatchDependencyValidator
 	// workspaceAuthorizer is wired to the task service when per-user auth is
 	// enabled. A nil authorizer preserves the unscoped local-development path.
 	workspaceAuthorizer func(context.Context, string) error
+	eventBus            bus.EventBus
+	mu                  sync.RWMutex
+	cascadeTaskDeleter  watchreset.TaskDeleter
+	taskSessionChecker  TaskSessionChecker
+}
+
+// SetEventBus wires watcher events and preserves the nil-safe local test path.
+func (s *Service) SetEventBus(eventBus bus.EventBus) {
+	if s != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.eventBus = eventBus
+	}
+}
+
+// SetCascadeTaskDeleter wires the shared task-tree cleanup used by watcher
+// reset and delete operations. A nil deleter keeps persistence usable in
+// local tests while production still clears reservations safely.
+func (s *Service) SetCascadeTaskDeleter(deleter watchreset.TaskDeleter) {
+	if s != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.cascadeTaskDeleter = deleter
+	}
+}
+
+func (s *Service) getCascadeTaskDeleter() watchreset.TaskDeleter {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cascadeTaskDeleter
+}
+
+// SetTaskSessionChecker wires the user-engagement check used by the "auto"
+// watcher cleanup policy. It is optional for local tests; production wires
+// the same task repository adapter used by the other integrations.
+func (s *Service) SetTaskSessionChecker(checker TaskSessionChecker) {
+	if s != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.taskSessionChecker = checker
+	}
+}
+
+func (s *Service) getTaskSessionChecker() TaskSessionChecker {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.taskSessionChecker
 }
 
 // MockClient returns the E2E mock when the provider is in mock mode.

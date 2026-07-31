@@ -74,6 +74,7 @@ export function AzureDevOpsWorkItemResults({
   loading,
   error,
   onStartTask,
+  onOpenDetail,
   quickActions = [],
   onQuickAction,
 }: {
@@ -81,6 +82,7 @@ export function AzureDevOpsWorkItemResults({
   loading: boolean;
   error: string | null;
   onStartTask: (item: AzureDevOpsWorkItem) => void;
+  onOpenDetail?: (item: AzureDevOpsWorkItem) => void;
   quickActions?: AzureDevOpsActionPreset[];
   onQuickAction?: (item: AzureDevOpsWorkItem, action: AzureDevOpsActionPreset) => void;
 }) {
@@ -90,7 +92,19 @@ export function AzureDevOpsWorkItemResults({
     <div className="divide-y" data-testid="azure-devops-work-item-results">
       {items.map((item) => (
         <div key={item.id} className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-start">
-          <div className="min-w-0 flex-1 space-y-1">
+          <div
+            className="min-w-0 flex-1 cursor-pointer space-y-1"
+            role={onOpenDetail ? "button" : undefined}
+            tabIndex={onOpenDetail ? 0 : undefined}
+            onClick={() => onOpenDetail?.(item)}
+            onKeyDown={(event) => {
+              if (onOpenDetail && (event.key === "Enter" || event.key === " ")) {
+                event.preventDefault();
+                onOpenDetail(item);
+              }
+            }}
+            data-testid={`azure-work-item-row-${item.id}`}
+          >
             <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
               <span className="font-mono">#{item.id}</span>
               <Badge variant="outline">{item.type}</Badge>

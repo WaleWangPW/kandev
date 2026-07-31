@@ -18,7 +18,7 @@ const MOCK_STATE = {
         },
         columns: [
           { id: "todo", name: "To Do" },
-          { id: "active", name: "Active" },
+          { id: "active", name: "Active", isSplit: true },
           { id: "done", name: "Done" },
         ],
       },
@@ -27,11 +27,13 @@ const MOCK_STATE = {
           id: 101,
           revision: 3,
           title: "Handle token rotation",
+          description: "<p>Rotate the credentials safely.</p><script>window.bad = true</script>",
           state: "Active",
           type: "User Story",
           project: "project-1",
           assignedTo: "Ada Reviewer",
           tags: ["security"],
+          webUrl: "https://dev.azure.com/acme/Platform/_workitems/edit/101",
           columnId: "todo",
           columnDone: false,
         },
@@ -58,8 +60,19 @@ const MOCK_STATE = {
       project: "project-1",
       assignedTo: "Ada Reviewer",
       webUrl: "https://dev.azure.com/acme/Platform/_workitems/edit/101",
+      description: "<p>Rotate the credentials safely.</p><script>window.bad = true</script>",
+      fields: { "Microsoft.VSTS.Scheduling.Effort": 3 },
     },
   ],
+  workItemComments: {
+    "101": [
+      {
+        id: 1,
+        content: "Discussion from Azure",
+        author: { id: "user-2", displayName: "Grace Reviewer" },
+      },
+    ],
+  },
   pullRequests: [
     {
       id: 42,
@@ -161,9 +174,23 @@ test("connects and browses Azure work items, PRs, and feedback", async ({
   });
 
   await testPage.getByTestId("azure-board-card-101").click();
-  await testPage.getByTestId("azure-board-column-select").click();
+  await expect(testPage.getByTestId("azure-work-item-detail")).toBeVisible();
+  await expect(testPage.getByTestId("azure-work-item-detail-description")).toContainText(
+    "Rotate the credentials safely.",
+  );
+  await expect(testPage.getByTestId("azure-work-item-detail-description")).not.toContainText(
+    "window.bad",
+  );
+  await expect(testPage.getByTestId("azure-work-item-detail-comments")).toContainText(
+    "Discussion from Azure",
+  );
+  await testPage.getByTestId("azure-work-item-column").click();
   await testPage.getByRole("option", { name: "Active" }).click();
-  await testPage.getByRole("button", { name: "Move to column" }).click();
+  await testPage.getByTestId("azure-work-item-column-done").click();
+  await testPage.getByRole("option", { name: "Done" }).click();
+  await testPage.getByRole("button", { name: "Move" }).click();
+  await testPage.getByTestId("azure-work-item-assign-current-user").click();
+  await testPage.getByTestId("azure-work-item-detail-close").click();
   await expect(testPage.getByText("Handle token rotation")).toBeVisible();
 
   await testPage
@@ -177,6 +204,23 @@ test("connects and browses Azure work items, PRs, and feedback", async ({
   await testPage.getByTestId("azure-devops-work-items-mode").click();
   await testPage.getByTestId("azure-devops-search-button").click();
   await expect(testPage.getByText("Handle token rotation")).toBeVisible();
+  await testPage.getByTestId("azure-work-item-row-101").click();
+  await expect(testPage.getByTestId("azure-work-item-quick-actions")).toBeVisible();
+  await testPage.getByRole("button", { name: "Implement" }).click();
+  const taskDialog = testPage.getByTestId("create-task-dialog");
+  await expect(taskDialog).toBeVisible();
+  await expect(taskDialog.getByTestId("task-title-input")).toHaveValue(
+    "Implement: Handle token rotation",
+  );
+  await taskDialog.getByTestId("submit-start-agent-chevron").click();
+  await testPage.getByTestId("submit-create-without-agent").click();
+  await expect(testPage).toHaveURL(/\/tasks\//);
+  await testPage.goto("/azure-devops");
+  await testPage.getByTestId("azure-devops-work-items-mode").click();
+  await testPage.getByTestId("azure-devops-search-button").click();
+  await testPage.getByTestId("azure-work-item-row-101").click();
+  await expect(testPage.getByText("Implement: Handle token rotation")).toBeVisible();
+  await testPage.getByTestId("azure-work-item-detail-close").click();
   await testPage.getByTestId("azure-devops-pull-requests-mode").click();
   await testPage.getByTestId("azure-devops-search-button").click();
   await expect(testPage.getByText("Rotate integration credentials")).toBeVisible();
@@ -185,4 +229,48 @@ test("connects and browses Azure work items, PRs, and feedback", async ({
     "Grace Reviewer",
   );
   await expect(testPage.getByTestId("azure-devops-feedback-detail")).toContainText("Build");
+
+  await testPage.goto(
+    `/settings/workspace/${encodeURIComponent(seedData.workspaceId)}/integrations/azure-devops`,
+  );
+  await expect(testPage.getByTestId("azure-devops-watch-settings")).toBeVisible();
+  await testPage.getByTestId("azure-add-work-item-watch").click();
+  await testPage.getByTestId("azure-work-item-watch-project").fill("project-1");
+  await testPage
+    .getByTestId("azure-work-item-watch-wiql")
+    .fill("SELECT [System.Id] FROM WorkItems");
+  await testPage.getByTestId("azure-work-item-watch-repository").fill(seedData.repositoryId);
+  await testPage.getByTestId("azure-work-item-watch-workflow").fill(seedData.workflowId);
+  await testPage.getByTestId("azure-work-item-watch-step").fill(seedData.startStepId);
+  await testPage.getByTestId("azure-work-item-watch-agent").fill(seedData.agentProfileId);
+  await testPage
+    .getByTestId("azure-work-item-watch-executor")
+    .fill(seedData.worktreeExecutorProfileId);
+  await testPage.getByRole("button", { name: "Create watch" }).click();
+  const workItemWatch = testPage.locator('[data-testid^="azure-work-item-watch-"]').first();
+  await expect(workItemWatch).toBeVisible();
+  await workItemWatch.getByRole("button", { name: "Run now" }).click();
+  await expect(testPage.getByText(/\d+ new match/)).toBeVisible();
+  await workItemWatch.getByRole("button", { name: "Disable" }).click();
+  await expect(workItemWatch.getByText("Disabled")).toBeVisible();
+  await workItemWatch.getByRole("button", { name: "Enable" }).click();
+  await expect(workItemWatch.getByText("Enabled")).toBeVisible();
+  await testPage.once("dialog", (dialog) => dialog.accept());
+  await workItemWatch.getByRole("button", { name: "Reset" }).click();
+  await expect(testPage.getByText("Watch reset.")).toBeVisible();
+  await testPage.once("dialog", (dialog) => dialog.accept());
+  await workItemWatch.getByRole("button", { name: "Delete" }).click();
+  await expect(workItemWatch).toHaveCount(0);
+
+  await testPage.getByTestId("azure-add-pull-request-watch").click();
+  await testPage.getByTestId("azure-pull-request-watch-project").fill("project-1");
+  await testPage.getByTestId("azure-pull-request-watch-repository").fill(seedData.repositoryId);
+  await testPage.getByTestId("azure-pull-request-watch-workflow").fill(seedData.workflowId);
+  await testPage.getByTestId("azure-pull-request-watch-step").fill(seedData.startStepId);
+  await testPage.getByTestId("azure-pull-request-watch-agent").fill(seedData.agentProfileId);
+  await testPage
+    .getByTestId("azure-pull-request-watch-executor")
+    .fill(seedData.worktreeExecutorProfileId);
+  await testPage.getByRole("button", { name: "Create watch" }).click();
+  await expect(testPage.getByText("Pull-request filter")).toBeVisible();
 });

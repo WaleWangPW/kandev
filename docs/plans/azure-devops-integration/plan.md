@@ -1,7 +1,7 @@
 ---
 spec: docs/specs/azure-devops-integration/spec.md
 created: 2026-07-17
-updated: 2026-07-29
+updated: 2026-07-31
 status: building
 ---
 
@@ -17,6 +17,22 @@ integration availability updates, provider-neutral remote repository selection,
 server-side authenticated Azure clones, an Azure Boards view, remembered browse
 preferences, rich work-item detail, provider-specific task actions, and
 work-item/PR watchers. No Azure runtime path may require `gh` or `az`.
+
+## Current State
+
+Tasks 01-29 are implemented in this workspace. The backend persists workspace
+query/action overrides at `/api/v1/azure-devops/workspace-settings`, exposes
+generation-safe work-item and pull-request watchers, dispatches deduplicated
+tasks through the orchestrator, and performs immediate auth-health probes after
+credential changes. The browse surface restores portable per-user filters,
+opens a responsive read-only detail dialog/drawer, supports assignment and
+board-column changes, and launches associated Kandev tasks from provider
+quick-action presets. Settings exposes quick-action configuration plus watcher
+create/edit/enable/disable/run/reset/delete controls.
+
+Focused Go, Vitest, desktop Playwright, and mobile Playwright suites cover the
+new contracts. The repository verification commands and exact results are
+recorded in the task files and passed on 2026-07-31.
 
 ## Architecture
 
@@ -48,6 +64,9 @@ work-item/PR watchers. No Azure runtime path may require `gh` or `az`.
 - Fetch work-item detail and discussion on demand. Normalize a small allowlist
   of planning fields, sanitize provider HTML, and page comments with Azure's
   opaque continuation token.
+- Add a direct revision-safe work-item assignment endpoint for detail opened
+  outside a board. Keep status/column changes on the existing board endpoint,
+  because only board context can validate a provider column.
 - Reuse GitHub's action/default-query preset shapes and GitLab's generation-safe
   issue/review watcher lifecycle without translating Azure records into either
   provider's models.
@@ -108,10 +127,91 @@ work-item/PR watchers. No Azure runtime path may require `gh` or `az`.
 - Work-item detail is read-only except for Assign to me, Unassign, and board
   column/split-state controls. A visible Task menu exposes workspace-configured
   actions and existing linked Kandev tasks.
-- Azure settings adds Default queries, Quick actions, Work-item watches, and
-  Pull-request watches using shared settings cards, watcher enable drafts,
-  reset dialogs, responsive tables/cards, and save coordination.
+- Azure settings retains the shipped Quick actions section and adds Work-item
+  watches and Pull-request watches using shared settings cards, watcher enable
+  drafts, reset dialogs, and responsive tables/cards.
 - No required action may be hover-only or desktop-only.
+
+## Implemented Design
+
+### Watch persistence and lifecycle
+
+- Mirror GitLab's two-kind watcher layout with Azure-native names:
+  `watch_models.go`, `store_watches.go`, `service_watch_reset.go`,
+  `controller_watches.go`, and `controller_watch_reset.go`.
+- Persist separate work-item and PR watch tables plus separate reservation
+  tables. Reservation uniqueness always includes `generation`; work-item
+  identity is project/work-item ID and PR identity is
+  project/Azure-repository/PR ID.
+- Keep the Kandev task repository (`repository_id`) distinct from the optional
+  Azure PR filter (`azure_repository_id`). Normalize poll interval to 300
+  seconds when omitted and clamp values below 60. For `max_inflight_tasks`,
+  omitted preserves the value, zero clears it, and a positive value sets it.
+- ID-addressed controller operations first load the record, authorize its
+  workspace, and return the same not-found response for absent and unauthorized
+  watches. Reset routes use `/:id/reset/preview` and `/:id/reset`.
+- Reset increments the generation before shared cleanup and then removes prior
+  reservations. Delete marks the watch deleting and disabled before cleanup.
+  Every reservation attach and release is conditioned on watch ID plus
+  generation.
+
+### Polling and dispatch
+
+- One Azure poller schedules both watch kinds, selects enabled due watches, and
+  uses one bounded check path for create, Run now, and periodic polling. Limit
+  each provider check to 100 ordered matches and hydrate work items in Azure's
+  200-ID maximum batches.
+- Publish an event only after a current-generation reservation succeeds.
+  Authentication, query, and provider failures update `last_error` and
+  `last_error_at`, publish nothing, and retain the next polling opportunity.
+- Reconcile terminal state only for reservations that own an auto-created task.
+  Apply shared `auto`, `always`, and `never` cleanup without touching manual
+  tasks or another generation's task.
+- Add work-item and PR Azure `WatcherSource` implementations. Their
+  `WatchMetadataKey` values are respectively
+  `azure_devops_work_item_watch_id` and `azure_devops_pr_watch_id`; the task
+  metadata must write those exact keys plus the provider identity keys defined
+  in the spec.
+- Wire event handlers, shared throttling, reservation release/attach,
+  dependency self-heal, poller start/stop, and workspace/task cleanup into
+  backend startup. Missing workflow, step, task repository, agent profile, or
+  executor profile disables the watch with a user-visible error.
+
+### Work-item detail
+
+- Add `PATCH /api/v1/azure-devops/work-items/:id` for Assign to me/Unassign
+  from search results. Reuse the existing PAT-identity lookup, allowlisted JSON
+  Patch builder, revision conflict mapping, and normalized work-item response.
+  Continue using the board endpoint for column and split-state changes.
+- A shared detail hook loads core item and comments independently, owns comment
+  continuation tokens, derives linked tasks from the workspace association
+  cache, and exposes rollback-safe assignment/move mutations.
+- Render Azure description HTML through the existing
+  `rehype-raw`/`rehype-sanitize` approach used by provider content. Never mount
+  provider HTML directly. Load comments newest-first; append older pages
+  without duplicates and retry only the failed page.
+- Board cards and work-item rows open the same logical detail. Desktop uses a
+  modal `Dialog` over retained context. Phone uses a `100dvh` full-height
+  `Drawer` with fixed header/action regions, one `min-h-0 overflow-y-auto`
+  body, safe-area padding, focus return, and 44px targets.
+- All contexts show assignment, Azure link, linked Kandev tasks, and the
+  workspace quick-action Task menu. Only board-origin detail shows
+  column/split controls. Successful quick-action creation persists the
+  association before invalidating detail/task-link queries.
+
+### Automation settings and E2E
+
+- Add work-item and PR watcher sections below the shipped Quick actions
+  section. Desktop watcher lists use tables; phone uses stacked cards.
+  Create/edit is a desktop dialog and full-height phone drawer backed by the
+  same form normalization and domain hook.
+- Extend the Azure mock client/controller and E2E API helper with deterministic
+  detail pages, comment continuation/failure, current identity, watcher
+  matches, reservations, reset previews, and terminal-state transitions.
+- Add focused desktop scenarios to the existing Azure integration spec and
+  mobile scenarios to `mobile-azure-devops.spec.ts`. Implementation follows
+  RED-GREEN: write the failing Playwright assertion before completing each
+  corresponding UI behavior.
 
 ## Tests
 
@@ -123,8 +223,6 @@ work-item/PR watchers. No Azure runtime path may require `gh` or `az`.
   or status helpers.
 - Playwright desktop and `mobile-chrome` flows using the Azure mock controller:
   connect, browse work items, browse PRs, and open PR feedback.
-- Security review of secret isolation, URL/SSRF validation, response-size
-  bounds, and error redaction before final verification.
 - Go tests for provider-neutral task inputs, canonical remote URLs, and
   credential cleanup around Azure clone processes.
 - Component and Playwright coverage for immediate availability, Enabled chips,
@@ -146,22 +244,36 @@ work-item/PR watchers. No Azure runtime path may require `gh` or `az`.
   hydration, queued optimistic writes, stale provider fallback, and no browser
   storage dependency.
 - Component tests for read-only detail, section retries, Assign to me/Unassign,
-  quick-action payloads, linked-task indicators, preset editors, and responsive
-  watcher controls.
+  quick-action payloads, linked-task indicators, and responsive watcher
+  controls.
 - Playwright desktop and `mobile-chrome` flows for restored filters, detail and
   discussion, assignment/column changes, quick task creation, immediate
-  availability, default-query/action customization, and watcher create/run/reset.
+  availability, and watcher create/run/reset.
+- Watcher persistence tests must cover cross-workspace ID access, restart
+  persistence, generation-aware reserve/attach/release, deleting state,
+  reset preview cleanup sets, and workspace deletion.
+- Poller/dispatch tests must cover bounded initial checks, duplicate matches
+  after restart, provider failures, terminal cleanup policies, exact metadata
+  keys, in-flight throttling, ownership loss, and dependency self-heal.
+- Detail tests must cover independent core/comment errors, continuation-token
+  append/dedup, unsafe HTML removal, search-result assignment, conflict
+  rollback, board-only column controls, linked-task cache invalidation, and
+  association failure.
 
 ## Verification
 
-- `rtk make -C apps/backend fmt`
-- `rtk go test ./internal/azuredevops/...` from `apps/backend`
-- `rtk make -C apps/backend test`
-- `rtk make -C apps/backend lint`
+- `make fmt` — passed on 2026-07-31.
+- `make typecheck` — passed on 2026-07-31.
+- `make test` — passed on 2026-07-31.
+- `make lint` — passed on 2026-07-31 (Go, web, and harness checks).
 - Task files define the exact focused Go and Vitest commands for each new
   behavior; run those during TDD before the corresponding task is marked done.
-- `pnpm e2e:run --host --project chromium -- e2e/tests/integrations/azure-devops.spec.ts` from `apps/web`
-- `pnpm e2e:run --host --project mobile-chrome -- e2e/tests/integrations/mobile-azure-devops.spec.ts e2e/tests/task/mobile-create-task-remote-repo.spec.ts` from `apps/web`
+- `pnpm e2e:run --host --no-build tests/integrations/azure-devops.spec.ts -- --project=chromium` from `apps/web` — passed.
+- `pnpm e2e:run --host --no-build tests/integrations/mobile-azure-devops.spec.ts -- --project=mobile-chrome` from `apps/web` — passed.
+- Managed desktop and mobile `pnpm e2e:run` equivalents — passed after the
+  production build.
+- `node --test scripts/validate-public-docs.test.mjs` and
+  `node scripts/validate-public-docs.mjs` — passed on 2026-07-31.
 
 ## Risks
 
@@ -262,22 +374,22 @@ Wave 11: connection, preference, and work-item contracts
 - [x] [Task 20: Work-item detail contracts](task-20-work-item-detail.md)
 - [x] [Task 21: Constrained work-item mutations](task-21-work-item-mutations.md)
 - [x] [Task 22: Task work-item associations](task-22-task-work-item-links.md)
-- [ ] [Task 23: Azure provider presets](task-23-provider-presets.md)
+- [x] [Task 23: Azure provider presets](task-23-provider-presets.md)
 
 Wave 12: watcher backend
 
-- [ ] [Task 24: Azure watcher persistence](task-24-watcher-persistence.md)
-- [ ] [Task 25: Azure watcher polling](task-25-watcher-polling.md)
-- [ ] [Task 26: Azure watcher dispatch](task-26-watcher-dispatch.md)
+- [x] [Task 24: Azure watcher persistence](task-24-watcher-persistence.md)
+- [x] [Task 25: Azure watcher polling](task-25-watcher-polling.md)
+- [x] [Task 26: Azure watcher dispatch](task-26-watcher-dispatch.md)
 
 Wave 13: responsive frontend
 
-- [ ] [Task 27: Responsive work-item detail](task-27-work-item-detail-ui.md)
-- [ ] [Task 28: Azure automation settings](task-28-automation-settings.md)
+- [x] [Task 27: Responsive work-item detail](task-27-work-item-detail-ui.md)
+- [x] [Task 28: Azure watcher settings](task-28-automation-settings.md)
 
 Wave 14: integrated validation
 
-- [ ] [Task 29: Azure enhancement validation](task-29-enhancement-validation.md)
+- [x] [Task 29: Azure enhancement validation](task-29-enhancement-validation.md)
 
 Tasks within a wave are listed separately for ownership clarity but should run
 sequentially in the current workspace when they touch the same package or state

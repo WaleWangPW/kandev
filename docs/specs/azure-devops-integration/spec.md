@@ -1,7 +1,7 @@
 ---
-status: building
+status: shipped
 created: 2026-07-17
-updated: 2026-07-29
+updated: 2026-07-31
 owner: tbd
 ---
 
@@ -61,9 +61,10 @@ Azure Repos data without installing or authenticating the GitHub CLI.
 - The work-item and pull-request browse surface leads with named, provider-aware
   presets and supports workspace-scoped saved views. Raw WIQL remains available
   in an Advanced section instead of occupying the primary filter surface.
-- Workspace administrators can customize the built-in work-item and
-  pull-request default queries. A reset restores Kandev's current defaults
-  without freezing an older copy of those defaults into workspace settings.
+- Built-in work-item queries are Recently updated, Assigned to me, Active, and
+  Created by me. Built-in pull-request queries are Review requested, Open,
+  Completed, and Created by me. The workspace settings contract may override a
+  preset family without freezing built-in defaults into a workspace row.
 - Work items and pull requests expose workspace-configurable quick actions.
   Work-item defaults are Implement, Investigate, and Reproduce; pull-request
   defaults are Review, Address feedback, and Fix CI. Choosing an action opens
@@ -145,6 +146,8 @@ One row per workspace:
 | `last_error`           | text     | required, default empty                                        |
 | `created_at`           | datetime | required                                                       |
 | `updated_at`           | datetime | required                                                       |
+| `saved_views`          | text     | required JSON array, default `[]`                              |
+| `workspace_settings`   | text     | required JSON object, default `{}`                             |
 
 The PAT is never stored in SQLite. It is stored under the encrypted secret key
 `azure_devops:<workspace_id>:pat`.
@@ -243,14 +246,33 @@ The tuple `(task_id, workspace_id, project_id, work_item_id)` is unique.
 workspace-owned records. Both contain workflow/step, repository/base branch,
 agent/executor profile, prompt, enabled state, poll interval (default 300
 seconds, minimum 60), cleanup policy, optional maximum in-flight tasks,
-generation, last check/error, and timestamps. Work-item watches additionally
-contain project ID and WIQL. Pull-request watches contain project ID, optional
-repository ID, status, creator, and reviewer filters.
+generation, deleting state, last check/error, and timestamps. `repository_id`
+always means the Kandev repository used to create the task. Work-item watches
+add the Azure project ID and WIQL. Pull-request watches add the Azure project
+ID, optional Azure repository ID, status (default `active`), creator, and
+reviewer filters.
 
 Each watch kind has a reservation table keyed by watch ID, watch generation,
 and provider item identity. Reservations record the matched URL and nullable
 Kandev task ID so retries cannot create duplicate tasks and reset can safely
 start a new generation.
+
+The work-item reservation identity is `(watch_id, generation, project_id,
+work_item_id)`. The pull-request reservation identity is `(watch_id,
+generation, project_id, azure_repository_id, pull_request_id)`. Every attach
+or release operation includes the current generation in its write condition.
+A reset increments the generation before configured cleanup and removes
+reservations from prior generations after cleanup. Delete marks the watch as
+deleting and disables it before cleanup. An old in-flight dispatch that loses
+generation ownership is terminal and cannot attach or release a reservation in
+the new generation.
+
+Create and Run now checks are bounded to 100 provider matches. The WIQL or
+pull-request filters are authoritative for new matches. Polling also
+reconciles provider terminal state for reservations that already own Kandev
+tasks, applying `auto`, `always`, or `never` cleanup exactly as the shared
+watcher contract defines. Cleanup never affects a manually created task or a
+task created by another watch generation.
 
 ### Azure board state
 
@@ -283,6 +305,7 @@ is present in the path.
 | `PUT`    | `/api/v1/azure-devops/views`                                                          | Replace workspace-scoped saved Azure views                               |
 | `POST`   | `/api/v1/azure-devops/work-items/search`                                              | Execute WIQL and return hydrated work items                              |
 | `GET`    | `/api/v1/azure-devops/work-items/:id`                                                 | Return one hydrated work item                                            |
+| `PATCH`  | `/api/v1/azure-devops/work-items/:id`                                                 | Assign the item to the PAT identity or unassign with revision protection |
 | `GET`    | `/api/v1/azure-devops/work-items/:id/comments`                                        | Return one page of non-deleted work-item discussion                      |
 | `GET`    | `/api/v1/azure-devops/identity`                                                       | Return the Azure identity represented by the stored workspace PAT        |
 | `GET`    | `/api/v1/azure-devops/workspaces/:workspaceId/task-work-items`                        | Return work-item associations grouped by provider item                   |
@@ -293,21 +316,21 @@ is present in the path.
 | `GET`    | `/api/v1/azure-devops/workspaces/:workspaceId/task-prs`                               | Return task PR associations grouped by task                              |
 | `POST`   | `/api/v1/azure-devops/tasks/:taskId/pull-requests`                                    | Validate and associate an Azure PR with a task repository                |
 | `POST`   | `/api/v1/azure-devops/tasks/:taskId/pull-requests/sync`                               | Refresh persisted state for one association                              |
-| `GET`    | `/api/v1/azure-devops/settings`                                                       | Return saved views plus resolved/default query and action presets        |
-| `PATCH`  | `/api/v1/azure-devops/settings`                                                       | Update named workspace preset fields with omitted-vs-null semantics      |
+| `GET`    | `/api/v1/azure-devops/workspace-settings`                                             | Return resolved/default query and action presets                         |
+| `PATCH`  | `/api/v1/azure-devops/workspace-settings`                                             | Update named workspace preset fields with omitted-vs-null semantics      |
 | `GET`    | `/api/v1/azure-devops/watches/work-items`                                             | List workspace work-item watches                                         |
 | `POST`   | `/api/v1/azure-devops/watches/work-items`                                             | Create a work-item watch and run its initial check                       |
 | `PATCH`  | `/api/v1/azure-devops/watches/work-items/:id`                                         | Update or enable/disable a work-item watch                               |
 | `DELETE` | `/api/v1/azure-devops/watches/work-items/:id`                                         | Delete a work-item watch under its cleanup policy                        |
 | `POST`   | `/api/v1/azure-devops/watches/work-items/:id/trigger`                                 | Run one work-item watch immediately                                      |
-| `GET`    | `/api/v1/azure-devops/watches/work-items/:id/reset-preview`                           | Return the tasks affected by resetting a watch                           |
+| `GET`    | `/api/v1/azure-devops/watches/work-items/:id/reset/preview`                           | Return the tasks affected by resetting a watch                           |
 | `POST`   | `/api/v1/azure-devops/watches/work-items/:id/reset`                                   | Apply cleanup and advance the work-item watch generation                 |
 | `GET`    | `/api/v1/azure-devops/watches/pull-requests`                                          | List workspace pull-request watches                                      |
 | `POST`   | `/api/v1/azure-devops/watches/pull-requests`                                          | Create a pull-request watch and run its initial check                    |
 | `PATCH`  | `/api/v1/azure-devops/watches/pull-requests/:id`                                      | Update or enable/disable a pull-request watch                            |
 | `DELETE` | `/api/v1/azure-devops/watches/pull-requests/:id`                                      | Delete a pull-request watch under its cleanup policy                     |
 | `POST`   | `/api/v1/azure-devops/watches/pull-requests/:id/trigger`                              | Run one pull-request watch immediately                                   |
-| `GET`    | `/api/v1/azure-devops/watches/pull-requests/:id/reset-preview`                        | Return the tasks affected by resetting a watch                           |
+| `GET`    | `/api/v1/azure-devops/watches/pull-requests/:id/reset/preview`                        | Return the tasks affected by resetting a watch                           |
 | `POST`   | `/api/v1/azure-devops/watches/pull-requests/:id/reset`                                | Apply cleanup and advance the pull-request watch generation              |
 
 Search requests contain `project`, `wiql`, and an optional `top` value. The
@@ -330,11 +353,38 @@ a JSON Patch `test` operation for `/rev`, and returns the updated normalized
 work item. A stale revision returns HTTP 409 with code
 `azure_devops_revision_conflict`.
 
+Direct work-item updates contain `project`, `revision`, and exactly one
+`assigneeAction`. They reuse the same identity lookup, `/rev` test, allowlist,
+conflict response, and normalized response as board updates, but require no
+team or board context. Detail opened from a board may additionally show the
+board column/split controls. Detail opened from search does not guess a board
+and therefore exposes assignment only.
+
 Work-item detail exposes sanitized description plus normalized planning fields
 when Azure returns any of Effort, Story Points, Size, Remaining Work, Original
 Estimate, or Completed Work. Discussion uses Azure's paginated work-item
 comments API, defaults to newest first, excludes deleted comments, and returns
-an opaque continuation token.
+an opaque continuation token. Core detail and discussion load independently:
+core failure shows a core retry, while a discussion failure preserves the
+loaded item and retries only the failed page. Provider HTML is rendered through
+the existing raw-HTML-aware sanitized Markdown pipeline; scripts, unsafe
+attributes, and unsafe URL schemes are never mounted.
+
+Quick-action task creation uses the existing task dialog. After successful
+creation, the client persists the task/work-item association before reporting
+the launch complete and invalidates the workspace task-link cache. The detail
+surface lists linked Kandev tasks by provider identity
+`(workspace_id, project_id, work_item_id)`. A failed association is visible and
+retryable; it is never represented as a successful link.
+
+Watcher task metadata uses exact provider-specific keys. Work-item tasks write
+`azure_devops_work_item_watch_id`, `azure_devops_project_id`,
+`azure_devops_work_item_id`, and `azure_devops_work_item_url`. Pull-request
+tasks write `azure_devops_pr_watch_id`, `azure_devops_project_id`,
+`azure_devops_repository_id`, `azure_devops_pull_request_id`, and
+`azure_devops_pull_request_url`. Each watcher source's `WatchMetadataKey`
+returns its corresponding watch ID key so shared in-flight counting sees the
+same metadata written during task creation.
 
 Task repository inputs use the provider-neutral `remote_url` field. The legacy
 `github_url` field remains accepted during migration and is normalized to the
@@ -391,6 +441,8 @@ hint and revalidated from the configured provider before persistence or clone.
   reports a non-blocking save error, and lets the backend value win on reload.
 - A work-item description or discussion failure keeps the detail surface open,
   shows the core item fields, and exposes a retry for only the failed section.
+- A failed Assign to me, Unassign, or column change keeps detail open, restores
+  the last confirmed fields, and leaves task actions and discussion usable.
 - A failed immediate credential probe returns the saved configuration as
   unhealthy with the probe error. Integration navigation remains hidden until
   a later successful test, save, or health poll.
@@ -400,6 +452,9 @@ hint and revalidated from the configured provider before persistence or clone.
 - Watch reservation and task creation are generation-safe. A failed dispatch
   releases its reservation unless ownership was lost to a reset; retrying the
   same generation cannot create a second task for the same provider item.
+- A watcher create/Run now result set larger than 100 is truncated
+  deterministically and reports the bounded check time without dispatching an
+  unbounded backlog.
 - PR association fails closed when the repository is not attached to the task
   or is not an `azure_devops` repository.
 - A repository selected from an integration is rejected if its canonical URL or
@@ -501,17 +556,26 @@ hint and revalidated from the configured provider before persistence or clone.
   provider URL, title, description, repository/branch when available, and
   selected prompt prefilled; successful work-item creation persists its
   association.
-- **GIVEN** no customized Azure default queries or quick actions, **WHEN** a
+- **GIVEN** a workspace has no Azure query or quick-action override, **WHEN** a
   user opens Azure browse or settings, **THEN** current Kandev built-ins are
-  used; resetting a customization restores that behavior.
+  resolved without persisting a copied default list.
 - **GIVEN** an enabled work-item or pull-request watch, **WHEN** a new
   non-reserved provider item matches its filters, **THEN** one Kandev task is
   created in the configured workflow context and records the watch/item
   metadata.
+- **GIVEN** the same provider item is returned by later polls in the same
+  generation, **WHEN** its watch runs again or the backend restarts, **THEN**
+  its existing reservation prevents another task from being created.
 - **GIVEN** an existing watcher-created task, **WHEN** the user previews and
   confirms watch reset, **THEN** cleanup follows the configured policy, the
   generation advances, and old in-flight dispatch cannot attach to the new
   generation.
+- **GIVEN** a watcher references a deleted workflow step, repository, agent
+  profile, or executor profile, **WHEN** dispatch validates its dependencies,
+  **THEN** the watch is disabled with a visible error and no task is created.
+- **GIVEN** core work-item detail loads but discussion fails, **WHEN** the user
+  retries discussion, **THEN** the dialog remains open and the loaded core
+  fields and actions are not discarded or refetched unnecessarily.
 - **GIVEN** a narrow mobile viewport, **WHEN** a user configures Azure DevOps or
   browses work items and PRs, **THEN** all filters and primary actions remain
   reachable without horizontal page scrolling.

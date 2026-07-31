@@ -29,6 +29,11 @@ const boardSnapshot = {
     { id: 2, revision: 1, title: "Second", columnId: "todo", columnDone: false },
   ],
 };
+const workspaceId = "workspace-a";
+const projectId = "project-1";
+const teamId = "team-1";
+const boardId = "board-1";
+const updateError = "update failed";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -47,7 +52,7 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-describe("useAzureDevOpsBoard", () => {
+describe("useAzureDevOpsBoard discovery", () => {
   it("restores valid remembered team and board IDs", async () => {
     apiMocks.teams.mockResolvedValue({
       teams: [
@@ -63,7 +68,7 @@ describe("useAzureDevOpsBoard", () => {
     });
 
     const { result } = renderHook(() =>
-      useAzureDevOpsBoard("workspace-a", "project-1", {
+      useAzureDevOpsBoard(workspaceId, projectId, {
         teamId: "team-b",
         boardId: "board-b",
       }),
@@ -80,16 +85,18 @@ describe("useAzureDevOpsBoard", () => {
       .mockResolvedValueOnce({ teams: [{ id: "new", name: "New team" }] });
 
     const { result, rerender } = renderHook(
-      ({ workspaceId }) => useAzureDevOpsBoard(workspaceId, "project-1"),
-      { initialProps: { workspaceId: "workspace-a" } },
+      ({ currentWorkspaceId }) => useAzureDevOpsBoard(currentWorkspaceId, projectId),
+      { initialProps: { currentWorkspaceId: workspaceId } },
     );
-    rerender({ workspaceId: "workspace-b" });
+    rerender({ currentWorkspaceId: "workspace-b" });
     await waitFor(() => expect(result.current.teamId).toBe("new"));
 
     await act(async () => stale.resolve({ teams: [{ id: "old", name: "Old team" }] }));
     expect(result.current.teamId).toBe("new");
   });
+});
 
+describe("useAzureDevOpsBoard updates", () => {
   it("restores only a rejected optimistic update and keeps its error visible", async () => {
     apiMocks.teams.mockResolvedValue({ teams: [{ id: "team-1", name: "Team" }] });
     apiMocks.boards.mockResolvedValue({ boards: [{ id: "board-1", name: "Board" }] });
@@ -99,21 +106,71 @@ describe("useAzureDevOpsBoard", () => {
       .mockReturnValueOnce(rejectedUpdate.promise)
       .mockResolvedValueOnce({ ...boardSnapshot.items[1], columnId: "done", revision: 2 });
 
-    const { result } = renderHook(() => useAzureDevOpsBoard("workspace-a", "project-1"));
+    const { result } = renderHook(() => useAzureDevOpsBoard(workspaceId, projectId));
     await waitFor(() => expect(result.current.snapshot?.items).toHaveLength(2));
 
     const first = result.current.moveItem(result.current.snapshot!.items[0], "done");
     await waitFor(() => expect(result.current.snapshot?.items[0].columnId).toBe("done"));
     await expect(
       result.current.moveItem(result.current.snapshot!.items[1], "done"),
-    ).resolves.toBeUndefined();
-    rejectedUpdate.reject(new Error("update failed"));
-    await expect(first).rejects.toThrow("update failed");
+    ).resolves.toMatchObject({ id: 2, columnId: "done", revision: 2 });
+    rejectedUpdate.reject(new Error(updateError));
+    await expect(first).rejects.toThrow(updateError);
 
     await waitFor(() => {
       expect(result.current.snapshot?.items[0].columnId).toBe("todo");
       expect(result.current.snapshot?.items[1].columnId).toBe("done");
-      expect(result.current.error).toBe("update failed");
+      expect(result.current.error).toBe(updateError);
+    });
+  });
+
+  it("clears a failed update error when a later update starts", async () => {
+    apiMocks.teams.mockResolvedValue({ teams: [{ id: "team-1", name: "Team" }] });
+    apiMocks.boards.mockResolvedValue({ boards: [{ id: "board-1", name: "Board" }] });
+    apiMocks.snapshot.mockResolvedValue(boardSnapshot);
+    apiMocks.update
+      .mockRejectedValueOnce(new Error(updateError))
+      .mockResolvedValueOnce({ ...boardSnapshot.items[0], columnId: "done", revision: 2 });
+
+    const { result } = renderHook(() => useAzureDevOpsBoard(workspaceId, projectId));
+    await waitFor(() => expect(result.current.snapshot?.items).toHaveLength(2));
+
+    await expect(
+      result.current.moveItem(result.current.snapshot!.items[0], "done"),
+    ).rejects.toThrow(updateError);
+    await waitFor(() => expect(result.current.error).toBe(updateError));
+
+    await expect(
+      result.current.moveItem(result.current.snapshot!.items[0], "done"),
+    ).resolves.toMatchObject({ id: 1, columnId: "done", revision: 2 });
+    await waitFor(() => expect(result.current.error).toBeNull());
+  });
+
+  it("sends the selected split-column state with a move", async () => {
+    apiMocks.teams.mockResolvedValue({ teams: [{ id: "team-1", name: "Team" }] });
+    apiMocks.boards.mockResolvedValue({ boards: [{ id: "board-1", name: "Board" }] });
+    apiMocks.snapshot.mockResolvedValue({
+      ...boardSnapshot,
+      board: { columns: [{ id: "todo", name: "To Do", isSplit: true }] },
+    });
+    apiMocks.update.mockResolvedValue({ ...boardSnapshot.items[0], columnDone: true, revision: 2 });
+
+    const { result } = renderHook(() => useAzureDevOpsBoard(workspaceId, projectId));
+    await waitFor(() => expect(result.current.snapshot?.items).toHaveLength(2));
+
+    const moveWithSplitState = result.current.moveItem as (
+      item: (typeof boardSnapshot.items)[number],
+      columnId: string,
+      columnDone: boolean,
+    ) => Promise<(typeof boardSnapshot.items)[number] | undefined>;
+    await expect(
+      moveWithSplitState(result.current.snapshot!.items[0], "todo", true),
+    ).resolves.toMatchObject({ id: 1, columnId: "todo", columnDone: true, revision: 2 });
+
+    expect(apiMocks.update).toHaveBeenCalledWith(workspaceId, projectId, teamId, boardId, 1, {
+      revision: 1,
+      columnId: "todo",
+      columnDone: true,
     });
   });
 });

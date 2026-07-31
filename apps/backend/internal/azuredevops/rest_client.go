@@ -376,6 +376,36 @@ func (c *RESTClient) UpdateBoardWorkItem(ctx context.Context, projectID, teamID,
 	return &BoardWorkItem{WorkItem: item, ColumnID: columnID, ColumnDone: done}, nil
 }
 
+func (c *RESTClient) UpdateWorkItem(ctx context.Context, projectID string, id int, request WorkItemAssignmentRequest) (*WorkItem, error) {
+	patch, err := workItemAssignmentPatch(request)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := fmt.Sprintf("/%s/_apis/wit/workitems/%d?api-version=%s", pathPart(projectID), id, restAPIVersion)
+	var raw rawWorkItem
+	if err := c.doJSONWithContentType(ctx, http.MethodPatch, endpoint, patch, &raw, "application/json-patch+json"); err != nil {
+		return nil, err
+	}
+	item := convertWorkItem(raw)
+	return &item, nil
+}
+
+func workItemAssignmentPatch(request WorkItemAssignmentRequest) ([]map[string]any, error) {
+	if err := validateWorkItemAssignment(request); err != nil {
+		return nil, err
+	}
+	if !request.hasResolvedAssignee {
+		return nil, fmt.Errorf("%w: assignee action must be resolved server-side", ErrInvalidConfig)
+	}
+	patch := []map[string]any{{"op": "test", "path": "/rev", "value": request.Revision}}
+	if request.resolvedAssignee == "" {
+		patch = append(patch, map[string]any{"op": "remove", "path": "/fields/System.AssignedTo"})
+	} else {
+		patch = append(patch, map[string]any{"op": "add", "path": "/fields/System.AssignedTo", "value": request.resolvedAssignee})
+	}
+	return patch, nil
+}
+
 func boardWorkItemPatch(board struct {
 	Columns []BoardColumn `json:"columns"`
 	Fields  BoardFields   `json:"fields"`

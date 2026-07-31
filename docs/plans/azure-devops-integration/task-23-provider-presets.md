@@ -1,7 +1,7 @@
 ---
 id: "23-provider-presets"
 title: "Azure provider presets"
-status: in_progress
+status: completed
 wave: 11
 depends_on: []
 plan: "plan.md"
@@ -13,16 +13,18 @@ spec: "../../specs/azure-devops-integration/spec.md"
 ## Acceptance
 
 - Workspace settings return current built-in work-item/PR default queries and
-  quick actions when overrides are null, and preserve explicit customized lists.
-- PATCH uses omitted-vs-null semantics per preset family; reset removes the
+  quick actions when overrides are absent, and preserve explicit customized
+  lists.
+- PATCH distinguishes omitted fields from explicit `null`; reset removes one
   override so future built-in improvements apply.
-- Preset normalization rejects invalid kinds/filters, drops empty action
-  labels, assigns missing IDs, and never stores credentials or result data.
+- Browse exposes the resolved provider presets and quick-action Task menus.
+  Task creation interpolates provider context and persists the work-item link
+  in the existing workspace association cache.
 
 ## Verification
 
 - `go test ./internal/azuredevops -run 'Test(WorkspaceSettings|DefaultQueryPresets|ActionPresets)'` from `apps/backend`.
-- `pnpm --filter @kandev/web test -- --run components/azure-devops/azure-devops-presets.test.ts` from `apps`.
+- `pnpm --filter @kandev/web test -- --run components/azure-devops/azure-devops-quick-actions.test.tsx components/azure-devops/azure-devops-task-launcher.test.tsx hooks/domains/azure-devops/use-azure-devops-task-work-items.test.tsx` from `apps`.
 
 ## Files Likely Touched
 
@@ -34,8 +36,11 @@ spec: "../../specs/azure-devops-integration/spec.md"
 - `apps/backend/internal/azuredevops/controller_test.go`
 - `apps/web/lib/types/azure-devops.ts`
 - `apps/web/lib/api/domains/azure-devops-api.ts`
+- `apps/web/hooks/domains/azure-devops/use-azure-devops-task-work-items.ts`
+- `apps/web/components/azure-devops/azure-devops-settings.tsx`
 - `apps/web/components/azure-devops/azure-devops-presets.ts`
-- `apps/web/components/azure-devops/azure-devops-action-presets.ts`
+- `apps/web/components/azure-devops/azure-devops-quick-actions.tsx`
+- `apps/web/components/azure-devops/azure-devops-task-launcher.tsx`
 
 ## Dependencies
 

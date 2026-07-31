@@ -151,8 +151,12 @@ export function useAzureDevOpsBoard(
   }, [boardId, projectId, teamId, workspaceId]);
 
   const updateItem = useCallback(
-    async (item: AzureDevOpsBoardWorkItem, values: BoardWorkItemChanges) => {
-      if (!workspaceId || !teamId || !boardId) return;
+    async (
+      item: AzureDevOpsBoardWorkItem,
+      values: BoardWorkItemChanges,
+    ): Promise<AzureDevOpsBoardWorkItem | undefined> => {
+      if (!workspaceId || !teamId || !boardId) return undefined;
+      setError(null);
       const optimistic = { ...item, ...values };
       setSnapshot((current) => replaceBoardItem(current, item.id, optimistic));
       try {
@@ -165,6 +169,7 @@ export function useAzureDevOpsBoard(
           { revision: item.revision, ...values },
         );
         setSnapshot((current) => replaceBoardItem(current, item.id, updated));
+        return updated;
       } catch (cause) {
         setSnapshot((current) => {
           if (!current) return current;
@@ -181,8 +186,15 @@ export function useAzureDevOpsBoard(
   );
 
   const moveItem = useCallback(
-    async (item: AzureDevOpsBoardWorkItem, columnId: string) => {
-      if (item.columnId !== columnId) await updateItem(item, { columnId });
+    async (
+      item: AzureDevOpsBoardWorkItem,
+      columnId: string,
+      columnDone = item.columnDone,
+    ): Promise<AzureDevOpsBoardWorkItem | undefined> => {
+      if (item.columnId !== columnId || item.columnDone !== columnDone) {
+        return updateItem(item, { columnId, columnDone });
+      }
+      return item;
     },
     [updateItem],
   );
@@ -192,6 +204,10 @@ export function useAzureDevOpsBoard(
       updateItem(item, { assigneeAction }),
     [updateItem],
   );
+
+  const mergeItem = useCallback((item: AzureDevOpsBoardWorkItem) => {
+    setSnapshot((current) => replaceBoardItem(current, item.id, item));
+  }, []);
 
   return {
     teams: discovery.teams,
@@ -205,5 +221,6 @@ export function useAzureDevOpsBoard(
     error: discovery.error ?? error,
     moveItem,
     updateAssignee,
+    mergeItem,
   };
 }

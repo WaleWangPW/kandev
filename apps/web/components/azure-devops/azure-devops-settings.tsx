@@ -23,6 +23,7 @@ import {
 } from "@/components/integrations/auth-status-banner";
 import { WorkspaceScopedSection } from "@/components/integrations/workspace-scoped-section";
 import { AzureDevOpsQuickActionsSection } from "@/components/azure-devops/azure-devops-quick-actions";
+import { AzureDevOpsWatchSettings } from "@/components/azure-devops/azure-devops-watch-settings";
 import { SettingsSection } from "@/components/settings/settings-section";
 import { useToast } from "@/components/toast-provider";
 import { INTEGRATION_STATUS_REFRESH_MS } from "@/hooks/domains/integrations/use-integration-availability";
@@ -485,6 +486,7 @@ export function AzureDevOpsIntegrationPage({ workspaceId }: { workspaceId?: stri
             workspaceId={selectedWorkspaceId}
           />
           <AzureDevOpsQuickActionsSection workspaceId={selectedWorkspaceId} />
+          <AzureDevOpsWatchSettings workspaceId={selectedWorkspaceId} />
         </div>
       )}
     </WorkspaceScopedSection>

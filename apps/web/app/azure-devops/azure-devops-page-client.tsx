@@ -1,3 +1,5 @@
+/* eslint-disable max-lines -- Azure DevOps page composition keeps the browse, board, and task-launch flows together. */
+
 "use client";
 
 import Link from "@/components/routing/app-link";
@@ -28,6 +30,7 @@ import {
 } from "@/components/azure-devops/azure-devops-scope-bar";
 import { AzureDevOpsSaveViewDialog } from "@/components/azure-devops/azure-devops-save-view-dialog";
 import { AzureDevOpsBoard } from "@/components/azure-devops/azure-devops-board";
+import { AzureDevOpsWorkItemDetail } from "@/components/azure-devops/azure-devops-work-item-detail";
 import { AzureDevOpsPullRequestPagination } from "@/components/azure-devops/azure-devops-pull-request-pagination";
 import { AzureDevOpsModeTabs } from "@/components/azure-devops/azure-devops-mode-tabs";
 import { presetsForKind } from "@/components/azure-devops/azure-devops-presets";
@@ -45,7 +48,11 @@ import { useAzureDevOpsSavedViews } from "@/hooks/domains/azure-devops/use-azure
 import { useAzureDevOpsPagePreferences } from "@/hooks/domains/azure-devops/use-azure-devops-preferences";
 import { useAzureDevOpsWorkspaceActions } from "@/hooks/domains/azure-devops/use-azure-devops-workspace-actions";
 import type { Repository, Workflow, WorkflowStep } from "@/lib/types/http";
-import type { AzureDevOpsPullRequest, AzureDevOpsSavedView } from "@/lib/types/azure-devops";
+import type {
+  AzureDevOpsPullRequest,
+  AzureDevOpsSavedView,
+  AzureDevOpsWorkItem,
+} from "@/lib/types/azure-devops";
 
 const PAGE_SIZE = 25;
 const WORK_ITEMS_MODE: AzureDevOpsBrowseMode = "work-items";
@@ -338,10 +345,12 @@ function useAzureSearch({
   );
 }
 
+// eslint-disable-next-line max-lines-per-function -- this hook coordinates the page's persisted filters and browse modes.
 function useAzureDevOpsPageState(workspaceId?: string) {
   const [mode, setMode] = useState<AzureDevOpsBrowseMode>(BOARD_MODE);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [launchPayload, setLaunchPayload] = useState<AzureDevOpsLaunchPayload | null>(null);
+  const [detailItem, setDetailItem] = useState<AzureDevOpsWorkItem | null>(null);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [skip, setSkip] = useState(0);
   const connection = useAzureDevOpsConnection(workspaceId);
@@ -422,6 +431,8 @@ function useAzureDevOpsPageState(workspaceId?: string) {
     setMobileFiltersOpen,
     launchPayload,
     setLaunchPayload,
+    detailItem,
+    setDetailItem,
     feedbackOpen,
     setFeedbackOpen,
     skip,
@@ -476,6 +487,7 @@ function BrowseResults({ state }: { state: PageState }) {
             loading={state.workItems.loading}
             error={state.workItems.error}
             onStartTask={(item) => state.setLaunchPayload({ kind: "work-item", item })}
+            onOpenDetail={state.setDetailItem}
             quickActions={state.workItemActions}
             onQuickAction={(item, action) =>
               state.setLaunchPayload({ kind: "work-item", item, action })
@@ -529,6 +541,7 @@ function MobileFilters({
   );
 }
 
+// eslint-disable-next-line max-lines-per-function -- the page content owns the responsive browse composition.
 function AzureDevOpsPageContent({ workspaceId, workflows, steps, repositories }: PageProps) {
   const state = useAzureDevOpsPageState(workspaceId);
 
@@ -585,6 +598,10 @@ function AzureDevOpsPageContent({ workspaceId, workflows, steps, repositories }:
           onProjectChange={(projectId) => state.update("projectId", projectId)}
           initialPreference={state.boardPreference}
           onPreferenceChange={state.setBoardPreference}
+          quickActions={state.workItemActions}
+          onStartTask={(item, action) =>
+            state.setLaunchPayload({ kind: "work-item", item, action })
+          }
         />
       )}
       <div className="hidden border-b px-4 py-3 md:block">
@@ -600,6 +617,18 @@ function AzureDevOpsPageContent({ workspaceId, workflows, steps, repositories }:
         onOpenChange={(open) => {
           state.setFeedbackOpen(open);
           if (!open) state.feedback.clear();
+        }}
+      />
+      <AzureDevOpsWorkItemDetail
+        open={!!state.detailItem}
+        onOpenChange={(open) => !open && state.setDetailItem(null)}
+        workspaceId={workspaceId}
+        projectId={state.filters.projectId}
+        initialItem={state.detailItem}
+        quickActions={state.workItemActions}
+        onStartTask={(item, action) => {
+          state.setLaunchPayload({ kind: "work-item", item, action });
+          state.setDetailItem(null);
         }}
       />
       <AzureDevOpsTaskLauncher
