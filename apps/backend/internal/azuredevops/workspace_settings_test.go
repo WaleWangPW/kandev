@@ -2,6 +2,7 @@ package azuredevops
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"testing"
 )
@@ -55,5 +56,50 @@ func TestWorkspaceSettingsDefaultsAndActionOverrides(t *testing.T) {
 	}
 	if len(updated.PullRequestActions) != len(DefaultPullRequestActionPresets()) {
 		t.Fatalf("untouched PR actions should keep defaults: %+v", updated.PullRequestActions)
+	}
+}
+
+func TestWorkspaceSettingsPatchRequestPreservesFieldPresence(t *testing.T) {
+	service, _, _ := newTestService(t, nil)
+	ctx := context.Background()
+	if _, err := service.SetConfigForWorkspace(ctx, "ws-1", &SetConfigRequest{
+		OrganizationURL: "https://dev.azure.com/acme", PAT: "pat",
+	}); err != nil {
+		t.Fatalf("set config: %v", err)
+	}
+
+	var customRequest UpdateWorkspaceSettingsRequest
+	if err := json.Unmarshal([]byte(`{"workItemActions":[{"label":"Triage","promptTemplate":"Triage {{url}}"}]}`), &customRequest); err != nil {
+		t.Fatalf("decode custom patch: %v", err)
+	}
+	customRequest.WorkspaceID = "ws-1"
+	if _, err := service.UpdateWorkspaceSettings(ctx, &customRequest); err != nil {
+		t.Fatalf("apply custom patch: %v", err)
+	}
+
+	var omittedRequest UpdateWorkspaceSettingsRequest
+	if err := json.Unmarshal([]byte(`{}`), &omittedRequest); err != nil {
+		t.Fatalf("decode omitted patch: %v", err)
+	}
+	omittedRequest.WorkspaceID = "ws-1"
+	omitted, err := service.UpdateWorkspaceSettings(ctx, &omittedRequest)
+	if err != nil {
+		t.Fatalf("apply omitted patch: %v", err)
+	}
+	if len(omitted.WorkItemActions) != 1 || omitted.WorkItemActions[0].Label != "Triage" {
+		t.Fatalf("omitted work-item actions = %+v, want saved action", omitted.WorkItemActions)
+	}
+
+	var resetRequest UpdateWorkspaceSettingsRequest
+	if err := json.Unmarshal([]byte(`{"workItemActions":null}`), &resetRequest); err != nil {
+		t.Fatalf("decode null patch: %v", err)
+	}
+	resetRequest.WorkspaceID = "ws-1"
+	reset, err := service.UpdateWorkspaceSettings(ctx, &resetRequest)
+	if err != nil {
+		t.Fatalf("apply null patch: %v", err)
+	}
+	if !reflect.DeepEqual(reset.WorkItemActions, DefaultWorkItemActionPresets()) {
+		t.Fatalf("null work-item actions = %+v, want defaults", reset.WorkItemActions)
 	}
 }

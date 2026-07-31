@@ -27,6 +27,8 @@ const createConfigTableSQL = `
 		last_ok BOOLEAN NOT NULL DEFAULT 0,
 		last_error TEXT NOT NULL DEFAULT '',
 		saved_views TEXT NOT NULL DEFAULT '[]',
+		workspace_settings TEXT NOT NULL DEFAULT '{}',
+		workspace_settings_version INTEGER NOT NULL DEFAULT 0,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
 	)`
@@ -182,6 +184,9 @@ func NewStore(writer, reader *sqlx.DB) (*Store, error) {
 	if err := store.ensureWorkspaceSettingsColumn(); err != nil {
 		return nil, fmt.Errorf("azure devops workspace settings schema init: %w", err)
 	}
+	if err := store.ensureWorkspaceSettingsVersionColumn(); err != nil {
+		return nil, fmt.Errorf("azure devops workspace settings version schema init: %w", err)
+	}
 	if _, err := store.db.Exec(createTaskPRTableSQL); err != nil {
 		return nil, fmt.Errorf("azure devops task PR schema init: %w", err)
 	}
@@ -195,31 +200,27 @@ func NewStore(writer, reader *sqlx.DB) (*Store, error) {
 }
 
 func (s *Store) ensureWorkspaceSettingsColumn() error {
-	rows, err := s.db.Query(`PRAGMA table_info(azure_devops_configs)`)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var cid int
-		var name, columnType string
-		var notNull, primaryKey int
-		var defaultValue any
-		if scanErr := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); scanErr != nil {
-			return scanErr
-		}
-		if name == "workspace_settings" {
-			return rows.Err()
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	_, err = s.db.Exec(`ALTER TABLE azure_devops_configs ADD COLUMN workspace_settings TEXT NOT NULL DEFAULT '{}'`)
-	return err
+	return s.ensureConfigColumn(
+		"workspace_settings",
+		`ALTER TABLE azure_devops_configs ADD COLUMN workspace_settings TEXT NOT NULL DEFAULT '{}'`,
+	)
+}
+
+func (s *Store) ensureWorkspaceSettingsVersionColumn() error {
+	return s.ensureConfigColumn(
+		"workspace_settings_version",
+		`ALTER TABLE azure_devops_configs ADD COLUMN workspace_settings_version INTEGER NOT NULL DEFAULT 0`,
+	)
 }
 
 func (s *Store) ensureSavedViewsColumn() error {
+	return s.ensureConfigColumn(
+		"saved_views",
+		`ALTER TABLE azure_devops_configs ADD COLUMN saved_views TEXT NOT NULL DEFAULT '[]'`,
+	)
+}
+
+func (s *Store) ensureConfigColumn(column, statement string) error {
 	rows, err := s.db.Query(`PRAGMA table_info(azure_devops_configs)`)
 	if err != nil {
 		return err
@@ -233,14 +234,14 @@ func (s *Store) ensureSavedViewsColumn() error {
 		if scanErr := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); scanErr != nil {
 			return scanErr
 		}
-		if name == "saved_views" {
+		if name == column {
 			return rows.Err()
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`ALTER TABLE azure_devops_configs ADD COLUMN saved_views TEXT NOT NULL DEFAULT '[]'`)
+	_, err = s.db.Exec(statement)
 	return err
 }
 
@@ -374,17 +375,29 @@ func (s *Store) PutSavedViewsJSON(ctx context.Context, workspaceID, raw string) 
 	return nil
 }
 
-func (s *Store) GetWorkspaceSettingsJSON(ctx context.Context, workspaceID string) (string, error) {
+// WorkspaceSettingsSnapshot is the persisted settings payload and its optimistic-lock version.
+type WorkspaceSettingsSnapshot struct {
+	JSON    string
+	Version int64
+}
+
+func (s *Store) GetWorkspaceSettingsSnapshot(ctx context.Context, workspaceID string) (WorkspaceSettingsSnapshot, error) {
 	if err := validateWorkspaceID(workspaceID); err != nil {
-		return "", err
+		return WorkspaceSettingsSnapshot{}, err
 	}
-	var raw string
-	err := s.ro.GetContext(ctx, &raw,
-		`SELECT workspace_settings FROM azure_devops_configs WHERE workspace_id = ?`, workspaceID)
+	var snapshot WorkspaceSettingsSnapshot
+	err := s.ro.GetContext(ctx, &snapshot,
+		`SELECT workspace_settings AS json, workspace_settings_version AS version
+		FROM azure_devops_configs WHERE workspace_id = ?`, workspaceID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrNotConfigured
+		return WorkspaceSettingsSnapshot{}, ErrNotConfigured
 	}
-	return raw, err
+	return snapshot, err
+}
+
+func (s *Store) GetWorkspaceSettingsJSON(ctx context.Context, workspaceID string) (string, error) {
+	snapshot, err := s.GetWorkspaceSettingsSnapshot(ctx, workspaceID)
+	return snapshot.JSON, err
 }
 
 func (s *Store) PutWorkspaceSettingsJSON(ctx context.Context, workspaceID, raw string) error {
@@ -392,17 +405,39 @@ func (s *Store) PutWorkspaceSettingsJSON(ctx context.Context, workspaceID, raw s
 		return err
 	}
 	result, err := s.db.ExecContext(ctx, `
-		UPDATE azure_devops_configs SET workspace_settings = ?, updated_at = ?
+		UPDATE azure_devops_configs
+		SET workspace_settings = ?, workspace_settings_version = workspace_settings_version + 1, updated_at = ?
 		WHERE workspace_id = ?`, raw, time.Now().UTC(), workspaceID)
 	if err != nil {
 		return err
 	}
-	updated, err := result.RowsAffected()
+	updated, err := workspaceSettingsRowsUpdated(result)
 	if err != nil {
 		return err
 	}
-	if updated == 0 {
+	if !updated {
 		return ErrNotConfigured
 	}
 	return nil
+}
+
+// PutWorkspaceSettingsJSONIfVersion saves settings only when the caller's
+// snapshot is still current. A false result means another writer won the race.
+func (s *Store) PutWorkspaceSettingsJSONIfVersion(ctx context.Context, workspaceID, raw string, version int64) (bool, error) {
+	if err := validateWorkspaceID(workspaceID); err != nil {
+		return false, err
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE azure_devops_configs
+		SET workspace_settings = ?, workspace_settings_version = workspace_settings_version + 1, updated_at = ?
+		WHERE workspace_id = ? AND workspace_settings_version = ?`, raw, time.Now().UTC(), workspaceID, version)
+	if err != nil {
+		return false, err
+	}
+	return workspaceSettingsRowsUpdated(result)
+}
+
+func workspaceSettingsRowsUpdated(result sql.Result) (bool, error) {
+	updated, err := result.RowsAffected()
+	return updated > 0, err
 }

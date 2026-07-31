@@ -85,13 +85,64 @@ func (c *MockClient) ListBoards(context.Context, string, string) ([]BoardReferen
 }
 
 func (c *MockClient) GetBoardSnapshot(_ context.Context, _, _, boardID string) (*BoardSnapshot, error) {
-	snapshot, ok := c.snapshot().BoardSnapshots[boardID]
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	snapshot, ok := c.state.BoardSnapshots[boardID]
 	if !ok {
 		return nil, fmt.Errorf("azure devops mock board %q not found", boardID)
 	}
-	result := snapshot
-	result.Items = append([]BoardWorkItem(nil), snapshot.Items...)
+	result := cloneMockBoardSnapshot(snapshot)
 	return &result, nil
+}
+
+func cloneMockBoardSnapshot(snapshot BoardSnapshot) BoardSnapshot {
+	clone := snapshot
+	clone.Board.Columns = append([]BoardColumn(nil), snapshot.Board.Columns...)
+	clone.Board.Rows = append([]BoardRow(nil), snapshot.Board.Rows...)
+	clone.Items = make([]BoardWorkItem, len(snapshot.Items))
+	for index, item := range snapshot.Items {
+		clone.Items[index] = cloneMockBoardWorkItem(item)
+	}
+	return clone
+}
+
+func cloneMockBoardWorkItem(item BoardWorkItem) BoardWorkItem {
+	clone := item
+	clone.Tags = append([]string(nil), item.Tags...)
+	if item.Fields != nil {
+		clone.Fields = make(map[string]any, len(item.Fields))
+		for key, value := range item.Fields {
+			clone.Fields[key] = cloneMockFieldValue(value)
+		}
+	}
+	return clone
+}
+
+func cloneMockFieldValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		clone := make(map[string]any, len(typed))
+		for key, nested := range typed {
+			clone[key] = cloneMockFieldValue(nested)
+		}
+		return clone
+	case []any:
+		clone := make([]any, len(typed))
+		for index, nested := range typed {
+			clone[index] = cloneMockFieldValue(nested)
+		}
+		return clone
+	case map[string]string:
+		clone := make(map[string]string, len(typed))
+		for key, nested := range typed {
+			clone[key] = nested
+		}
+		return clone
+	case []string:
+		return append([]string(nil), typed...)
+	default:
+		return value
+	}
 }
 
 func (c *MockClient) UpdateBoardWorkItem(_ context.Context, _, _, boardID string, id int, request BoardWorkItemUpdateRequest) (*BoardWorkItem, error) {
@@ -133,7 +184,7 @@ func (c *MockClient) UpdateBoardWorkItem(_ context.Context, _, _, boardID string
 				break
 			}
 		}
-		copy := *item
+		copy := cloneMockBoardWorkItem(*item)
 		return &copy, nil
 	}
 	return nil, mockNotFound("work item", id)

@@ -12,6 +12,7 @@ vi.mock("@/components/toast-provider", () => ({ useToast: () => ({ toast: vi.fn(
 import { AzureDevOpsQuickActionsSection } from "./azure-devops-quick-actions";
 
 beforeEach(() => {
+  vi.clearAllMocks();
   const settings = {
     workItemActions: [
       {
@@ -85,5 +86,17 @@ describe("AzureDevOpsQuickActionsSection", () => {
         pullRequestActions: [expect.objectContaining({ label: "Inspect" })],
       }),
     );
+  });
+
+  it("blocks saving when loading the existing quick actions fails", async () => {
+    mocks.get.mockRejectedValueOnce(new Error("Settings unavailable"));
+    renderSection();
+
+    expect((await screen.findByRole("alert")).textContent).toContain("Settings unavailable");
+    expect((screen.getByRole("button", { name: "Reset" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+    expect(mocks.update).not.toHaveBeenCalled();
   });
 });

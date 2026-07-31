@@ -76,9 +76,27 @@ func TestMockClientPaginatesPullRequests(t *testing.T) {
 func TestMockClientBoardReads(t *testing.T) {
 	mock := NewMockClient()
 	mock.Seed(MockState{
-		Teams:          []Team{{ID: "team-1", Name: "Platform Team", ProjectID: "p1"}},
-		Boards:         []BoardReference{{ID: "board-1", Name: "Stories"}},
-		BoardSnapshots: map[string]BoardSnapshot{"board-1": {Board: Board{ID: "board-1"}, Items: []BoardWorkItem{{WorkItem: WorkItem{ID: 101}}}}},
+		Teams:  []Team{{ID: "team-1", Name: "Platform Team", ProjectID: "p1"}},
+		Boards: []BoardReference{{ID: "board-1", Name: "Stories"}},
+		BoardSnapshots: map[string]BoardSnapshot{
+			"board-1": {
+				Board: Board{
+					ID:      "board-1",
+					Columns: []BoardColumn{{ID: "todo", Name: "Original column"}},
+					Rows:    []BoardRow{{ID: "row-1", Name: "Original row"}},
+				},
+				Items: []BoardWorkItem{{
+					WorkItem: WorkItem{
+						ID: 101,
+						Fields: map[string]any{
+							"System.Title":  "Original",
+							"Custom.Nested": map[string]any{"labels": []any{"initial-label"}},
+						},
+						Tags: []string{"initial"},
+					},
+				}},
+			},
+		},
 	})
 	teams, err := mock.ListTeams(t.Context(), "p1")
 	if err != nil || len(teams) != 1 {
@@ -93,9 +111,23 @@ func TestMockClientBoardReads(t *testing.T) {
 		t.Fatalf("snapshot = %+v, %v", snapshot, err)
 	}
 	snapshot.Items[0].Title = "Mutated caller copy"
+	snapshot.Items[0].Fields["System.Title"] = "Mutated field"
+	snapshot.Items[0].Tags[0] = "mutated-tag"
+	snapshot.Board.Columns[0].Name = "Mutated column"
+	snapshot.Board.Rows[0].Name = "Mutated row"
+	snapshot.Items[0].Fields["Custom.Nested"].(map[string]any)["labels"].([]any)[0] = "mutated-label"
 	again, err := mock.GetBoardSnapshot(t.Context(), "p1", "team-1", "board-1")
 	if err != nil || again.Items[0].Title == "Mutated caller copy" {
 		t.Fatalf("subsequent snapshot = %+v, %v", again, err)
+	}
+	if again.Items[0].Fields["System.Title"] != "Original" || again.Items[0].Tags[0] != "initial" {
+		t.Fatalf("subsequent snapshot mutable data = %+v", again.Items[0])
+	}
+	if again.Board.Columns[0].Name != "Original column" || again.Board.Rows[0].Name != "Original row" {
+		t.Fatalf("subsequent snapshot board data = %+v", again.Board)
+	}
+	if got := again.Items[0].Fields["Custom.Nested"].(map[string]any)["labels"].([]any)[0]; got != "initial-label" {
+		t.Fatalf("subsequent snapshot nested field = %q, want initial-label", got)
 	}
 }
 

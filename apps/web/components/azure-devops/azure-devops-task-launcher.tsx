@@ -81,7 +81,7 @@ function actionDescription(
   title: string,
   fallback: string,
 ): string {
-  if (!action) return fallback;
+  if (!action?.promptTemplate.trim()) return fallback;
   return action.promptTemplate.replaceAll("{{url}}", url).replaceAll("{{title}}", title);
 }
 
@@ -133,18 +133,22 @@ export function AzureDevOpsTaskLauncher({
   }, [payload, repositories, steps, workflows]);
 
   const onSuccess = async (task: Task) => {
-    if (payload?.kind === "work-item" && workspaceId && payload.item.project) {
-      try {
-        const linked = await associateAzureDevOpsWorkItem(workspaceId, task.id, {
-          projectId: payload.item.project,
-          workItemId: payload.item.id,
-        });
-        cacheAzureDevOpsTaskWorkItem(workspaceId, task.id, linked);
-        setTaskWorkItem(task.id, linked);
-      } catch (error: unknown) {
-        toast.error(
-          error instanceof Error ? error.message : "Failed to link Azure DevOps work item.",
-        );
+    if (payload?.kind === "work-item" && workspaceId) {
+      if (!payload.item.project) {
+        toast.error("Failed to link Azure DevOps work item: project is missing.");
+      } else {
+        try {
+          const linked = await associateAzureDevOpsWorkItem(workspaceId, task.id, {
+            projectId: payload.item.project,
+            workItemId: payload.item.id,
+          });
+          cacheAzureDevOpsTaskWorkItem(workspaceId, task.id, linked);
+          setTaskWorkItem(task.id, linked);
+        } catch (error: unknown) {
+          toast.error(
+            error instanceof Error ? error.message : "Failed to link Azure DevOps work item.",
+          );
+        }
       }
     }
     if (payload?.kind === "pull-request" && workspaceId && launch?.repository) {

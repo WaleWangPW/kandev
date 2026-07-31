@@ -74,6 +74,8 @@ func (r *UpdateWorkspaceSettingsRequest) UnmarshalJSON(data []byte) error {
 
 type workspaceSettingsOverrides map[string]json.RawMessage
 
+const workspaceSettingsUpdateAttempts = 3
+
 func DefaultWorkItemQueryPresets() []QueryPreset {
 	const start = "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project"
 	const order = " ORDER BY [System.ChangedDate] DESC"
@@ -148,34 +150,48 @@ func (s *Service) UpdateWorkspaceSettings(ctx context.Context, req *UpdateWorksp
 	if err := s.authorizeWorkspaceAccess(ctx, req.WorkspaceID); err != nil {
 		return nil, err
 	}
-	raw, err := s.store.GetWorkspaceSettingsJSON(ctx, req.WorkspaceID)
-	if err != nil {
-		return nil, err
+	for attempt := 0; attempt < workspaceSettingsUpdateAttempts; attempt++ {
+		snapshot, err := s.store.GetWorkspaceSettingsSnapshot(ctx, req.WorkspaceID)
+		if err != nil {
+			return nil, err
+		}
+		next, err := patchWorkspaceSettingsJSON(snapshot.JSON, req)
+		if err != nil {
+			return nil, err
+		}
+		updated, err := s.store.PutWorkspaceSettingsJSONIfVersion(ctx, req.WorkspaceID, next, snapshot.Version)
+		if err != nil {
+			return nil, err
+		}
+		if updated {
+			return s.GetWorkspaceSettings(ctx, req.WorkspaceID)
+		}
 	}
+	return nil, fmt.Errorf("update Azure workspace settings: concurrent update")
+}
+
+func patchWorkspaceSettingsJSON(raw string, req *UpdateWorkspaceSettingsRequest) (string, error) {
 	overrides := workspaceSettingsOverrides{}
 	if err := json.Unmarshal([]byte(raw), &overrides); err != nil {
-		return nil, fmt.Errorf("decode Azure workspace settings: %w", err)
+		return "", fmt.Errorf("decode Azure workspace settings: %w", err)
 	}
 	if err := patchPresetOverride(overrides, "workItemQueries", req.WorkItemQueriesSet, req.WorkItemQueries, normalizeQueryPresets); err != nil {
-		return nil, err
+		return "", err
 	}
 	if err := patchPresetOverride(overrides, "pullRequestQueries", req.PullRequestQueriesSet, req.PullRequestQueries, normalizeQueryPresets); err != nil {
-		return nil, err
+		return "", err
 	}
 	if err := patchPresetOverride(overrides, "workItemActions", req.WorkItemActionsSet, req.WorkItemActions, normalizeActionPresets); err != nil {
-		return nil, err
+		return "", err
 	}
 	if err := patchPresetOverride(overrides, "pullRequestActions", req.PullRequestActionsSet, req.PullRequestActions, normalizeActionPresets); err != nil {
-		return nil, err
+		return "", err
 	}
 	next, err := json.Marshal(overrides)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	if err := s.store.PutWorkspaceSettingsJSON(ctx, req.WorkspaceID, string(next)); err != nil {
-		return nil, err
-	}
-	return s.GetWorkspaceSettings(ctx, req.WorkspaceID)
+	return string(next), nil
 }
 
 func patchPresetOverride[T any](overrides workspaceSettingsOverrides, key string, set bool, values *[]T, normalize func([]T) []T) error {

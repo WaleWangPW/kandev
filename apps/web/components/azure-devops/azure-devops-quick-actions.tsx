@@ -263,6 +263,7 @@ function useActionDrafts(workspaceId: string) {
   const [pullRequests, setPullRequests] = useState(DEFAULT_AZURE_PULL_REQUEST_ACTIONS);
   const [baseline, setBaseline] = useState({ workItems, pullRequests });
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [resetRequested, setResetRequested] = useState(false);
   const dirty = useMemo(
     () =>
@@ -272,6 +273,8 @@ function useActionDrafts(workspaceId: string) {
 
   useEffect(() => {
     let current = true;
+    setLoading(true);
+    setLoadError(null);
     void getAzureDevOpsWorkspaceSettings(workspaceId)
       .then((settings) => {
         if (!current) return;
@@ -282,7 +285,10 @@ function useActionDrafts(workspaceId: string) {
           pullRequests: settings.pullRequestActions,
         });
       })
-      .catch(() => undefined)
+      .catch((error: unknown) => {
+        if (!current) return;
+        setLoadError(error instanceof Error ? error.message : "Failed to load quick actions.");
+      })
       .finally(() => current && setLoading(false));
     return () => {
       current = false;
@@ -322,6 +328,7 @@ function useActionDrafts(workspaceId: string) {
     setPullRequests,
     baseline,
     loading,
+    loadError,
     dirty,
     save,
     reset,
@@ -357,8 +364,9 @@ export function AzureDevOpsQuickActionsSection({ workspaceId }: { workspaceId: s
     id: `azure-devops-actions:${workspaceId}`,
     revision: JSON.stringify([drafts.workItems, drafts.pullRequests]),
     isDirty: drafts.dirty,
-    canSave: !drafts.loading && valid,
-    invalidReason: valid ? undefined : "Every quick action needs a label and prompt.",
+    canSave: !drafts.loading && !drafts.loadError && valid,
+    invalidReason:
+      drafts.loadError ?? (valid ? undefined : "Every quick action needs a label and prompt."),
     save,
     discard: drafts.discard,
   });
@@ -373,7 +381,7 @@ export function AzureDevOpsQuickActionsSection({ workspaceId }: { workspaceId: s
           size="sm"
           variant="outline"
           className="h-11 w-full cursor-pointer sm:h-8 sm:w-auto"
-          disabled={drafts.loading}
+          disabled={drafts.loading || !!drafts.loadError}
           onClick={drafts.reset}
         >
           <IconRefresh className="h-4 w-4" /> Reset
@@ -382,7 +390,12 @@ export function AzureDevOpsQuickActionsSection({ workspaceId }: { workspaceId: s
     >
       <SettingsCard isDirty={drafts.dirty} data-testid="azure-devops-quick-actions-card">
         <CardContent className="pt-4 sm:pt-6">
-          <fieldset disabled={drafts.loading} className="contents">
+          {drafts.loadError && (
+            <p role="alert" className="mb-4 text-sm text-destructive">
+              Could not load existing quick actions: {drafts.loadError}
+            </p>
+          )}
+          <fieldset disabled={drafts.loading || !!drafts.loadError} className="contents">
             <Tabs defaultValue="pull-request">
               <TabsList className="w-full sm:w-auto">
                 <TabsTrigger value="pull-request" className="flex-1 cursor-pointer sm:flex-none">

@@ -629,9 +629,11 @@ function AzureDevOpsPageContent({ workspaceId, workflows, steps, repositories }:
           }
         />
       )}
-      <div className="hidden border-b px-4 py-3 md:block">
-        {state.mode !== BOARD_MODE && <AzureDevOpsFilters {...filterProps} idSuffix="" compact />}
-      </div>
+      {state.mode !== BOARD_MODE && (
+        <div className="hidden border-b px-4 py-3 md:block">
+          <AzureDevOpsFilters {...filterProps} idSuffix="" compact />
+        </div>
+      )}
       <BrowseResults state={state} />
       {state.mode !== BOARD_MODE && <MobileFilters state={state} filterProps={filterProps} />}
       <AzureDevOpsFeedbackDialog
