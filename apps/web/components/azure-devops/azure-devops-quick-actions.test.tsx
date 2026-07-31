@@ -1,5 +1,6 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SettingsSaveProvider } from "@/components/settings/settings-save-provider";
 
 const mocks = vi.hoisted(() => ({ get: vi.fn(), update: vi.fn() }));
 vi.mock("@/lib/api/domains/azure-devops-api", () => ({
@@ -11,7 +12,7 @@ vi.mock("@/components/toast-provider", () => ({ useToast: () => ({ toast: vi.fn(
 import { AzureDevOpsQuickActionsSection } from "./azure-devops-quick-actions";
 
 beforeEach(() => {
-  mocks.get.mockResolvedValue({
+  const settings = {
     workItemActions: [
       {
         id: "implement",
@@ -30,20 +31,59 @@ beforeEach(() => {
         promptTemplate: "Review {{url}}",
       },
     ],
-  });
+  };
+  mocks.get.mockResolvedValue(settings);
+  mocks.update.mockResolvedValue(settings);
 });
 afterEach(cleanup);
 
+function renderSection() {
+  render(
+    <SettingsSaveProvider>
+      <AzureDevOpsQuickActionsSection workspaceId="workspace-1" />
+    </SettingsSaveProvider>,
+  );
+}
+
 describe("AzureDevOpsQuickActionsSection", () => {
-  it("renders editable work-item and pull-request actions from workspace settings", async () => {
-    render(<AzureDevOpsQuickActionsSection workspaceId="workspace-1" />);
+  it("uses the GitHub-style tabbed action and prompt editor", async () => {
+    renderSection();
     await waitFor(() =>
-      expect((screen.getByLabelText("Work item action label 1") as HTMLInputElement).value).toBe(
-        "Implement",
+      expect((screen.getByLabelText("Pull request action label 1") as HTMLInputElement).value).toBe(
+        "Review",
       ),
     );
-    expect((screen.getByLabelText("Pull request action label 1") as HTMLInputElement).value).toBe(
-      "Review",
+    expect(screen.getByRole("tab", { name: "Pull requests" })).toBeTruthy();
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Work items" }), {
+      button: 0,
+      ctrlKey: false,
+    });
+    expect((screen.getByLabelText("Work item action label 1") as HTMLInputElement).value).toBe(
+      "Implement",
+    );
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Pull requests" }), {
+      button: 0,
+      ctrlKey: false,
+    });
+    expect(screen.getByRole("button", { name: "Reset" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Edit prompt" }));
+    expect(screen.getByText(/available placeholders/)).toBeTruthy();
+  });
+
+  it("keeps edits local until the shared Save changes action is pressed", async () => {
+    renderSection();
+    const label = await screen.findByLabelText("Pull request action label 1");
+
+    fireEvent.change(label, { target: { value: "Inspect" } });
+
+    expect(mocks.update).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(1));
+    expect(mocks.update).toHaveBeenCalledWith(
+      "workspace-1",
+      expect.objectContaining({
+        pullRequestActions: [expect.objectContaining({ label: "Inspect" })],
+      }),
     );
   });
 });

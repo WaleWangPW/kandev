@@ -142,6 +142,19 @@ test("mobile settings explain PAT scopes and link to the organization token page
   await expect(testPage.getByTestId("azure-devops-pat-help")).toContainText(
     "Leave all other scopes unchecked",
   );
+  const quickActions = testPage
+    .getByRole("heading", { name: "Quick actions" })
+    .locator("xpath=ancestor::section");
+  await expect(quickActions.getByRole("tab", { name: "Pull requests" })).toBeVisible();
+  await expect(quickActions.getByRole("tab", { name: "Work items" })).toBeVisible();
+  const defaultQueries = testPage
+    .getByRole("heading", { name: "Default queries" })
+    .locator("xpath=ancestor::section");
+  await expect(defaultQueries.getByRole("tab", { name: "Pull requests" })).toBeVisible();
+  await expect(defaultQueries.getByRole("tab", { name: "Work items" })).toBeVisible();
+  const resetBox = await quickActions.getByRole("button", { name: "Reset" }).boundingBox();
+  expect(resetBox).not.toBeNull();
+  expect(resetBox!.height).toBeGreaterThanOrEqual(44);
 
   const viewportFits = await testPage.evaluate(
     () => document.documentElement.scrollWidth <= window.innerWidth,

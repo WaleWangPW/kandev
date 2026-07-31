@@ -22,6 +22,7 @@ import {
   type IntegrationAuthHealth,
 } from "@/components/integrations/auth-status-banner";
 import { WorkspaceScopedSection } from "@/components/integrations/workspace-scoped-section";
+import { AzureDevOpsDefaultQueriesSection } from "@/components/azure-devops/azure-devops-default-queries";
 import { AzureDevOpsQuickActionsSection } from "@/components/azure-devops/azure-devops-quick-actions";
 import { AzureDevOpsWatchSettings } from "@/components/azure-devops/azure-devops-watch-settings";
 import { SettingsSection } from "@/components/settings/settings-section";
@@ -485,8 +486,9 @@ export function AzureDevOpsIntegrationPage({ workspaceId }: { workspaceId?: stri
             key={selectedWorkspaceId}
             workspaceId={selectedWorkspaceId}
           />
-          <AzureDevOpsQuickActionsSection workspaceId={selectedWorkspaceId} />
           <AzureDevOpsWatchSettings workspaceId={selectedWorkspaceId} />
+          <AzureDevOpsQuickActionsSection workspaceId={selectedWorkspaceId} />
+          <AzureDevOpsDefaultQueriesSection workspaceId={selectedWorkspaceId} />
         </div>
       )}
     </WorkspaceScopedSection>

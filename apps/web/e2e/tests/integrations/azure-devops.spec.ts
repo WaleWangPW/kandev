@@ -5,7 +5,10 @@ const MOCK_STATE = {
   user: { ok: true, id: "user-1", displayName: "Ada Reviewer", email: "ada@example.com" },
   projects: [{ id: "project-1", name: "Platform", url: "https://dev.azure.com/acme/Platform" }],
   teams: [{ id: "team-1", name: "Platform Team", projectId: "project-1", projectName: "Platform" }],
-  boards: [{ id: "board-1", name: "Stories" }],
+  boards: [
+    { id: "board-1", name: "Stories" },
+    { id: "board-2", name: "Tasks" },
+  ],
   boardSnapshots: {
     "board-1": {
       board: {
@@ -34,6 +37,33 @@ const MOCK_STATE = {
           assignedTo: "Ada Reviewer",
           tags: ["security"],
           webUrl: "https://dev.azure.com/acme/Platform/_workitems/edit/101",
+          columnId: "todo",
+          columnDone: false,
+        },
+      ],
+    },
+    "board-2": {
+      board: {
+        id: "board-2",
+        name: "Tasks",
+        fields: {
+          columnField: { referenceName: "System.BoardColumn" },
+          doneField: { referenceName: "System.BoardColumnDone" },
+          rowField: { referenceName: "System.BoardRow" },
+        },
+        columns: [
+          { id: "todo", name: "To Do" },
+          { id: "done", name: "Done" },
+        ],
+      },
+      items: [
+        {
+          id: 102,
+          revision: 1,
+          title: "Plan the next release",
+          state: "New",
+          type: "Task",
+          project: "project-1",
           columnId: "todo",
           columnDone: false,
         },
@@ -165,9 +195,25 @@ test("connects and browses Azure work items, PRs, and feedback", async ({
     "Connected as Ada Reviewer",
   );
   await testPage.getByTestId("azure-devops-save-button").click();
+  const defaultQueries = testPage
+    .getByRole("heading", { name: "Default queries" })
+    .locator("xpath=ancestor::section");
+  await defaultQueries.getByRole("tab", { name: "Work items" }).click();
+  await defaultQueries.getByLabel("Work item query label 1").fill("Team queue");
+  await testPage.getByRole("button", { name: "Save changes" }).click();
 
   await testPage.goto("/azure-devops");
+  await expect(testPage.getByTestId("azure-devops-presets-scope-bar")).toContainText("Team queue");
   await expect(testPage.getByTestId("azure-devops-board")).toBeVisible();
+  await expect(testPage.getByText("Handle token rotation")).toBeVisible();
+  await testPage.getByTestId("azure-board-select").click();
+  await testPage.getByRole("option", { name: "Tasks" }).click();
+  await expect(testPage.getByText("Plan the next release")).toBeVisible();
+  await testPage.reload();
+  await expect(testPage.getByTestId("azure-board-select")).toContainText("Tasks");
+  await expect(testPage.getByText("Plan the next release")).toBeVisible();
+  await testPage.getByTestId("azure-board-select").click();
+  await testPage.getByRole("option", { name: "Stories" }).click();
   await expect(testPage.getByText("Handle token rotation")).toBeVisible();
   await prCapture.screenshot("board-desktop", {
     caption: "Azure DevOps board with columns and cards",

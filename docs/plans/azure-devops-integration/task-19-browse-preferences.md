@@ -1,7 +1,7 @@
 ---
 id: "19-browse-preferences"
 title: "Portable Azure browse preferences"
-status: done
+status: completed
 wave: 11
 depends_on: []
 plan: "plan.md"
@@ -20,11 +20,18 @@ spec: "../../specs/azure-devops-integration/spec.md"
   responses cannot overwrite the latest state.
 - Missing/inaccessible remembered provider IDs fall back through the existing
   valid-child defaults while preserving other valid preferences.
+- The SPA boot-state mapper includes `azureDevOpsBrowsePreferences` before
+  marking user settings loaded, so a hard refresh restores the same project,
+  team, board, focused column, mode, and filters as client-side navigation.
+- Regression coverage serializes the boot payload shape and performs a browser
+  reload after changing board selectors.
 
 ## Verification
 
 - `go test ./internal/user/... -run AzureDevOpsBrowsePreferences` from `apps/backend`.
+- `go test ./internal/backendapp -run TestMapUserSettingsStateIncludesAzureDevOpsBrowsePreferences` from `apps/backend`.
 - `pnpm --filter @kandev/web test -- --run lib/ssr/user-settings.test.ts hooks/domains/azure-devops/use-azure-devops-preferences.test.tsx hooks/domains/azure-devops/use-azure-devops-board.test.tsx` from `apps`.
+- `pnpm e2e:run --host --no-build tests/integrations/azure-devops.spec.ts` from `apps/web`.
 
 ## Files Likely Touched
 
@@ -65,3 +72,14 @@ Sequential. It spans the shared user-settings contract and Azure page state.
 
 Report setting shape, fallback rules, RED/GREEN commands, files changed,
 browser-storage audit, risks, and update task/plan status.
+
+## Results (2026-07-31)
+
+- RED: the boot-state mapper test showed a loaded payload with no
+  `azureDevOpsBrowsePreferences`; desktop Playwright timed out looking for the
+  remembered board selector.
+- GREEN: the mapper test passes, the complete Azure Vitest slice passes (79
+  tests), and desktop Playwright changes from Stories to Tasks, reloads, and
+  restores Tasks and its board content.
+- Preferences remain backend-owned user settings. No local-storage fallback was
+  added; stale provider IDs continue through the existing discovery fallback.

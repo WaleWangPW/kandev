@@ -299,9 +299,12 @@ export type AzureDevOpsWorkspaceSettings = {
   pullRequestActions: AzureDevOpsActionPreset[];
 };
 
-export type UpdateAzureDevOpsWorkspaceSettingsRequest = Partial<
-  Omit<AzureDevOpsWorkspaceSettings, "workspaceId">
->;
+export type UpdateAzureDevOpsWorkspaceSettingsRequest = {
+  workItemQueries?: AzureDevOpsQueryPreset[] | null;
+  pullRequestQueries?: AzureDevOpsQueryPreset[] | null;
+  workItemActions?: AzureDevOpsActionPreset[] | null;
+  pullRequestActions?: AzureDevOpsActionPreset[] | null;
+};
 
 export type AzureDevOpsCleanupPolicy = "auto" | "always" | "never";
 

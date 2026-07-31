@@ -3,7 +3,7 @@
 "use client";
 
 import Link from "@/components/routing/app-link";
-import { useCallback, useEffect, useRef, useState, type ComponentProps } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { IconAdjustments } from "@tabler/icons-react";
 import { Alert, AlertDescription } from "@kandev/ui/alert";
 import { Button } from "@kandev/ui/button";
@@ -33,7 +33,10 @@ import { AzureDevOpsBoard } from "@/components/azure-devops/azure-devops-board";
 import { AzureDevOpsWorkItemDetail } from "@/components/azure-devops/azure-devops-work-item-detail";
 import { AzureDevOpsPullRequestPagination } from "@/components/azure-devops/azure-devops-pull-request-pagination";
 import { AzureDevOpsModeTabs } from "@/components/azure-devops/azure-devops-mode-tabs";
-import { presetsForKind } from "@/components/azure-devops/azure-devops-presets";
+import {
+  presetsForKind,
+  type AzureDevOpsQueryPresets,
+} from "@/components/azure-devops/azure-devops-presets";
 import {
   useAzureDevOpsConnection,
   useAzureDevOpsPullRequestFeedback,
@@ -46,7 +49,7 @@ import {
 } from "@/hooks/domains/azure-devops/use-azure-devops-projects";
 import { useAzureDevOpsSavedViews } from "@/hooks/domains/azure-devops/use-azure-devops-saved-views";
 import { useAzureDevOpsPagePreferences } from "@/hooks/domains/azure-devops/use-azure-devops-preferences";
-import { useAzureDevOpsWorkspaceActions } from "@/hooks/domains/azure-devops/use-azure-devops-workspace-actions";
+import { useAzureDevOpsWorkspaceSettings } from "@/hooks/domains/azure-devops/use-azure-devops-workspace-actions";
 import type { Repository, Workflow, WorkflowStep } from "@/lib/types/http";
 import type {
   AzureDevOpsPullRequest,
@@ -161,12 +164,13 @@ function filtersForScope(
   current: AzureDevOpsFiltersState,
   selection: AzureDevOpsScopeSelection,
   views: AzureDevOpsSavedView[],
+  queryPresets: AzureDevOpsQueryPresets,
 ): AzureDevOpsFiltersState | undefined {
   if (selection.source === "saved") {
     const view = views.find((candidate) => candidate.id === selection.id);
     return view ? filtersFromSavedView(current, view) : undefined;
   }
-  const preset = presetsForKind(selection.kind).find(
+  const preset = presetsForKind(selection.kind, queryPresets).find(
     (candidate) => candidate.value === selection.id,
   );
   return preset ? { ...current, ...preset.filters } : undefined;
@@ -224,6 +228,8 @@ function useAzureScopeControls({
   views,
   setMode,
   setSkip,
+  queryPresets,
+  queryPresetsReady,
 }: {
   filters: AzureDevOpsFiltersState;
   replace: (next: AzureDevOpsFiltersState) => void;
@@ -231,6 +237,8 @@ function useAzureScopeControls({
   views: AzureDevOpsSavedView[];
   setMode: (mode: AzureDevOpsBrowseMode) => void;
   setSkip: (skip: number) => void;
+  queryPresets: AzureDevOpsQueryPresets;
+  queryPresetsReady: boolean;
 }) {
   const [selection, setSelection] = useState<AzureDevOpsScopeSelection>({
     kind: "work_item",
@@ -243,14 +251,20 @@ function useAzureScopeControls({
       const nextMode = modeForKind(next.kind);
       setMode(nextMode);
       setSkip(0);
-      const nextFilters = filtersForScope(filters, next, views);
+      const nextFilters = filtersForScope(filters, next, views, queryPresets);
       if (nextFilters) {
         replace(nextFilters);
         runSearch(0, { mode: nextMode, filters: nextFilters });
       }
     },
-    [filters, replace, runSearch, setMode, setSkip, views],
+    [filters, queryPresets, replace, runSearch, setMode, setSkip, views],
   );
+  useEffect(() => {
+    if (!queryPresetsReady || selection.source !== "preset" || !selection.id) return;
+    const available = presetsForKind(selection.kind, queryPresets);
+    if (available.some((preset) => preset.value === selection.id) || !available[0]) return;
+    selectScope({ ...selection, id: available[0].value });
+  }, [queryPresets, queryPresetsReady, selectScope, selection]);
   const markCustom = useCallback(
     () => setSelection((current) => ({ ...current, source: "preset", id: "" })),
     [],
@@ -363,7 +377,14 @@ function useAzureDevOpsPageState(workspaceId?: string) {
   const pullRequests = useAzureDevOpsPullRequestSearch(workspaceId);
   const feedback = useAzureDevOpsPullRequestFeedback(workspaceId);
   const savedViews = useAzureDevOpsSavedViews(workspaceId);
-  const { workItemActions, pullRequestActions } = useAzureDevOpsWorkspaceActions(workspaceId);
+  const workspaceSettings = useAzureDevOpsWorkspaceSettings(workspaceId);
+  const queryPresets = useMemo<AzureDevOpsQueryPresets>(
+    () => ({
+      workItems: workspaceSettings.settings.workItemQueries,
+      pullRequests: workspaceSettings.settings.pullRequestQueries,
+    }),
+    [workspaceSettings.settings.pullRequestQueries, workspaceSettings.settings.workItemQueries],
+  );
 
   useDefaultAzureRepository(filters.repositoryId, repositoryList.data, update);
 
@@ -386,6 +407,8 @@ function useAzureDevOpsPageState(workspaceId?: string) {
     views: savedViews.views,
     setMode,
     setSkip,
+    queryPresets,
+    queryPresetsReady: !workspaceSettings.loading,
   });
   const savedViewControls = useAzureSavedViewControls({
     mode,
@@ -452,8 +475,9 @@ function useAzureDevOpsPageState(workspaceId?: string) {
     preferencesLoaded: pagePreferences.hydrated,
     boardPreference: pagePreferences.board,
     setBoardPreference: pagePreferences.setBoard,
-    workItemActions,
-    pullRequestActions,
+    workItemActions: workspaceSettings.settings.workItemActions,
+    pullRequestActions: workspaceSettings.settings.pullRequestActions,
+    queryPresets,
   };
 }
 
@@ -588,6 +612,7 @@ function AzureDevOpsPageContent({ workspaceId, workflows, steps, repositories }:
         onDeleteSaved={(id) => void state.savedViews.remove(id)}
         canSaveCurrent={state.canSaveCurrent}
         onSaveCurrent={() => state.setSaveViewOpen(true)}
+        queryPresets={state.queryPresets}
       />
       <AzureDevOpsModeTabs mode={state.mode} onModeChange={state.setMode} />
       {state.mode === BOARD_MODE && (

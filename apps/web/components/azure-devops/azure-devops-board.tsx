@@ -192,7 +192,7 @@ function BoardSelectors({
   return (
     <div className="flex flex-wrap gap-2">
       <Select value={projectId} onValueChange={onProjectChange}>
-        <SelectTrigger className="w-52">
+        <SelectTrigger className="w-52" data-testid="azure-board-project-select">
           <SelectValue placeholder="Project" />
         </SelectTrigger>
         <SelectContent>
@@ -204,7 +204,7 @@ function BoardSelectors({
         </SelectContent>
       </Select>
       <Select value={teamId} onValueChange={onTeamChange} disabled={!teams.length}>
-        <SelectTrigger className="w-52">
+        <SelectTrigger className="w-52" data-testid="azure-board-team-select">
           <SelectValue placeholder="Team" />
         </SelectTrigger>
         <SelectContent>
@@ -216,7 +216,7 @@ function BoardSelectors({
         </SelectContent>
       </Select>
       <Select value={boardId} onValueChange={onBoardChange} disabled={!boards.length}>
-        <SelectTrigger className="w-52">
+        <SelectTrigger className="w-52" data-testid="azure-board-select">
           <SelectValue placeholder="Board" />
         </SelectTrigger>
         <SelectContent>

@@ -65,11 +65,19 @@ Azure Repos data without installing or authenticating the GitHub CLI.
   Created by me. Built-in pull-request queries are Review requested, Open,
   Completed, and Created by me. The workspace settings contract may override a
   preset family without freezing built-in defaults into a workspace row.
+- Settings exposes those default queries with the same interaction model as
+  GitHub: pull-request and work-item tabs, editable rows, Reset, dirty-state
+  highlighting, and the shared floating Save changes control.
 - Work items and pull requests expose workspace-configurable quick actions.
   Work-item defaults are Implement, Investigate, and Reproduce; pull-request
   defaults are Review, Address feedback, and Fix CI. Choosing an action opens
   the existing Kandev task-creation dialog with provider context and the
   selected prompt already populated.
+- Azure quick-action settings follow GitHub's editor UX: pull requests first,
+  work items second, icon/label/hint fields, an expandable prompt editor with
+  placeholder completion, Reset, dirty-state highlighting, and the shared
+  floating Save changes control. Azure settings orders connection, pull-request
+  watches, work-item watches, quick actions, then default queries.
 - A Kandev task created from an Azure work item remains associated with that
   work item. The browse and detail surfaces show existing associated tasks and
   avoid silently creating duplicate watcher tasks for the same watch match.
@@ -210,6 +218,11 @@ values, and pull-request filter values. The backend user-settings record is the
 only durable source of truth; browser storage is not a fallback. Provider IDs
 are hints: an inaccessible or deleted value falls back to the first valid
 choice without making the page unusable.
+
+The SPA boot payload includes the complete Azure preference object before the
+settings store is marked loaded. A hard refresh and client-side navigation must
+therefore hydrate the same persisted project, team, board, column, mode, query,
+and filter values; boot hydration may not replace them with page defaults.
 
 ### Azure query and action presets
 

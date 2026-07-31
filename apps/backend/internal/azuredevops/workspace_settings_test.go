@@ -2,8 +2,27 @@ package azuredevops
 
 import (
 	"context"
+	"reflect"
 	"testing"
 )
+
+func TestDefaultQueryPresetsMatchAzureBrowseShortcuts(t *testing.T) {
+	workItemIDs := make([]string, 0, len(DefaultWorkItemQueryPresets()))
+	for _, preset := range DefaultWorkItemQueryPresets() {
+		workItemIDs = append(workItemIDs, preset.ID)
+	}
+	pullRequestIDs := make([]string, 0, len(DefaultPullRequestQueryPresets()))
+	for _, preset := range DefaultPullRequestQueryPresets() {
+		pullRequestIDs = append(pullRequestIDs, preset.ID)
+	}
+
+	if want := []string{"recent", "assigned", "active", "created"}; !reflect.DeepEqual(workItemIDs, want) {
+		t.Fatalf("work-item preset IDs = %v, want %v", workItemIDs, want)
+	}
+	if want := []string{"review-requested", "active", "completed", "created"}; !reflect.DeepEqual(pullRequestIDs, want) {
+		t.Fatalf("pull-request preset IDs = %v, want %v", pullRequestIDs, want)
+	}
+}
 
 func TestWorkspaceSettingsDefaultsAndActionOverrides(t *testing.T) {
 	service, _, _ := newTestService(t, nil)

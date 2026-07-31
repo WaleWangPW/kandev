@@ -20,11 +20,26 @@ spec: "../../specs/azure-devops-integration/spec.md"
 - Browse exposes the resolved provider presets and quick-action Task menus.
   Task creation interpolates provider context and persists the work-item link
   in the existing workspace association cache.
+- Azure settings follows GitHub's section order for analogous capabilities:
+  connection, pull-request watches, work-item watches, quick actions, and
+  default queries.
+- Quick actions and default queries use the GitHub settings interaction model:
+  pull requests first, work items second, tabbed editable rows, Reset,
+  dirty-state highlighting, and the shared floating Save changes control.
+  Quick actions expose icon, label, hint, and expandable prompt fields; query
+  rows expose provider-native filters.
+- The Azure browse scope bar consumes the resolved workspace query presets, so
+  settings changes affect the actual query shortcuts rather than only the
+  settings API response.
 
 ## Verification
 
 - `go test ./internal/azuredevops -run 'Test(WorkspaceSettings|DefaultQueryPresets|ActionPresets)'` from `apps/backend`.
 - `pnpm --filter @kandev/web test -- --run components/azure-devops/azure-devops-quick-actions.test.tsx components/azure-devops/azure-devops-task-launcher.test.tsx hooks/domains/azure-devops/use-azure-devops-task-work-items.test.tsx` from `apps`.
+- `pnpm --filter @kandev/web test -- --run components/azure-devops/azure-devops-default-queries.test.tsx components/azure-devops/azure-devops-quick-actions.test.tsx components/azure-devops/azure-devops-settings.test.tsx components/azure-devops/azure-devops-presets.test.ts` from `apps`.
+- Desktop and `mobile-chrome` Azure settings Playwright scenarios verify section
+  order, Reset/Save behavior, query availability, touch reachability, and no
+  document horizontal overflow.
 
 ## Files Likely Touched
 
@@ -66,3 +81,17 @@ Sequential. Query/action preset families share one workspace settings patch.
 
 Report default/override semantics, RED/GREEN commands, files changed, migration
 behavior, risks, and update task/plan status.
+
+## Results (2026-07-31)
+
+- RED: default-preset coverage found only one built-in query per Azure item
+  family; component tests found no default-query editor, no GitHub-style action
+  tabs, and no shared settings save flow.
+- GREEN: Azure returns four built-in queries per family, both settings editors
+  pass their shared-save/reset tests, and custom query mappings pass focused
+  coverage.
+- Desktop Playwright saves a renamed work-item query, verifies it on the live
+  Azure scope bar, changes the selected board, and verifies the selection after
+  reload. Mobile Playwright verifies both editors, 44px Reset reachability, and
+  no document overflow.
+- `make fmt` and `make typecheck test lint` pass from the repository root.

@@ -13,6 +13,7 @@ import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from "@kandev/ui/dra
 import { Input } from "@kandev/ui/input";
 import { Label } from "@kandev/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@kandev/ui/select";
+import { SettingsSection } from "@/components/settings/settings-section";
 import { useResponsiveBreakpoint } from "@/hooks/use-responsive-breakpoint";
 import { useAzureDevOpsWatches } from "@/hooks/domains/azure-devops/use-azure-devops-watches";
 import type {
@@ -530,34 +531,7 @@ export function AzureDevOpsWatchSettings({ workspaceId }: { workspaceId: string 
     }
   };
   return (
-    <section className="space-y-4" data-testid="azure-devops-watch-settings">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h2 className="text-base font-semibold">Azure DevOps watchers</h2>
-          <p className="text-sm text-muted-foreground">
-            Create tasks from saved work-item queries and pull-request filters.
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Button
-            type="button"
-            className="min-h-11 cursor-pointer"
-            onClick={() => setEditor({ kind: "work-item" })}
-            data-testid="azure-add-work-item-watch"
-          >
-            <IconPlus className="h-4 w-4" /> Work-item watch
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            className="min-h-11 cursor-pointer"
-            onClick={() => setEditor({ kind: "pull-request" })}
-            data-testid="azure-add-pull-request-watch"
-          >
-            <IconPlus className="h-4 w-4" /> PR watch
-          </Button>
-        </div>
-      </div>
+    <div className="space-y-6" data-testid="azure-devops-watch-settings">
       {message && (
         <Alert>
           <AlertDescription>{message}</AlertDescription>
@@ -569,39 +543,78 @@ export function AzureDevOpsWatchSettings({ workspaceId }: { workspaceId: string 
         </Alert>
       )}
       {watches.loading && <p className="text-sm text-muted-foreground">Loading watchers…</p>}
-      {!watches.loading && watches.workItems.length === 0 && watches.pullRequests.length === 0 && (
-        <Card>
-          <CardContent className="p-6 text-sm text-muted-foreground">
-            No Azure DevOps watchers yet.
-          </CardContent>
-        </Card>
-      )}
-      <div className="grid gap-4 xl:grid-cols-2">
-        {watches.workItems.map((watch) => (
-          <WatchCard
-            key={watch.id}
-            kind="work-item"
-            watch={watch}
-            onEdit={() => setEditor({ kind: "work-item", id: watch.id, initial: watch })}
-            onToggle={() => void toggle("work-item", watch.id, !watch.enabled)}
-            onTrigger={() => void run("work-item", watch.id)}
-            onReset={() => void reset("work-item", watch.id, watch.cleanupPolicy)}
-            onDelete={() => void remove("work-item", watch.id)}
-          />
-        ))}
-        {watches.pullRequests.map((watch) => (
-          <WatchCard
-            key={watch.id}
-            kind="pull-request"
-            watch={watch}
-            onEdit={() => setEditor({ kind: "pull-request", id: watch.id, initial: watch })}
-            onToggle={() => void toggle("pull-request", watch.id, !watch.enabled)}
-            onTrigger={() => void run("pull-request", watch.id)}
-            onReset={() => void reset("pull-request", watch.id, watch.cleanupPolicy)}
-            onDelete={() => void remove("pull-request", watch.id)}
-          />
-        ))}
-      </div>
+      <SettingsSection
+        title="Pull-request watches"
+        description="Create tasks automatically from matching Azure DevOps pull requests."
+        action={
+          <Button
+            type="button"
+            className="min-h-11 w-full cursor-pointer sm:w-auto"
+            onClick={() => setEditor({ kind: "pull-request" })}
+            data-testid="azure-add-pull-request-watch"
+          >
+            <IconPlus className="h-4 w-4" /> Add PR watch
+          </Button>
+        }
+      >
+        {!watches.loading && watches.pullRequests.length === 0 && (
+          <Card>
+            <CardContent className="p-6 text-sm text-muted-foreground">
+              No pull-request watches yet.
+            </CardContent>
+          </Card>
+        )}
+        <div className="grid gap-4 xl:grid-cols-2">
+          {watches.pullRequests.map((watch) => (
+            <WatchCard
+              key={watch.id}
+              kind="pull-request"
+              watch={watch}
+              onEdit={() => setEditor({ kind: "pull-request", id: watch.id, initial: watch })}
+              onToggle={() => void toggle("pull-request", watch.id, !watch.enabled)}
+              onTrigger={() => void run("pull-request", watch.id)}
+              onReset={() => void reset("pull-request", watch.id, watch.cleanupPolicy)}
+              onDelete={() => void remove("pull-request", watch.id)}
+            />
+          ))}
+        </div>
+      </SettingsSection>
+      <SettingsSection
+        title="Work-item watches"
+        description="Create tasks automatically from matching Azure DevOps work-item queries."
+        action={
+          <Button
+            type="button"
+            className="min-h-11 w-full cursor-pointer sm:w-auto"
+            onClick={() => setEditor({ kind: "work-item" })}
+            data-testid="azure-add-work-item-watch"
+          >
+            <IconPlus className="h-4 w-4" /> Add work-item watch
+          </Button>
+        }
+      >
+        {!watches.loading && watches.workItems.length === 0 && (
+          <Card>
+            <CardContent className="p-6 text-sm text-muted-foreground">
+              No work-item watches yet.
+            </CardContent>
+          </Card>
+        )}
+        <div className="grid gap-4 xl:grid-cols-2">
+          {watches.workItems.map((watch) => (
+            <WatchCard
+              key={watch.id}
+              kind="work-item"
+              watch={watch}
+              onEdit={() => setEditor({ kind: "work-item", id: watch.id, initial: watch })}
+              onToggle={() => void toggle("work-item", watch.id, !watch.enabled)}
+              onTrigger={() => void run("work-item", watch.id)}
+              onReset={() => void reset("work-item", watch.id, watch.cleanupPolicy)}
+              onDelete={() => void remove("work-item", watch.id)}
+            />
+          ))}
+        </div>
+      </SettingsSection>
       {editor && (
         <WatchEditor
           key={`${editor.kind}:${editor.id ?? "new"}`}
@@ -624,6 +637,6 @@ export function AzureDevOpsWatchSettings({ workspaceId }: { workspaceId: string 
           }}
         />
       )}
-    </section>
+    </div>
   );
 }

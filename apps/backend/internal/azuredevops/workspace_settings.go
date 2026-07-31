@@ -75,10 +75,22 @@ func (r *UpdateWorkspaceSettingsRequest) UnmarshalJSON(data []byte) error {
 type workspaceSettingsOverrides map[string]json.RawMessage
 
 func DefaultWorkItemQueryPresets() []QueryPreset {
-	return []QueryPreset{{ID: "recent", Label: "Recently updated", Group: "inbox", Filters: map[string]any{"wiql": "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project ORDER BY [System.ChangedDate] DESC", "top": 50}}}
+	const start = "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project"
+	const order = " ORDER BY [System.ChangedDate] DESC"
+	return []QueryPreset{
+		{ID: "recent", Label: "Recently updated", Group: "inbox", Filters: map[string]any{"wiql": start + order, "top": 50}},
+		{ID: "assigned", Label: "Assigned to me", Group: "inbox", Filters: map[string]any{"wiql": start + " AND [System.AssignedTo] = @Me" + order, "top": 50}},
+		{ID: "active", Label: "Active", Group: "inbox", Filters: map[string]any{"wiql": start + " AND [System.State] <> 'Closed' AND [System.State] <> 'Done'" + order, "top": 50}},
+		{ID: "created", Label: "Created by me", Group: "created", Filters: map[string]any{"wiql": start + " AND [System.CreatedBy] = @Me" + order, "top": 50}},
+	}
 }
 func DefaultPullRequestQueryPresets() []QueryPreset {
-	return []QueryPreset{{ID: "review-requested", Label: "Review requested", Group: "inbox", Filters: map[string]any{"status": "active", "reviewer": "@me"}}}
+	return []QueryPreset{
+		{ID: "review-requested", Label: "Review requested", Group: "inbox", Filters: map[string]any{"status": "active", "reviewer": "@me", "creator": ""}},
+		{ID: "active", Label: "Open", Group: "inbox", Filters: map[string]any{"status": "active", "reviewer": "", "creator": ""}},
+		{ID: "completed", Label: "Completed", Group: "created", Filters: map[string]any{"status": "completed", "reviewer": "", "creator": ""}},
+		{ID: "created", Label: "Created by me", Group: "created", Filters: map[string]any{"status": "active", "reviewer": "", "creator": "@me"}},
+	}
 }
 func DefaultWorkItemActionPresets() []ActionPreset {
 	return []ActionPreset{

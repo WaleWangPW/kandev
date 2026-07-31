@@ -20,7 +20,8 @@ work-item/PR watchers. No Azure runtime path may require `gh` or `az`.
 
 ## Current State
 
-Tasks 01-29 are implemented in this workspace. The backend persists workspace
+Tasks 01-29 are implemented in this workspace. Tasks 19 and 23 were reopened
+and completed for a refresh-hydration regression and settings-parity gap. The backend persists workspace
 query/action overrides at `/api/v1/azure-devops/workspace-settings`, exposes
 generation-safe work-item and pull-request watchers, dispatches deduplicated
 tasks through the orchestrator, and performs immediate auth-health probes after
@@ -30,9 +31,10 @@ board-column changes, and launches associated Kandev tasks from provider
 quick-action presets. Settings exposes quick-action configuration plus watcher
 create/edit/enable/disable/run/reset/delete controls.
 
-Focused Go, Vitest, desktop Playwright, and mobile Playwright suites cover the
-new contracts. The repository verification commands and exact results are
-recorded in the task files and passed on 2026-07-31.
+The repair adds boot-state mapping coverage, makes the browse surface consume
+workspace-resolved query presets, and aligns Azure's watcher/action/query
+section order and editor semantics with GitHub. Focused Go, Vitest, desktop
+Playwright, and mobile Playwright commands are recorded in Tasks 19 and 23.
 
 ## Architecture
 
@@ -127,9 +129,10 @@ recorded in the task files and passed on 2026-07-31.
 - Work-item detail is read-only except for Assign to me, Unassign, and board
   column/split-state controls. A visible Task menu exposes workspace-configured
   actions and existing linked Kandev tasks.
-- Azure settings retains the shipped Quick actions section and adds Work-item
-  watches and Pull-request watches using shared settings cards, watcher enable
-  drafts, reset dialogs, and responsive tables/cards.
+- Azure settings follows GitHub's analogous order: connection, pull-request
+  watches, work-item watches, quick actions, and default queries. Action and
+  query editors use tabbed responsive cards, Reset, dirty highlighting, and the
+  shared floating Save changes control.
 - No required action may be hover-only or desktop-only.
 
 ## Implemented Design
@@ -201,8 +204,9 @@ recorded in the task files and passed on 2026-07-31.
 
 ### Automation settings and E2E
 
-- Add work-item and PR watcher sections below the shipped Quick actions
-  section. Desktop watcher lists use tables; phone uses stacked cards.
+- Add pull-request and work-item watcher sections before Quick actions and
+  Default queries, matching GitHub's analogous settings order. Desktop watcher
+  lists use tables; phone uses stacked cards.
   Create/edit is a desktop dialog and full-height phone drawer backed by the
   same form normalization and domain hook.
 - Extend the Azure mock client/controller and E2E API helper with deterministic
