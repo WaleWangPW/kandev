@@ -119,6 +119,28 @@ func TestCollectAgentEnvResolvesParameterizedBashEnv(t *testing.T) {
 	}
 }
 
+func TestCollectAgentEnvAvoidsManagedBashEnvSelfSourcing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Bash startup behavior is Unix-specific")
+	}
+	startupEnv := filepath.Join(t.TempDir(), "managed-bash-env.sh")
+	env, err := CollectAgentEnvWithError(map[string]string{
+		"KANDEV_GITHUB_CREDENTIAL_BROKER_URL": "https://kandev.example/resolve",
+		"KANDEV_GITHUB_CLI_BASH_ENV":          startupEnv,
+		"KANDEV_GITHUB_PARENT_BASH_ENV":       "/stale/parent-bash-env.sh",
+		"BASH_ENV":                            startupEnv,
+	})
+	if err != nil {
+		t.Fatalf("CollectAgentEnvWithError() error = %v", err)
+	}
+	if got := envSliceValue(env, "BASH_ENV"); got != startupEnv {
+		t.Fatalf("BASH_ENV = %q, want generated environment %q", got, startupEnv)
+	}
+	if got := envSliceValue(env, "KANDEV_GITHUB_PARENT_BASH_ENV"); got != "" {
+		t.Fatalf("parent Bash environment = %q, want unset for self-sourcing hook", got)
+	}
+}
+
 func TestExpandBashEnvParameters(t *testing.T) {
 	env := map[string]string{"HOME": "/home/agent", "HOOK_ROOT": "/opt/hooks"}
 	for _, tc := range []struct {

@@ -129,7 +129,7 @@ tests.
 - PR #2141 review found that Local and Worktree preparation also precedes task-instance creation,
   so those host paths still lacked the launcher-owned helper executable. It also found an
   overflow-prone Sprites slice-capacity expression. Task 04 records the TDD and CodeQL remediation;
-  six focused regressions and 2,934 tests across four affected packages passed, and the CI-style
+  seven focused regressions and 2,969 tests across five affected packages passed, and the CI-style
   changed-file Go lint reported no issues.
 - `git diff --check` passed. No temporary artifacts remain.
 
