@@ -38,6 +38,7 @@ Product-wide capabilities that are not tied to a single feature area.
 | Spec | Status |
 |---|---|
 | [background-work-liveness](platform/background-work-liveness.md) | shipped |
+| [i18n](platform/i18n.md) | building |
 | [plugins](plugins/spec.md) | draft |
 | [plugins — marketplace](plugins/marketplace.md) | building |
 | [semantic-notifications](platform/notifications.md) | shipped |
@@ -73,6 +74,7 @@ Kandev's task model: documents, execution stages, labels, blocker escalation, su
 | [parent-child-task-stop](tasks/parent-child-task-stop.md) | shipped |
 | [mcp-task-agent-profile-default](tasks/mcp-task-agent-profile-default/spec.md) | shipped |
 | [runtime-state-publication-order](tasks/runtime-state-publication-order.md) | shipped |
+| [task-create-executor-default](tasks/task-create-executor-default.md) | approved |
 | [explicit-completion-signal](workflow/explicit-completion-signal/spec.md) | shipped |
 
 ## agents/ — agent governance

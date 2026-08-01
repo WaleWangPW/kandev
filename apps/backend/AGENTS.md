@@ -275,6 +275,8 @@ Every long-running goroutine must have a single owner with explicit start and st
 
 You may still list the column in the `CREATE TABLE` so fresh DBs get it inline, but the migration is the source of truth for evolution and must stand alone. New columns also need: the struct field in `models/`, the DTO field + `ToAPI` in `pkg/api/v1/`, and every `CreateX`/`UpdateX`/bulk write in the repo that should set it.
 
+## Internationalization — use `i18n.T(locale, key)`/`i18n.FromRequest(r)` for Go-rendered browser copy; catalogs live in `internal/i18n/locales/*.json`, generate `pseudo` with `pnpm run i18n:pseudo` from `apps/web`, and prefer stable error codes for frontend-translated output.
+
 ## Code-quality limits
 
 Enforced by `apps/backend/.golangci.yml` (errors on new code only):
@@ -293,7 +295,6 @@ golangci-lint run ./... --new-from-rev="<base-sha>" --timeout=5m
 
 ## Further scoped notes
 
-- `internal/agentctl/AGENTS.md` — agentctl server route groups, adapter model, ACP protocol
-- `internal/agentctl/server/api/AGENTS.md` — reverse-proxy body rewriting (`Accept-Encoding`), iframe-blocking header stripping
+- `internal/agentctl/AGENTS.md` — server routes, adapter model, ACP protocol; `internal/agentctl/server/api/AGENTS.md` — reverse-proxy body rewriting and iframe-blocking headers
 - `internal/integrations/AGENTS.md` — playbook for adding a new third-party integration (Jira/Linear pattern)
 - `cmd/mock-agent/AGENTS.md` — predefined `/e2e:<name>` scenarios vs inline `e2e:...` scripts, recipe for adding a scenario, and the rebuild-before-e2e requirement
