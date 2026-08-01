@@ -35,8 +35,8 @@ test.describe("System update channel on mobile", () => {
         .getByRole("button", { name: "Save changes" })
         .tap();
       expect((await saved).status()).toBe(200);
-      expect(fixture.registryRequests()).toBeGreaterThanOrEqual(1);
       await expect(testPage.getByTestId("system-updates-latest")).toHaveText(LONG_NIGHTLY_TAG);
+      expect(fixture.registryRequests()).toBeGreaterThanOrEqual(1);
 
       await testPage.reload();
       await expect(nightly).toBeChecked();

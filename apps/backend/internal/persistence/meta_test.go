@@ -1,6 +1,7 @@
 package persistence
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -176,13 +177,13 @@ func TestWriteLatestNightlyVersionRollsBackPartialTuple(t *testing.T) {
 	if err := ensureMetaTable(db); err != nil {
 		t.Fatalf("ensureMetaTable: %v", err)
 	}
-	if _, err := db.Exec(`
+	if _, err := db.Exec(fmt.Sprintf(`
 		CREATE TRIGGER fail_nightly_url
 		BEFORE INSERT ON kandev_meta
-		WHEN NEW.key = 'latest_version_nightly_url'
+		WHEN NEW.key = '%s'
 		BEGIN
 			SELECT RAISE(ABORT, 'forced nightly URL failure');
-		END`); err != nil {
+		END`, metaKeyLatestNightlyVersionURL)); err != nil {
 		t.Fatalf("create trigger: %v", err)
 	}
 

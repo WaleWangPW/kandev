@@ -41,7 +41,6 @@ test.describe("System update channel", () => {
       await capture.screenshot("desktop-nightly-update-channel", {
         caption: "Desktop: managed npm service following the Nightly channel",
       });
-      capture.flush();
 
       await makeExactNightlyAvailable(testPage);
       let reportTargetVersion = false;
@@ -105,7 +104,11 @@ test.describe("System update channel", () => {
       await expect(testPage.getByTestId("system-updates-latest")).toHaveText(NIGHTLY_TAG);
       await expect(testPage.getByTestId("system-updates-progress")).toHaveCount(0);
     } finally {
-      await fixture.release();
+      try {
+        capture.flush();
+      } finally {
+        await fixture.release();
+      }
     }
   });
 

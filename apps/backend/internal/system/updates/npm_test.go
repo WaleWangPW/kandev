@@ -15,7 +15,7 @@ func TestFetchLatestNightlyFromAcceptsCanonicalUnprefixedVersion(t *testing.T) {
 			t.Errorf("Accept=%q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"dist-tags":{"nightly":"` + version + `"},"versions":{"` + version + `":{"name":"kandev"}}}`))
+		_, _ = w.Write([]byte(`{"dist-tags":{"nightly":"` + version + `"},"versions":{"` + version + `":{"name":"kandev","version":"` + version + `"}}}`))
 	}))
 	defer server.Close()
 
@@ -48,10 +48,13 @@ func TestFetchLatestNightlyFromRejectsInvalidRegistryDocuments(t *testing.T) {
 		{name: "missing exact record", body: `{"dist-tags":{"nightly":"` + valid + `"},"versions":{}}`, want: "missing exact version"},
 		{name: "null exact record", body: `{"dist-tags":{"nightly":"` + valid + `"},"versions":{"` + valid + `":null}}`, want: "missing exact version"},
 		{name: "empty string exact record", body: `{"dist-tags":{"nightly":"` + valid + `"},"versions":{"` + valid + `":""}}`, want: "invalid exact version record"},
+		{name: "empty exact record", body: `{"dist-tags":{"nightly":"` + valid + `"},"versions":{"` + valid + `":{}}}`, want: "invalid exact version record"},
+		{name: "wrong package name", body: `{"dist-tags":{"nightly":"` + valid + `"},"versions":{"` + valid + `":{"name":"other","version":"` + valid + `"}}}`, want: "invalid exact version record"},
+		{name: "wrong package version", body: `{"dist-tags":{"nightly":"` + valid + `"},"versions":{"` + valid + `":{"name":"kandev","version":"0.0.0"}}}`, want: "invalid exact version record"},
 		{name: "malformed json", body: `{`, want: "decode npm response"},
 		{
 			name: "trailing json value",
-			body: `{"dist-tags":{"nightly":"` + valid + `"},"versions":{"` + valid + `":{"name":"kandev"}}} {}`,
+			body: `{"dist-tags":{"nightly":"` + valid + `"},"versions":{"` + valid + `":{"name":"kandev","version":"` + valid + `"}}} {}`,
 			want: "decode npm response",
 		},
 	}

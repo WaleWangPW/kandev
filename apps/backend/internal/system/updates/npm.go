@@ -20,6 +20,11 @@ type npmPackagePayload struct {
 	Versions map[string]json.RawMessage `json:"versions"`
 }
 
+type npmVersionRecord struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
 func FetchLatestNightlyFrom(ctx context.Context, client *http.Client, registryURL string) (string, string, error) {
 	if client == nil {
 		client = &http.Client{Timeout: defaultClientTimeout}
@@ -60,13 +65,18 @@ func FetchLatestNightlyFrom(ctx context.Context, client *http.Client, registryUR
 	if !ok || len(record) == 0 || string(record) == "null" {
 		return "", "", fmt.Errorf("npm response missing exact version %q", version)
 	}
-	var object map[string]interface{}
-	if err := json.Unmarshal(record, &object); err != nil || object == nil {
+	if !isExactNPMVersionRecord(record, version) {
 		return "", "", fmt.Errorf("npm response has invalid exact version record %q", version)
 	}
 
 	packageVersion := strings.TrimPrefix(version, "v")
 	return "v" + packageVersion, "https://www.npmjs.com/package/kandev/v/" + url.PathEscape(packageVersion), nil
+}
+
+func isExactNPMVersionRecord(record json.RawMessage, version string) bool {
+	var exact npmVersionRecord
+	return json.Unmarshal(record, &exact) == nil &&
+		exact.Name == "kandev" && exact.Version == version
 }
 
 func isCanonicalNPMNightlyVersion(version string) bool {

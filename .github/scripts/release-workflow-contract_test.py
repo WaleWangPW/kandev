@@ -412,9 +412,21 @@ class ReleaseWorkflowContractTest(unittest.TestCase):
             self.assertIn('"docs/public/release-process.md"', trigger_block.group(0))
             self.assertIn('"scripts/release/publish-npm.sh"', trigger_block.group(0))
             self.assertIn('"scripts/release/publish-npm.test.mjs"', trigger_block.group(0))
+            self.assertIn('"scripts/release/npm-packages.sh"', trigger_block.group(0))
+            self.assertIn('"scripts/release/npm-view-version.sh"', trigger_block.group(0))
+            self.assertIn('"scripts/release/npm-view-version.test.mjs"', trigger_block.group(0))
             self.assertIn('"scripts/release/nightly-version.mjs"', trigger_block.group(0))
             self.assertIn('"scripts/release/nightly-version.test.mjs"', trigger_block.group(0))
 
+        setup_node = (
+            "uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6"
+        )
+        self.assertIn(setup_node, LINT_WORKFLOW)
+        self.assertIn('node-version: "24"', LINT_WORKFLOW)
+        self.assertLess(
+            LINT_WORKFLOW.index(setup_node),
+            LINT_WORKFLOW.index("- name: Test npm release helpers"),
+        )
         self.assertIn(
             "node --test scripts/release/nightly-version.test.mjs "
             "scripts/release/npm-view-version.test.mjs "

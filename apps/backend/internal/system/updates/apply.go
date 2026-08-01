@@ -296,6 +296,9 @@ func selfUpdateEnvironment() []string {
 	return env
 }
 
+// Install-wide mutations use exact browser same-origin checks, stricter than
+// general UI CORS allowances. Requests without Origin remain available to
+// trusted non-browser clients such as the local CLI.
 func sameOriginOrNoOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {

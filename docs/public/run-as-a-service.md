@@ -10,8 +10,8 @@ The native Kandev launcher can install itself as a systemd service on Linux or a
 For the simplest path, install Kandev persistently before creating the service; see [CLI installation](cli.md#install). A plain `npx -y kandev@...` launch is ephemeral, but `npx -y kandev@latest service install` can create a managed npx user service. That service depends on the cached npx package remaining present: reinstall it after upgrades, and expect npm cache cleanup to invalidate its recorded absolute paths. Prefer global npm for a durable service. Do not hand-write a long-lived service around an npx command.
 
 Stable is the default release channel. A verified Kandev-managed npm/npx user service can opt into
-the npm Nightly channel from **Settings > System > Updates**. Homebrew and system services remain
-Stable-only.
+the npm Nightly channel from **Settings → System → Updates**. Desktop, Homebrew, and system services
+remain Stable-only.
 
 > **Network security:** the backend listens on `0.0.0.0` by default and ships with authentication **disabled**. Before allowing remote access, enable [opt-in authentication](authentication.md) (the **Authentication & users** feature toggle, or `KANDEV_FEATURES_AUTH=true`) and terminate TLS in a reverse proxy — authentication does not replace HTTPS. A server bound to non-loopback interfaces without authentication logs a startup warning. See [server configuration](configuration.md#root-and-server).
 

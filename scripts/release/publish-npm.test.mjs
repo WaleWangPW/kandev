@@ -15,29 +15,43 @@ import test from "node:test";
 
 const sourceRoot = path.resolve(import.meta.dirname, "../..");
 
-function loadRuntimeInventory() {
-  const inventoryPath = path.join(sourceRoot, "scripts/release/npm-packages.sh");
-  const command =
-    'source "$1"\n' +
-    'for platform in "${RUNTIME_PLATFORMS[@]}"; do\n' +
-    '  printf \'%s\\t%s\\n\' "$platform" "${RUNTIME_PACKAGE_BY_PLATFORM[$platform]}"\n' +
-    "done\n";
-  const result = spawnSync("bash", ["-c", command, "inventory", inventoryPath], {
-    encoding: "utf8",
+async function loadRuntimeInventory() {
+  const inventoryPath = path.join(
+    sourceRoot,
+    "scripts/release/npm-packages.sh",
+  );
+  const source = await readFile(inventoryPath, "utf8");
+  const platformBlock = source.match(/RUNTIME_PLATFORMS=\(([\s\S]*?)\n\)/);
+  assert.ok(platformBlock, "runtime platform inventory is missing");
+  const platforms = [...platformBlock[1].matchAll(/"([^"]+)"/g)].map(
+    (match) => match[1],
+  );
+  const packageByPlatform = new Map(
+    [...source.matchAll(/^\s*\["([^"]+)"\]="([^"]+)"$/gm)].map((match) => [
+      match[1],
+      match[2],
+    ]),
+  );
+  return platforms.map((platform) => {
+    const packageName = packageByPlatform.get(platform);
+    assert.ok(packageName, `runtime package is missing for ${platform}`);
+    return { platform, packageName };
   });
-  assert.equal(result.status, 0, result.stderr);
-  return result.stdout
-    .trim()
-    .split("\n")
-    .map((line) => {
-      const [platform, packageName] = line.split("\t");
-      return { platform, packageName };
-    });
 }
 
-const runtimeInventory = loadRuntimeInventory();
+const runtimeInventory = await loadRuntimeInventory();
 const runtimePackages = runtimeInventory.map(({ packageName }) => packageName);
-const assets = runtimeInventory.map(({ platform }) => `kandev-${platform}.tar.gz`);
+const assets = runtimeInventory.map(
+  ({ platform }) => `kandev-${platform}.tar.gz`,
+);
+const releases = [
+  { name: "Stable", version: "1.2.3", distTag: "latest" },
+  {
+    name: "Nightly",
+    version: "1.2.4-nightly.shaabcdef123456",
+    distTag: "nightly",
+  },
+];
 
 async function createFixture() {
   const root = await mkdtemp(path.join(tmpdir(), "kandev-publish-npm-"));
@@ -226,14 +240,7 @@ async function runPublish(fixture, { version, distTag, mode }) {
   };
 }
 
-for (const release of [
-  { name: "Stable", version: "1.2.3", distTag: "latest" },
-  {
-    name: "Nightly",
-    version: "1.2.4-nightly.shaabcdef123456",
-    distTag: "nightly",
-  },
-]) {
+for (const release of releases) {
   test(`${release.name} publication is idempotent when every exact package already exists`, async () => {
     const fixture = await createFixture();
     try {
@@ -250,14 +257,7 @@ for (const release of [
   });
 }
 
-for (const release of [
-  { name: "Stable", version: "1.2.3", distTag: "latest" },
-  {
-    name: "Nightly",
-    version: "1.2.4-nightly.shaabcdef123456",
-    distTag: "nightly",
-  },
-]) {
+for (const release of releases) {
   test(`a fresh ${release.name} publishes every package with pinned launcher metadata`, async () => {
     const fixture = await createFixture();
     try {
@@ -268,7 +268,9 @@ for (const release of [
       assert.equal(metadata.version, release.version);
       assert.deepEqual(
         metadata.optionalDependencies,
-        Object.fromEntries(runtimePackages.map((name) => [name, release.version])),
+        Object.fromEntries(
+          runtimePackages.map((name) => [name, release.version]),
+        ),
       );
       assert.equal(result.packageJSON, fixture.originalPackageJSON);
     } finally {
@@ -343,7 +345,9 @@ test("a runtime publish failure withholds the launcher", async () => {
     });
     assert.notEqual(result.status, 0);
     assert.deepEqual(result.published, runtimePackages);
-    assert.ok(result.stderr.includes(`Failed to publish ${runtimePackages[1]}`));
+    assert.ok(
+      result.stderr.includes(`Failed to publish ${runtimePackages[1]}`),
+    );
     assert.match(result.stderr, /Refusing to publish main kandev/);
     assert.equal(result.packageJSON, fixture.originalPackageJSON);
   } finally {

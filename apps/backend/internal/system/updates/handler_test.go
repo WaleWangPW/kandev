@@ -274,6 +274,30 @@ func TestHandleSetChannelPersistsSupportedNightlyAndReturnsResolvedTarget(t *tes
 	}
 }
 
+func TestHandleSetChannelRejectsTrailingJSON(t *testing.T) {
+	svc, store := newManagedNPMServiceForHandler(t)
+	svc.SetNightlyFetcher(func(context.Context) (string, string, error) {
+		return "1.2.4-nightly.shaabc123def456", "https://example/nightly", nil
+	})
+	r := newRouter(svc)
+	req := httptest.NewRequest(
+		http.MethodPatch,
+		"/api/v1/system/updates/channel",
+		bytes.NewBufferString(`{"channel":"nightly"} {}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s want 400", w.Code, w.Body.String())
+	}
+	_, present := readMemorySetting(t, store)
+	if present {
+		t.Fatal("channel selection with trailing JSON was persisted")
+	}
+}
+
 func TestHandleSetChannelRejectsInvalidAndUnsupportedNightly(t *testing.T) {
 	t.Run("invalid", func(t *testing.T) {
 		svc, _ := newManagedNPMServiceForHandler(t)
@@ -446,6 +470,10 @@ func TestHandleApplyRejectsInvalidJSONBeforeApplying(t *testing.T) {
 		{
 			name: "truncated object after valid fields",
 			body: `{"confirm":"UPDATE","target_version":"v1.2.4","broken":`,
+		},
+		{
+			name: "trailing JSON value",
+			body: `{"confirm":"UPDATE","target_version":"v1.2.4"} {}`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

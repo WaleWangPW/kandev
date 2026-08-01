@@ -2,7 +2,9 @@ package updates
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"net/http"
 
@@ -44,7 +46,7 @@ func HandleSetChannel(svc *Service) gin.HandlerFunc {
 			return
 		}
 		var req channelRequestBody
-		if err := c.ShouldBindJSON(&req); err != nil {
+		if err := decodeSingleJSON(c.Request.Body, &req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{errorResponseKey: "invalid channel request"})
 			return
 		}
@@ -97,6 +99,20 @@ func writeRateLimited(c *gin.Context, svc *Service) {
 	})
 }
 
+func decodeSingleJSON(reader io.Reader, target any) error {
+	decoder := json.NewDecoder(reader)
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("request body contains multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
 // HandleApply queues a service-managed self-update. It is deliberately gated
 // behind service metadata and a browser same-origin check because the helper
 // mutates the local Kandev installation and restarts the service.
@@ -107,7 +123,7 @@ func HandleApply(svc *Service) gin.HandlerFunc {
 			return
 		}
 		var req applyRequestBody
-		if err := c.ShouldBindJSON(&req); err != nil {
+		if err := decodeSingleJSON(c.Request.Body, &req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{errorResponseKey: "invalid update request"})
 			return
 		}

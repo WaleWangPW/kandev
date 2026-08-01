@@ -234,7 +234,10 @@ describe("useUpdates initial load recovery", () => {
     });
 
     expect(mocks.fetchUpdates).toHaveBeenCalledOnce();
-    initialReload.resolve(updates("stable"));
+    await act(async () => {
+      initialReload.resolve(updates("stable"));
+      await initialReload.promise;
+    });
   });
 
   it("revalidates an empty store after a check invalidates the initial reload and fails", async () => {

@@ -39,6 +39,11 @@ test.describe("System Updates page", () => {
 
     await expect(testPage.getByTestId("system-updates-current")).toHaveText("v1.0.0");
     await expect(testPage.getByTestId("system-updates-latest")).toHaveText("v1.0.1");
+    await expect(testPage.getByRole("radio", { name: /^Stable/ })).toBeChecked();
+    await expect(testPage.getByRole("radio", { name: /^Nightly/ })).toBeDisabled();
+    await expect(testPage.getByTestId("system-updates-channel-reason")).toContainText(
+      /managed npm or npx user service/i,
+    );
     await expect(testPage.getByTestId("system-updates-apply")).toHaveCount(0);
   });
 
