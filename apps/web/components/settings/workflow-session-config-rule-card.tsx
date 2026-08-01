@@ -206,7 +206,7 @@ function SessionConfigRuleSettings({
           disabled={readOnly}
           placeholder="Choose model and session settings"
           ariaLabel={`Settings for ${rule.agent_name}`}
-          triggerClassName="min-h-10 w-full"
+          triggerClassName="min-h-11 w-full sm:min-h-10"
         />
       ) : (
         <p className="rounded-md border border-border/60 p-2 text-xs text-muted-foreground">
