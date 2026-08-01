@@ -263,7 +263,8 @@ models and options are selected from the agent's advertised capabilities.
 
 Each rule can **Set** a model and any selected options, **Keep** the settings
 already active, or **Restore original** to reapply the immutable model and
-provider-default option values captured when the original session initialized.
+option values captured when the original session finished initializing, after
+profile settings were applied.
 Rules are best-effort: a rejected field produces a warning, while successful
 fields remain active and the step continues. The settings are applied before
 an auto-start prompt and persist as the session's runtime overrides.

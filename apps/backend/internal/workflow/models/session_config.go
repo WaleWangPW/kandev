@@ -177,7 +177,9 @@ func parseConfigureSessionOptions(raw interface{}) (map[string]string, error) {
 }
 
 func validateConfigureSessionRule(rule ConfigureSessionRule, hasModel, hasOptions bool) (ConfigureSessionRule, error) {
-	if strings.TrimSpace(rule.AgentName) == "" {
+	rule.AgentName = strings.TrimSpace(rule.AgentName)
+	rule.Model = strings.TrimSpace(rule.Model)
+	if rule.AgentName == "" {
 		return ConfigureSessionRule{}, fmt.Errorf("agent_name must be a non-empty string")
 	}
 	if rule.ConfigOptions == nil {

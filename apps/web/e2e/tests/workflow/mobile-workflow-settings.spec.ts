@@ -41,6 +41,7 @@ test.describe("Workflow settings on mobile", () => {
     for (const control of [editor, rule, settings]) {
       const box = await control.boundingBox();
       expect(box).not.toBeNull();
+      expect(box!.height).toBeGreaterThanOrEqual(44);
       expect(box!.x).toBeGreaterThanOrEqual(0);
       expect(box!.x + box!.width).toBeLessThanOrEqual(viewportWidth);
     }

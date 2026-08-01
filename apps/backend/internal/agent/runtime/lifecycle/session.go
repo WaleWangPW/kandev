@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -330,7 +331,7 @@ func (sm *SessionManager) InitializeAndPromptWithLayers(
 	execution.ACPSessionID = result.SessionID
 	execution.sessionInitialized = true
 	providerDefaultConfig := execution.GetModelState()
-	finalConfigID, profileModelApplied, profileConfigOptionsApplied := sm.applyProfileSessionLayers(
+	finalConfigID, profileModelApplied, profileModeApplied, profileConfigOptionsApplied := sm.applyProfileSessionLayers(
 		ctx, execution, result.SessionID, profileModel, profileMode, profileConfigOptions,
 	)
 
@@ -339,11 +340,12 @@ func (sm *SessionManager) InitializeAndPromptWithLayers(
 	// ConfigBaselineCandidate, which remains provider-default comparison data.
 	sm.publishOriginalConfigOptionsWithProfile(execution, result.SessionID, profileModelApplied, profileConfigOptionsApplied)
 
-	finalConfigID = sm.applyRuntimeSessionLayers(
+	finalConfigID, runtimeFailures := sm.applyRuntimeSessionLayers(
 		ctx, execution, result.SessionID, finalConfigID,
-		profileModel, profileMode, runtimeModel, runtimeMode, runtimeConfigOptions,
+		profileModelApplied, profileModeApplied, runtimeModel, runtimeMode, runtimeConfigOptions,
 	)
 	sm.publishSettledConfigOptions(execution, result.SessionID, finalConfigID, providerDefaultConfig)
+	sm.publishWorkflowSessionConfigFailures(execution, result.SessionID, runtimeFailures)
 
 	// Publish session created event
 	if sm.eventPublisher != nil {
@@ -406,12 +408,13 @@ func (sm *SessionManager) applyProfileSessionLayers(
 	profileModel string,
 	profileMode string,
 	profileConfigOptions map[string]string,
-) (string, string, map[string]string) {
+) (string, string, string, map[string]string) {
 	if execution.agentctl == nil {
-		return "", "", nil
+		return "", "", "", nil
 	}
 	finalConfigID := ""
 	profileModelApplied := ""
+	profileModeApplied := ""
 	profileConfigOptionsApplied := make(map[string]string)
 	if profileModel != "" {
 		if err := execution.agentctl.SetModel(ctx, profileModel); err != nil {
@@ -429,11 +432,14 @@ func (sm *SessionManager) applyProfileSessionLayers(
 			sm.logger.Warn("failed to set profile mode via ACP",
 				zap.String("execution_id", execution.ID), zap.String("mode", profileMode), zap.Error(err))
 		} else {
+			profileModeApplied = profileMode
 			sm.logger.Info("set profile mode on ACP session",
 				zap.String("execution_id", execution.ID), zap.String("mode", profileMode))
 		}
 	}
-	for configID, value := range profileconfig.SanitizeConfigOptions(profileConfigOptions) {
+	sanitizedOptions := profileconfig.SanitizeConfigOptions(profileConfigOptions)
+	for _, configID := range sortedConfigOptionKeys(sanitizedOptions) {
+		value := sanitizedOptions[configID]
 		if err := execution.agentctl.SetConfigOption(ctx, configID, value); err != nil {
 			sm.logger.Warn("failed to set profile config option via ACP",
 				zap.String("execution_id", execution.ID), zap.String("config_id", configID),
@@ -445,7 +451,7 @@ func (sm *SessionManager) applyProfileSessionLayers(
 		sm.logger.Info("set profile config option on ACP session",
 			zap.String("execution_id", execution.ID), zap.String("config_id", configID), zap.String("value", value))
 	}
-	return finalConfigID, profileModelApplied, profileConfigOptionsApplied
+	return finalConfigID, profileModelApplied, profileModeApplied, profileConfigOptionsApplied
 }
 
 func (sm *SessionManager) applyRuntimeSessionLayers(
@@ -458,12 +464,14 @@ func (sm *SessionManager) applyRuntimeSessionLayers(
 	runtimeModel string,
 	runtimeMode string,
 	runtimeConfigOptions map[string]string,
-) string {
+) (string, []string) {
+	failed := make([]string, 0)
 	if execution.agentctl == nil {
-		return finalConfigID
+		return finalConfigID, failed
 	}
 	if runtimeModel != "" && runtimeModel != profileModel {
 		if err := execution.agentctl.SetModel(ctx, runtimeModel); err != nil {
+			failed = append(failed, "model")
 			sm.logger.Warn("failed to set runtime model via ACP",
 				zap.String("execution_id", execution.ID), zap.String("model", runtimeModel), zap.Error(err))
 		} else {
@@ -472,12 +480,16 @@ func (sm *SessionManager) applyRuntimeSessionLayers(
 	}
 	if runtimeMode != "" && runtimeMode != profileMode {
 		if err := execution.agentctl.SetMode(ctx, acpSessionID, runtimeMode); err != nil {
+			failed = append(failed, "mode")
 			sm.logger.Warn("failed to set runtime mode via ACP",
 				zap.String("execution_id", execution.ID), zap.String("mode", runtimeMode), zap.Error(err))
 		}
 	}
-	for configID, value := range profileconfig.SanitizeConfigOptions(runtimeConfigOptions) {
+	sanitizedOptions := profileconfig.SanitizeConfigOptions(runtimeConfigOptions)
+	for _, configID := range sortedConfigOptionKeys(sanitizedOptions) {
+		value := sanitizedOptions[configID]
 		if err := execution.agentctl.SetConfigOption(ctx, configID, value); err != nil {
+			failed = append(failed, configID)
 			sm.logger.Warn("failed to set runtime config option via ACP",
 				zap.String("execution_id", execution.ID), zap.String("config_id", configID),
 				zap.String("value", value), zap.Error(err))
@@ -485,7 +497,16 @@ func (sm *SessionManager) applyRuntimeSessionLayers(
 		}
 		finalConfigID = configID
 	}
-	return finalConfigID
+	return finalConfigID, failed
+}
+
+func sortedConfigOptionKeys(options map[string]string) []string {
+	keys := make([]string, 0, len(options))
+	for key := range options {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func (sm *SessionManager) publishSettledConfigOptions(
@@ -509,6 +530,23 @@ func (sm *SessionManager) publishSettledConfigOptions(
 		ConfigOptions:           live.ConfigOptions,
 		ConfigBaselineCandidate: baselineCandidate.ConfigOptions,
 		Data:                    map[string]any{"config_options_settled": true},
+	})
+}
+
+func (sm *SessionManager) publishWorkflowSessionConfigFailures(
+	execution *AgentExecution,
+	acpSessionID string,
+	failures []string,
+) {
+	if sm.eventPublisher == nil || len(failures) == 0 {
+		return
+	}
+	sm.eventPublisher.PublishAgentStreamEvent(execution, agentctl.AgentEvent{
+		Type:      streams.EventTypeSessionModels,
+		SessionID: acpSessionID,
+		Data: map[string]any{
+			"workflow_session_config_failures": append([]string(nil), failures...),
+		},
 	})
 }
 

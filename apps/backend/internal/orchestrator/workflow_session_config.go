@@ -122,6 +122,11 @@ func (s *Service) resolveWorkflowSessionConfigTarget(
 			"This step's session settings were not applied because workflow routing is using a different session tab.")
 		return sessionConfigurationTarget{}, false
 	}
+	if session.IsPassthrough {
+		s.warnWorkflowSessionConfig(ctx, taskID, session.ID, step.ID,
+			"This step's ACP session settings were not applied because the original agent uses passthrough mode.")
+		return sessionConfigurationTarget{}, false
+	}
 	agentName := sessionAgentFamily(session)
 	if agentName == "" {
 		s.warnWorkflowSessionConfig(ctx, taskID, session.ID, step.ID,
@@ -136,11 +141,6 @@ func (s *Service) resolveWorkflowSessionConfigTarget(
 	if !ok {
 		s.warnWorkflowSessionConfig(ctx, taskID, session.ID, step.ID,
 			"This step requested restoring the original session settings, but no immutable original configuration is available.")
-		return sessionConfigurationTarget{}, false
-	}
-	if session.IsPassthrough {
-		s.warnWorkflowSessionConfig(ctx, taskID, session.ID, step.ID,
-			"This step's ACP session settings were not applied because the original agent uses passthrough mode.")
 		return sessionConfigurationTarget{}, false
 	}
 	return target, true
@@ -173,12 +173,13 @@ func (s *Service) applyLiveWorkflowSessionConfig(
 	sessionID string,
 	target sessionConfigurationTarget,
 ) []string {
-	failed := make([]string, 0, 1+len(target.configOptions))
+	failed := make([]string, 0)
+	applied := sessionConfigurationTarget{configOptions: make(map[string]string)}
 	if target.model != "" {
 		if err := s.agentManager.SetSessionModelBySessionID(ctx, sessionID, target.model); err != nil {
 			failed = append(failed, "model")
-		} else if err := s.persistWorkflowSessionConfigOverride(ctx, sessionID, sessionConfigurationTarget{model: target.model}); err != nil {
-			failed = append(failed, "model persistence")
+		} else {
+			applied.model = target.model
 		}
 	}
 	setter, supported := s.agentManager.(sessionConfigOptionSetter)
@@ -191,8 +192,11 @@ func (s *Service) applyLiveWorkflowSessionConfig(
 			failed = append(failed, configID)
 			continue
 		}
-		if err := s.persistWorkflowSessionConfigOverride(ctx, sessionID, sessionConfigurationTarget{configOptions: map[string]string{configID: value}}); err != nil {
-			failed = append(failed, configID+" persistence")
+		applied.configOptions[configID] = value
+	}
+	if applied.model != "" || len(applied.configOptions) > 0 {
+		if err := s.persistWorkflowSessionConfigOverride(ctx, sessionID, applied); err != nil {
+			failed = append(failed, "settings persistence")
 		}
 	}
 	return failed

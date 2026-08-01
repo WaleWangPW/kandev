@@ -14,6 +14,7 @@ import type { AvailableAgent } from "@/lib/types/http";
 import type { ConfigureSessionOperation, ConfigureSessionRule } from "@/lib/types/workflow-actions";
 import {
   type AgentChoice,
+  defaultModelForAgent,
   modelConfigOptions,
   operationRule,
 } from "./workflow-session-config-shared";
@@ -40,7 +41,7 @@ export function SessionConfigRuleCard({
   const modelConfigOption = configOptions.find(isModelConfigOption);
   const modelOptions = modelConfigOption
     ? configOptionToModelOptions(modelConfigOption)
-    : (selectedAgent?.model_config.available_models ?? []).map((model) => ({
+    : (selectedAgent?.model_config?.available_models ?? []).map((model) => ({
         id: model.id,
         name: model.name,
         description: model.description ?? (model.id !== model.name ? model.id : undefined),
@@ -54,58 +55,15 @@ export function SessionConfigRuleCard({
       className="space-y-3 rounded-md border bg-card p-3"
       data-testid={`session-config-rule-${index}`}
     >
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-        <Label className="text-xs font-medium text-muted-foreground sm:w-24">When agent is</Label>
-        <Select
-          value={rule.agent_name}
-          onValueChange={(agentName) => onChange({ ...rule, agent_name: agentName })}
-          disabled={readOnly}
-        >
-          <SelectTrigger
-            className="min-h-10 w-full cursor-pointer sm:flex-1"
-            data-testid={`session-config-agent-${index}`}
-          >
-            <SelectValue placeholder="Choose agent family" />
-          </SelectTrigger>
-          <SelectContent>
-            {choices.map((choice) => (
-              <SelectItem key={choice.name} value={choice.name}>
-                {choice.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Select
-          value={rule.operation}
-          onValueChange={(operation) =>
-            onChange(operationRule(rule, operation as ConfigureSessionOperation))
-          }
-          disabled={readOnly}
-        >
-          <SelectTrigger
-            className="min-h-10 w-full cursor-pointer sm:w-44"
-            data-testid={`session-config-operation-${index}`}
-          >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="set">Set settings</SelectItem>
-            <SelectItem value="keep">Keep current</SelectItem>
-            <SelectItem value="restore_original">Restore original</SelectItem>
-          </SelectContent>
-        </Select>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="min-h-10 cursor-pointer self-end text-destructive hover:text-destructive sm:self-auto"
-          onClick={onRemove}
-          disabled={readOnly}
-          aria-label={`Remove agent condition ${index + 1}`}
-        >
-          <IconTrash className="h-4 w-4" />
-        </Button>
-      </div>
+      <SessionConfigRuleHeader
+        rule={rule}
+        index={index}
+        choices={choices}
+        availableAgents={availableAgents}
+        readOnly={readOnly}
+        onChange={onChange}
+        onRemove={onRemove}
+      />
 
       {rule.operation === "set" && (
         <SessionConfigRuleSettings
@@ -121,16 +79,97 @@ export function SessionConfigRuleCard({
   );
 }
 
+function SessionConfigRuleHeader({
+  rule,
+  index,
+  choices,
+  availableAgents,
+  readOnly,
+  onChange,
+  onRemove,
+}: {
+  rule: ConfigureSessionRule;
+  index: number;
+  choices: AgentChoice[];
+  availableAgents: AvailableAgent[];
+  readOnly: boolean;
+  onChange: (rule: ConfigureSessionRule) => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+      <Label className="text-xs font-medium text-muted-foreground sm:w-24">When agent is</Label>
+      <Select
+        value={rule.agent_name}
+        onValueChange={(agentName) =>
+          onChange({
+            agent_name: agentName,
+            operation: rule.operation,
+            ...(rule.operation === "set"
+              ? { model: defaultModelForAgent(agentName, availableAgents) }
+              : {}),
+          })
+        }
+        disabled={readOnly}
+      >
+        <SelectTrigger
+          className="min-h-10 w-full cursor-pointer sm:flex-1"
+          data-testid={`session-config-agent-${index}`}
+        >
+          <SelectValue placeholder="Choose agent family" />
+        </SelectTrigger>
+        <SelectContent>
+          {choices.map((choice) => (
+            <SelectItem key={choice.name} value={choice.name}>
+              {choice.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <Select
+        value={rule.operation}
+        onValueChange={(operation) =>
+          onChange(operationRule(rule, operation as ConfigureSessionOperation, availableAgents))
+        }
+        disabled={readOnly}
+      >
+        <SelectTrigger
+          className="min-h-10 w-full cursor-pointer sm:w-44"
+          data-testid={`session-config-operation-${index}`}
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="set">Set settings</SelectItem>
+          <SelectItem value="keep">Keep current</SelectItem>
+          <SelectItem value="restore_original">Restore original</SelectItem>
+        </SelectContent>
+      </Select>
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className="min-h-10 cursor-pointer self-end text-destructive hover:text-destructive sm:self-auto"
+        onClick={onRemove}
+        disabled={readOnly}
+        aria-label={`Remove agent condition ${index + 1}`}
+      >
+        <IconTrash className="h-4 w-4" />
+      </Button>
+    </div>
+  );
+}
+
 function currentModelForRule(
   rule: ConfigureSessionRule,
   modelConfigOption: SelectConfigOption | undefined,
   selectedAgent: AvailableAgent | undefined,
 ): string | null {
   return (
-    rule.model ||
+    (rule.operation === "set" ? rule.model : undefined) ||
     modelConfigOption?.currentValue ||
-    selectedAgent?.model_config.current_model_id ||
-    selectedAgent?.model_config.default_model ||
+    selectedAgent?.model_config?.current_model_id ||
+    selectedAgent?.model_config?.default_model ||
     null
   );
 }
@@ -143,7 +182,7 @@ function SessionConfigRuleSettings({
   readOnly,
   onChange,
 }: {
-  rule: ConfigureSessionRule;
+  rule: Extract<ConfigureSessionRule, { operation: "set" }>;
   modelOptions: { id: string; name: string; description?: string; usageMultiplier?: string }[];
   currentModel: string | null;
   configOptions: SelectConfigOption[];

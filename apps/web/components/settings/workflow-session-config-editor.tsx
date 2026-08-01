@@ -52,6 +52,9 @@ export function SessionConfigEditor({
     () => buildAgentChoices(profiles, availableAgents.items),
     [availableAgents.items, profiles],
   );
+  const availableChoices = choices.filter(
+    (choice) => !rules.some((rule) => rule.agent_name === choice.name),
+  );
   const isDirty = isWorkflowStepValueDirty(step, savedStep, (item) =>
     JSON.stringify(configureSessionAction(item)?.config?.rules ?? []),
   );
@@ -72,19 +75,14 @@ export function SessionConfigEditor({
   };
 
   const removeConfiguration = () => {
-    const events = step.events ?? {};
-    onUpdate({
-      events: {
-        ...events,
-        on_enter: (events.on_enter ?? []).filter(
-          (candidate) => candidate.type !== "configure_session",
-        ),
-      },
-    });
+    onUpdate(withoutConfigureSessionAction(step));
   };
 
   const addRule = (agentName?: string, operation: ConfigureSessionOperation = "set") => {
-    const selectedAgent = agentName ?? choices[0]?.name ?? "";
+    const selectedAgent =
+      availableChoices.find((choice) => choice.name === agentName)?.name ??
+      availableChoices[0]?.name ??
+      "";
     if (!selectedAgent) return;
     updateRules([
       ...rules,
@@ -120,7 +118,7 @@ export function SessionConfigEditor({
         onEnable={() => addRule()}
         onDisable={removeConfiguration}
         onAddRule={() => addRule()}
-        canAddRule={choices.length > 0}
+        canAddRule={availableChoices.length > 0}
       />
       <SessionConfigBody
         step={step}
@@ -130,11 +128,24 @@ export function SessionConfigEditor({
         choices={choices}
         availableAgents={availableAgents.items}
         readOnly={readOnly}
+        fixedProfile={!!step.agent_profile_id}
         onChooseCarryRule={createCarryRule}
         onUpdateRules={updateRules}
       />
     </section>
   );
+}
+
+function withoutConfigureSessionAction(step: WorkflowStep): Partial<WorkflowStep> {
+  const events = step.events ?? {};
+  return {
+    events: {
+      ...events,
+      on_enter: (events.on_enter ?? []).filter(
+        (candidate) => candidate.type !== "configure_session",
+      ),
+    },
+  };
 }
 
 function SessionConfigBody({
@@ -145,6 +156,7 @@ function SessionConfigBody({
   choices,
   availableAgents,
   readOnly,
+  fixedProfile,
   onChooseCarryRule,
   onUpdateRules,
 }: {
@@ -155,6 +167,7 @@ function SessionConfigBody({
   choices: AgentChoice[];
   availableAgents: ReturnType<typeof useAvailableAgents>["items"];
   readOnly: boolean;
+  fixedProfile: boolean;
   onChooseCarryRule: (
     warning: SessionConfigCarryWarning,
     operation: ConfigureSessionOperation,
@@ -174,6 +187,7 @@ function SessionConfigBody({
           warnings={warnings}
           onChoose={onChooseCarryRule}
           readOnly={readOnly}
+          disabled={fixedProfile}
         />
       )}
       {action && (
@@ -182,7 +196,8 @@ function SessionConfigBody({
           warnings={warnings}
           choices={choices}
           availableAgents={availableAgents}
-          readOnly={readOnly}
+          readOnly={readOnly || fixedProfile}
+          fixedProfile={fixedProfile}
           onChooseCarryRule={onChooseCarryRule}
           onUpdateRules={onUpdateRules}
         />
@@ -197,6 +212,7 @@ function SessionConfigRuleList({
   choices,
   availableAgents,
   readOnly,
+  fixedProfile,
   onChooseCarryRule,
   onUpdateRules,
 }: {
@@ -205,6 +221,7 @@ function SessionConfigRuleList({
   choices: AgentChoice[];
   availableAgents: ReturnType<typeof useAvailableAgents>["items"];
   readOnly: boolean;
+  fixedProfile: boolean;
   onChooseCarryRule: (
     warning: SessionConfigCarryWarning,
     operation: ConfigureSessionOperation,
@@ -218,6 +235,7 @@ function SessionConfigRuleList({
           warnings={warnings}
           onChoose={onChooseCarryRule}
           readOnly={readOnly}
+          disabled={fixedProfile}
         />
       )}
       {rules.map((rule, index) => (
@@ -225,10 +243,26 @@ function SessionConfigRuleList({
           key={`${rule.agent_name}-${index}`}
           rule={rule}
           index={index}
-          choices={choices}
+          choices={choices.filter(
+            (choice) =>
+              choice.name === rule.agent_name ||
+              !rules.some(
+                (candidate, candidateIndex) =>
+                  candidateIndex !== index && candidate.agent_name === choice.name,
+              ),
+          )}
           availableAgents={availableAgents}
           readOnly={readOnly}
           onChange={(nextRule) => {
+            if (
+              nextRule.agent_name !== rule.agent_name &&
+              rules.some(
+                (candidate, candidateIndex) =>
+                  candidateIndex !== index && candidate.agent_name === nextRule.agent_name,
+              )
+            ) {
+              return;
+            }
             const nextRules = rules.slice();
             nextRules[index] = nextRule;
             onUpdateRules(nextRules);
@@ -287,7 +321,7 @@ function SessionConfigHeader({
         </div>
         <HelpTip text="Rules apply to the task's first agent session. They never create or switch conversation tabs." />
       </div>
-      {enabled && !readOnly && (
+      {enabled && !readOnly && !step.agent_profile_id && (
         <Button
           type="button"
           size="sm"

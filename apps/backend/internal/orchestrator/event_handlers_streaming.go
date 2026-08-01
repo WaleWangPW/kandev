@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -2373,6 +2374,17 @@ func (s *Service) handleSessionModelsEvent(ctx context.Context, payload *lifecyc
 	if sessionID == "" || s.eventBus == nil {
 		return
 	}
+	if failures := workflowSessionConfigFailures(payload.Data.Data); len(failures) > 0 {
+		stepID := ""
+		if s.repo != nil && payload.TaskID != "" {
+			if task, err := s.repo.GetTask(ctx, payload.TaskID); err == nil && task != nil {
+				stepID = task.WorkflowStepID
+			}
+		}
+		s.warnWorkflowSessionConfig(ctx, payload.TaskID, sessionID, stepID,
+			fmt.Sprintf("Some session settings could not be applied at startup: %s.", strings.Join(failures, ", ")))
+		return
+	}
 	if _, err := s.sessionOriginalEffectiveConfigurationForEvent(ctx, sessionID, payload.Data); err != nil {
 		s.logger.Warn("failed to persist original effective session configuration",
 			zap.String("session_id", sessionID),
@@ -2410,6 +2422,27 @@ func (s *Service) handleSessionModelsEvent(ctx context.Context, payload *lifecyc
 	)
 	subject := events.BuildSessionModelsSubject(sessionID)
 	_ = s.eventBus.Publish(ctx, subject, bus.NewEvent(events.SessionModelsUpdated, "orchestrator", eventPayload))
+}
+
+func workflowSessionConfigFailures(raw any) []string {
+	data, ok := raw.(map[string]any)
+	if !ok || data == nil {
+		return nil
+	}
+	switch values := data["workflow_session_config_failures"].(type) {
+	case []string:
+		return values
+	case []any:
+		failures := make([]string, 0, len(values))
+		for _, value := range values {
+			if failure, ok := value.(string); ok && failure != "" {
+				failures = append(failures, failure)
+			}
+		}
+		return failures
+	default:
+		return nil
+	}
 }
 
 func (s *Service) sessionOriginalEffectiveConfigurationForEvent(
@@ -2591,7 +2624,10 @@ func configOptionValues(options []streams.ConfigOption) map[string]string {
 func configOptionValuesWithoutModel(options []streams.ConfigOption) map[string]string {
 	values := configOptionValues(options)
 	for key, option := range optionsByID(options) {
-		if key == sessionModelConfigKey || option.Category == sessionModelConfigKey {
+		// The immutable restore snapshot contains only selectable ACP options.
+		// Toggle/boolean values are provider state, not model configuration, and
+		// may be invalid when replayed after a model switch.
+		if option.Type != "select" || key == sessionModelConfigKey || option.Category == sessionModelConfigKey {
 			delete(values, key)
 		}
 	}

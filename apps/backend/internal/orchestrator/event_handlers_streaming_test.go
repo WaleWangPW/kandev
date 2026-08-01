@@ -2711,7 +2711,8 @@ func TestHandleSessionModelsEventCapturesOriginalEffectiveConfigurationOnce(t *t
 		Data: &lifecycle.AgentStreamEventData{
 			CurrentModelID: "gpt-5.6-sol",
 			OriginalConfigCandidate: []streams.ConfigOption{
-				{ID: "reasoning_effort", CurrentValue: "high"},
+				{Type: "select", ID: "reasoning_effort", CurrentValue: "high"},
+				{Type: "toggle", ID: "fast_mode", CurrentValue: "on"},
 			},
 			Data: map[string]any{"original_config_settled": true},
 		},

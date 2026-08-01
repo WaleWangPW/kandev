@@ -650,7 +650,12 @@ func (e *Executor) PrepareSession(ctx context.Context, task *v1.Task, agentProfi
 	// become primary. The immutable origin marker follows creation order, not
 	// primary-session ownership, because a later user-selected primary must not
 	// change which conversation workflow rules treat as the original.
-	existingSessions, _ := e.repo.ListTaskSessions(ctx, task.ID)
+	existingSessions, err := e.repo.ListTaskSessions(ctx, task.ID)
+	if err != nil {
+		e.logger.Error("failed to list task sessions before creating initial session",
+			zap.String("task_id", task.ID), zap.Error(err))
+		return "", fmt.Errorf("list task sessions: %w", err)
+	}
 	isTaskInitialSession := len(existingSessions) == 0
 	hasPrimary := false
 	for _, s := range existingSessions {

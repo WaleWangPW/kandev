@@ -1,5 +1,5 @@
 import type { AgentProfileOption } from "@/lib/state/slices";
-import type { WorkflowStep } from "@/lib/types/http";
+import type { AvailableAgent, WorkflowStep } from "@/lib/types/http";
 import type {
   ConfigureSessionOperation,
   ConfigureSessionRule,
@@ -10,7 +10,6 @@ import {
   type DynamicConfigOption,
   type SelectConfigOption,
 } from "@/components/model-config-selector";
-import type { AvailableAgent } from "@/lib/types/http";
 
 export type AgentChoice = { name: string; label: string };
 
@@ -39,7 +38,7 @@ export function defaultModelForAgent(
   availableAgents: AvailableAgent[],
 ): string | undefined {
   const config = availableAgents.find((agent) => agent.name === agentName)?.model_config;
-  return config?.current_model_id || config?.default_model || config?.available_models[0]?.id;
+  return config?.current_model_id || config?.default_model || config?.available_models?.[0]?.id;
 }
 
 export function modelConfigOptions(
@@ -53,8 +52,9 @@ export function modelConfigOptions(
       name: option.name,
       description: option.description,
       currentValue: isModelConfigOption(option)
-        ? rule.model || option.current_value
-        : rule.config_options?.[option.id] || option.current_value,
+        ? (rule.operation === "set" ? rule.model : undefined) || option.current_value
+        : (rule.operation === "set" ? rule.config_options?.[option.id] : undefined) ||
+          option.current_value,
       category: option.category,
       options: option.options,
     };
@@ -65,7 +65,20 @@ export function modelConfigOptions(
 export function operationRule(
   rule: ConfigureSessionRule,
   operation: ConfigureSessionOperation,
+  availableAgents: AvailableAgent[] = [],
 ): ConfigureSessionRule {
-  if (operation === "set") return { ...rule, operation, model: rule.model || undefined };
+  if (operation === "set") {
+    const model =
+      (rule.operation === "set" ? rule.model : undefined) ||
+      defaultModelForAgent(rule.agent_name, availableAgents);
+    return {
+      agent_name: rule.agent_name,
+      operation,
+      ...(model ? { model } : {}),
+      ...(rule.operation === "set" && rule.config_options
+        ? { config_options: rule.config_options }
+        : {}),
+    };
+  }
   return { agent_name: rule.agent_name, operation };
 }

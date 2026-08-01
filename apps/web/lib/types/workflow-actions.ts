@@ -19,12 +19,19 @@ export type OnEnterActionType =
 
 export type ConfigureSessionOperation = "set" | "keep" | "restore_original";
 
-export type ConfigureSessionRule = {
+export type ConfigureSessionSetRule = {
   agent_name: string;
-  operation: ConfigureSessionOperation;
+  operation: "set";
   model?: string;
   config_options?: Record<string, string>;
 };
+
+export type ConfigureSessionCarryRule = {
+  agent_name: string;
+  operation: "keep" | "restore_original";
+};
+
+export type ConfigureSessionRule = ConfigureSessionSetRule | ConfigureSessionCarryRule;
 
 export type ConfigureSessionActionConfig = {
   rules: ConfigureSessionRule[];

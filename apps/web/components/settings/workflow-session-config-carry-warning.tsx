@@ -9,17 +9,19 @@ export function SessionConfigCarryWarningPanel({
   warnings,
   onChoose,
   readOnly,
+  disabled = false,
 }: {
   warnings: SessionConfigCarryWarning[];
   onChoose: (warning: SessionConfigCarryWarning, operation: ConfigureSessionOperation) => void;
   readOnly: boolean;
+  disabled?: boolean;
 }) {
   return (
     <div
       className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3"
       data-testid="session-config-carry-warning"
     >
-      <div className="flex items-start gap-2 text-xs text-amber-100">
+      <div className="flex items-start gap-2 text-xs text-amber-800 dark:text-amber-100">
         <IconAlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
         <span>
           Earlier workflow settings may carry into this step because the original conversation tab
@@ -39,7 +41,7 @@ export function SessionConfigCarryWarningPanel({
                 size="sm"
                 variant="outline"
                 className="min-h-10 cursor-pointer"
-                disabled={readOnly}
+                disabled={readOnly || disabled}
                 onClick={() => onChoose(warning, "keep")}
               >
                 Keep
@@ -49,7 +51,7 @@ export function SessionConfigCarryWarningPanel({
                 size="sm"
                 variant="outline"
                 className="min-h-10 cursor-pointer"
-                disabled={readOnly}
+                disabled={readOnly || disabled}
                 onClick={() => onChoose(warning, "restore_original")}
               >
                 Restore
@@ -59,7 +61,7 @@ export function SessionConfigCarryWarningPanel({
                 size="sm"
                 variant="outline"
                 className="min-h-10 cursor-pointer"
-                disabled={readOnly}
+                disabled={readOnly || disabled}
                 onClick={() => onChoose(warning, "set")}
               >
                 Set new

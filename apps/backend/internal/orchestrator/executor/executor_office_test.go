@@ -69,6 +69,9 @@ func TestEnsureSessionForAgent_CreatesWhenMissing(t *testing.T) {
 	if got.State != models.TaskSessionStateCreated {
 		t.Errorf("state: got %q want CREATED", got.State)
 	}
+	if got.Metadata[models.SessionMetaKeyOrigin] != models.SessionOriginTaskInitial {
+		t.Errorf("origin marker = %#v, want %q", got.Metadata[models.SessionMetaKeyOrigin], models.SessionOriginTaskInitial)
+	}
 	if len(repo.createTaskSessionCalls) != 1 {
 		t.Fatalf("expected 1 CreateTaskSession call, got %d", len(repo.createTaskSessionCalls))
 	}

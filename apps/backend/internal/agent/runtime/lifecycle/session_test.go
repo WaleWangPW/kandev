@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -396,6 +397,28 @@ func settledConfigEventData(data any) bool {
 	metadata, _ := data.(map[string]any)
 	settled, _ := metadata["config_options_settled"].(bool)
 	return settled
+}
+
+func TestPublishWorkflowSessionConfigFailures(t *testing.T) {
+	log := newSessionTestLogger()
+	eventBus := &MockEventBusWithTracking{}
+	sm := NewSessionManager(log, nil)
+	sm.SetDependencies(NewEventPublisher(eventBus, log), nil, nil, nil)
+	execution := &AgentExecution{ID: "exec-1", TaskID: "task-1", SessionID: "session-1"}
+
+	sm.publishWorkflowSessionConfigFailures(execution, "acp-session-1", []string{"model", "reasoning_effort"})
+
+	events := eventBus.getStreamEvents()
+	if len(events) != 1 {
+		t.Fatalf("stream events = %d, want one failure event", len(events))
+	}
+	metadata, ok := events[0].Data.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("event data = %#v, want metadata map", events[0].Data.Data)
+	}
+	if got := metadata["workflow_session_config_failures"]; !reflect.DeepEqual(got, []string{"model", "reasoning_effort"}) {
+		t.Fatalf("failure metadata = %#v, want model and option", got)
+	}
 }
 
 func originalConfigEventData(data any) bool {

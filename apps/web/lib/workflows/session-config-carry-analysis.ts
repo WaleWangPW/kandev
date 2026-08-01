@@ -127,8 +127,8 @@ function carryWarning(agentName: string, source: ChangedSource): SessionConfigCa
     agentName,
     sourceStepId: source.step.id,
     sourceStepName: source.step.name,
-    model: source.rule.model,
-    configOptions: { ...(source.rule.config_options ?? {}) },
+    model: source.rule.operation === "set" ? source.rule.model : undefined,
+    configOptions: source.rule.operation === "set" ? { ...(source.rule.config_options ?? {}) } : {},
     message: `Settings changed in ${source.step.name} may carry into this step for ${agentName}. Choose keep, restore original, or set new values.`,
   };
 }

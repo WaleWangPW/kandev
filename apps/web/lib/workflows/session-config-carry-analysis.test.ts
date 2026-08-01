@@ -60,9 +60,11 @@ describe("analyzeSessionConfigCarryForward", () => {
   });
 
   it("does not warn when the later step explicitly keeps, restores, or sets values", () => {
-    const base = step("work", 0, {
-      rules: [{ agent_name: "codex", operation: "set", model: "gpt-5.6-sol" }],
-    });
+    const base = moveToNext(
+      step("work", 0, {
+        rules: [{ agent_name: "codex", operation: "set", model: "gpt-5.6-sol" }],
+      }),
+    );
     expect(
       analyzeSessionConfigCarryForward(
         [base, step("keep", 1, { rules: [{ agent_name: "codex", operation: "keep" }] })],

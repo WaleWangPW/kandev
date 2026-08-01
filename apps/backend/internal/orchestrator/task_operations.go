@@ -763,16 +763,17 @@ func (s *Service) startTask(ctx context.Context, taskID string, agentProfileID s
 			return nil, err
 		}
 	}
+	workflowSessionConfigStepID := workflowStepID
 	// Manual starts often omit workflow_step_id because the task is already
 	// bound to its current step. Resolve that canonical step before profile
 	// selection and launch-layer session configuration so a start-step rule is
 	// applied before the first prompt as well.
-	if workflowStepID == "" {
+	if workflowSessionConfigStepID == "" {
 		if dbTask, taskErr := s.repo.GetTask(ctx, taskID); taskErr != nil {
 			s.logger.Warn("failed to fetch task for workflow step fallback",
 				zap.String("task_id", taskID), zap.Error(taskErr))
 		} else if dbTask != nil {
-			workflowStepID = dbTask.WorkflowStepID
+			workflowSessionConfigStepID = dbTask.WorkflowStepID
 		}
 	}
 
@@ -852,7 +853,7 @@ func (s *Service) startTask(ctx context.Context, taskID string, agentProfileID s
 	// startup. The ACP manager applies this durable runtime layer after the
 	// selected profile and before the first prompt, preserving the original
 	// session tab.
-	s.applyWorkflowSessionConfigBeforeLaunchForStep(ctx, taskID, sessionID, workflowStepID)
+	s.applyWorkflowSessionConfigBeforeLaunchForStep(ctx, taskID, sessionID, workflowSessionConfigStepID)
 
 	// When the workflow step overrode the caller's profile, tag the session
 	// for provenance: the profile came from workflow routing rather than

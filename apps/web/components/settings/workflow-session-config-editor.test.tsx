@@ -118,7 +118,14 @@ describe("SessionConfigEditor", () => {
     expect(onUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         events: expect.objectContaining({
-          on_enter: [expect.objectContaining({ type: "configure_session" })],
+          on_enter: [
+            expect.objectContaining({
+              type: "configure_session",
+              config: {
+                rules: [{ agent_name: CODEX_AGENT, operation: "restore_original" }],
+              },
+            }),
+          ],
         }),
       }),
     );

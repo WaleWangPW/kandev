@@ -192,6 +192,16 @@ func (e *Executor) createOfficeSession(
 	ctx context.Context, task *v1.Task, agentInstanceID, agentProfileID, executorID, executorProfileID string,
 ) (*models.TaskSession, error) {
 	metadata := cloneMetadata(task.Metadata)
+	existingSessions, err := e.repo.ListTaskSessions(ctx, task.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list task sessions before creating office session: %w", err)
+	}
+	if len(existingSessions) == 0 {
+		if metadata == nil {
+			metadata = make(map[string]interface{})
+		}
+		metadata[models.SessionMetaKeyOrigin] = models.SessionOriginTaskInitial
+	}
 
 	primaryTaskRepo, err := e.repo.GetPrimaryTaskRepository(ctx, task.ID)
 	if err != nil {
