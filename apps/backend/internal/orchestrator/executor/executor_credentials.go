@@ -27,7 +27,9 @@ const (
 	envGitLabHost       = "GITLAB_HOST"
 	envKandevGitLabHost = "KANDEV_GITLAB_HOST"
 
-	gitHubCredentialHelper         = "!agentctl git-credential"
+	gitHubCredentialHelper         = githubauth.ManagedGitCredentialHelper
+	legacyShimGitCredentialHelper  = githubauth.LegacyShimGitCredentialHelper
+	legacyGitHubCredentialHelper   = githubauth.LegacyGitCredentialHelper
 	defaultGitHubHost              = "github.com"
 	gitLabCredentialHelper         = `!f() { echo "username=oauth2"; echo "password=$GITLAB_TOKEN"; }; f`
 	taskGitCredentialsModeManaged  = "managed"
@@ -222,18 +224,23 @@ func removeManagedGitHubCredentials(req *LaunchAgentRequest) error {
 	}
 	entries, err := gitconfigenv.Filter(req.Env, func(index int, entries []gitconfigenv.Entry) bool {
 		entry := entries[index]
-		if entry.Key == "credential.https://github.com.helper" && entry.Value == gitHubCredentialHelper {
+		if entry.Key == "credential.https://github.com.helper" && isManagedGitHubCredentialHelper(entry.Value) {
 			return false
 		}
 		return entry.Key != "credential.https://github.com.helper" || entry.Value != "" ||
 			index+1 >= len(entries) || entries[index+1].Key != entry.Key ||
-			entries[index+1].Value != gitHubCredentialHelper
+			!isManagedGitHubCredentialHelper(entries[index+1].Value)
 	})
 	if err != nil {
 		return fmt.Errorf("remove managed GitHub credential helper: %w", err)
 	}
 	req.Env = entries
 	return nil
+}
+
+func isManagedGitHubCredentialHelper(value string) bool {
+	return value == gitHubCredentialHelper || value == legacyShimGitCredentialHelper ||
+		value == legacyGitHubCredentialHelper
 }
 
 func (e *Executor) issueGitHubCredentialScope(
