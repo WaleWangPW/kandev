@@ -182,8 +182,12 @@ func TestPostgresCreateOfficeTaskSessionMarksOnlyTheFirstConcurrentSessionAsOrig
 	}
 	ctx := context.Background()
 	const taskID = "task-office-origin-race-postgres"
-	if err := repo.CreateTask(ctx, &models.Task{ID: taskID, Title: "Office origin race (Postgres)"}); err != nil {
-		t.Fatalf("CreateTask: %v", err)
+	now := time.Now().UTC()
+	if _, err := db.Exec(db.Rebind(`
+		INSERT INTO tasks (id, workspace_id, title, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+	`), taskID, "", "Office origin race (Postgres)", now, now); err != nil {
+		t.Fatalf("seed task: %v", err)
 	}
 
 	sessions := []*models.TaskSession{
