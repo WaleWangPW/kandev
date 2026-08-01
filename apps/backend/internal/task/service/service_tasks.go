@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 	runtimeapi "github.com/kandev/kandev/internal/agent/runtime"
@@ -63,12 +62,6 @@ var ErrAutoTitlePromptRequired = errors.New("description is required when auto_t
 // generation is requested for an Office task. Office agents use a restricted
 // MCP surface that does not expose the one-shot title tool.
 var ErrAutoTitleUnsupportedForOffice = errors.New("auto_title is not supported for Office tasks")
-
-// ErrTaskTitleTooLong is returned when an agent-generated title exceeds the
-// task title length limit.
-var ErrTaskTitleTooLong = errors.New("task title is too long")
-
-const maxTaskTitleRunes = 500
 
 type pendingTaskTitleSetter interface {
 	SetTaskTitleIfPending(ctx context.Context, taskID, title string) (bool, error)
@@ -211,9 +204,7 @@ func deriveProvisionalTaskTitle(description string) (string, error) {
 		words = words[:6]
 	}
 	title := strings.Join(words, " ")
-	if utf8.RuneCountInString(title) > maxTaskTitleRunes {
-		title = string([]rune(title)[:maxTaskTitleRunes])
-	}
+	title = TruncateTaskTitle(title)
 	return title, nil
 }
 
@@ -342,6 +333,9 @@ func (s *Service) inheritParentRepositories(ctx context.Context, req *CreateTask
 
 // validateCreateTaskRequest validates constraints for task creation.
 func (s *Service) validateCreateTaskRequest(req *CreateTaskRequest) error {
+	if err := validateTaskTitle(req.Title); err != nil {
+		return err
+	}
 	isOffice := isOfficeRequest(req)
 	if !req.IsEphemeral && !isOffice && req.WorkflowID == "" {
 		return fmt.Errorf("workflow_id is required for non-ephemeral tasks")
@@ -1183,6 +1177,11 @@ func (s *Service) UpdateTask(ctx context.Context, id string, req *UpdateTaskRequ
 	if err := s.authorizeTaskID(ctx, id); err != nil {
 		return nil, err
 	}
+	if req.Title != nil {
+		if err := validateTaskTitle(*req.Title); err != nil {
+			return nil, err
+		}
+	}
 	task, err := s.tasks.GetTask(ctx, id)
 	if err != nil {
 		return nil, err
@@ -1299,8 +1298,8 @@ func (s *Service) SetPendingAgentTitle(ctx context.Context, id, title string) (*
 	if title == "" {
 		return nil, false, errors.New("title is required")
 	}
-	if utf8.RuneCountInString(title) > maxTaskTitleRunes {
-		return nil, false, fmt.Errorf("%w: title must be %d characters or fewer", ErrTaskTitleTooLong, maxTaskTitleRunes)
+	if err := validateTaskTitle(title); err != nil {
+		return nil, false, err
 	}
 	if setter, ok := s.tasks.(pendingTaskTitleSetter); ok {
 		accepted, err := setter.SetTaskTitleIfPending(ctx, id, title)

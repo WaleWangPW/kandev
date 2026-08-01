@@ -24,6 +24,7 @@ import {
 } from "@/components/task-create-dialog-state";
 import type { TaskCreateDialogProps } from "@/components/task-create-dialog";
 import { useResolvedTaskCreateWorkflowContext } from "@/components/task-create-dialog-workflow-context";
+import { truncateRemoteTaskTitle } from "@/lib/task-title";
 
 const PROMPT_INSERTED_MESSAGE = "Enhanced prompt inserted.";
 
@@ -74,35 +75,34 @@ function useEnhanceForDialog(
   };
 }
 
-function useJiraImportHandler(fs: DialogFormState) {
+function useJiraImportHandler(fs: DialogFormState, handleTaskNameChange: (value: string) => void) {
   return useCallback(
     (ticket: JiraTicket) => {
-      const title = `[${ticket.key}] ${ticket.summary}`;
-      fs.setTaskName(title);
-      fs.setHasTitle(true);
+      handleTaskNameChange(truncateRemoteTaskTitle(`[${ticket.key}] ${ticket.summary}`));
       const description = ticket.description?.trim()
         ? `${ticket.description}\n\n---\nJira: ${ticket.url}`
         : `Jira: ${ticket.url}`;
       fs.descriptionInputRef.current?.setValue(description);
       fs.setHasDescription(true);
     },
-    [fs],
+    [fs, handleTaskNameChange],
   );
 }
 
-function useLinearImportHandler(fs: DialogFormState) {
+function useLinearImportHandler(
+  fs: DialogFormState,
+  handleTaskNameChange: (value: string) => void,
+) {
   return useCallback(
     (issue: LinearIssue) => {
-      const title = `[${issue.identifier}] ${issue.title}`;
-      fs.setTaskName(title);
-      fs.setHasTitle(true);
+      handleTaskNameChange(truncateRemoteTaskTitle(`[${issue.identifier}] ${issue.title}`));
       const description = issue.description?.trim()
         ? `${issue.description}\n\n---\nLinear: ${issue.url}`
         : `Linear: ${issue.url}`;
       fs.descriptionInputRef.current?.setValue(description);
       fs.setHasDescription(true);
     },
-    [fs],
+    [fs, handleTaskNameChange],
   );
 }
 
@@ -290,8 +290,8 @@ export function useTaskCreateDialogSetup(
     guardedHandleSubmit(event as unknown as FormEvent);
   });
   const enhance = useEnhanceForDialog(fs, resolvedProps.taskId, resolvedProps.open);
-  const handleJiraImport = useJiraImportHandler(fs);
-  const handleLinearImport = useLinearImportHandler(fs);
+  const handleJiraImport = useJiraImportHandler(fs, data.handlers.handleTaskNameChange);
+  const handleLinearImport = useLinearImportHandler(fs, data.handlers.handleTaskNameChange);
   const freshBranchAvailable =
     !fs.useRemote && computed.isLocalExecutor && fs.repositories.length === 1;
   return {
