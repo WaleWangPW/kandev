@@ -1,6 +1,13 @@
 package runtimeflags
 
-import "testing"
+import (
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/kandev/kandev/internal/common/config"
+	"github.com/kandev/kandev/internal/profiles"
+)
 
 func TestDefinitionsIncludeOfficeExperimentalMetadata(t *testing.T) {
 	def, ok := DefinitionByKey("features.office")
@@ -88,5 +95,82 @@ func TestDefinitionsExposeSingleUserFacingDebugToggle(t *testing.T) {
 	}
 	if _, ok := DefinitionByKey("debug.agentMessages"); ok {
 		t.Fatal("debug.agentMessages must not be a top-level user-facing toggle")
+	}
+}
+
+// TestFeatureBindingsCoverConfigFields keeps the typed config, profile
+// defaults, and runtime-flag registry in lockstep. This test is intentionally
+// reflective so adding a new boolean feature cannot silently skip one of the
+// binding layers.
+func TestFeatureBindingsCoverConfigFields(t *testing.T) {
+	defaults, err := profiles.FeatureFlagDefaults()
+	if err != nil {
+		t.Fatalf("FeatureFlagDefaults: %v", err)
+	}
+
+	typeOfFeatures := reflect.TypeOf(config.FeaturesConfig{})
+	seenKeys := make(map[string]struct{}, len(registrations))
+	for _, registration := range registrations {
+		key := registration.definition.Key
+		if _, exists := seenKeys[key]; exists {
+			t.Fatalf("duplicate runtime flag registration for %q", key)
+		}
+		seenKeys[key] = struct{}{}
+		if registration.read == nil || registration.apply == nil {
+			t.Fatalf("runtime flag registration %q is missing a config binding", key)
+		}
+	}
+	for i := 0; i < typeOfFeatures.NumField(); i++ {
+		field := typeOfFeatures.Field(i)
+		if field.Type.Kind() != reflect.Bool {
+			t.Fatalf("FeaturesConfig.%s has type %s; feature flags must be bool", field.Name, field.Type)
+		}
+
+		jsonName := strings.Split(field.Tag.Get("json"), ",")[0]
+		if jsonName == "" || jsonName == "-" {
+			t.Fatalf("FeaturesConfig.%s is missing a JSON name", field.Name)
+		}
+		mapstructureName := strings.Split(field.Tag.Get("mapstructure"), ",")[0]
+		if mapstructureName == "" || mapstructureName == "-" {
+			t.Fatalf("FeaturesConfig.%s is missing a mapstructure name", field.Name)
+		}
+
+		key := "features." + jsonName
+		definition, ok := DefinitionByKey(key)
+		if !ok {
+			t.Fatalf("FeaturesConfig.%s has no runtime flag registration for %q", field.Name, key)
+		}
+		expectedEnvVar := "KANDEV_FEATURES_" + strings.ToUpper(mapstructureName)
+		if definition.EnvVar != expectedEnvVar {
+			t.Fatalf("FeaturesConfig.%s EnvVar = %q, want %q", field.Name, definition.EnvVar, expectedEnvVar)
+		}
+		if _, ok := defaults[mapstructureName]; !ok {
+			t.Fatalf("FeaturesConfig.%s has no profile default for %q", field.Name, mapstructureName)
+		}
+
+		cfg := &config.Config{}
+		features := reflect.ValueOf(&cfg.Features).Elem()
+		ApplyStatesToConfig(cfg, []RuntimeFlagState{{Key: key, EffectiveValue: true}})
+		if got := features.Field(i).Bool(); !got {
+			t.Fatalf("ApplyStatesToConfig(%q) did not enable target field %s", key, field.Name)
+		}
+		for j := 0; j < features.NumField(); j++ {
+			if j != i && features.Field(j).Bool() {
+				t.Fatalf("ApplyStatesToConfig(%q) changed unrelated field %s", key, typeOfFeatures.Field(j).Name)
+			}
+		}
+
+		values := ValuesFromConfig(cfg)
+		if got, ok := values[key]; !ok || !got {
+			t.Fatalf("ValuesFromConfig(%q) = %v, want true after enabling %s", key, got, field.Name)
+		}
+
+		ApplyStatesToConfig(cfg, []RuntimeFlagState{{Key: key, EffectiveValue: false}})
+		if got := features.Field(i).Bool(); got {
+			t.Fatalf("ApplyStatesToConfig(%q) left target field %s enabled", key, field.Name)
+		}
+		if got := ValuesFromConfig(cfg)[key]; got {
+			t.Fatalf("ValuesFromConfig(%q) = true after disabling %s", key, field.Name)
+		}
 	}
 }

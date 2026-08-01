@@ -97,3 +97,4 @@ Read individual ADRs for full context. Create new ones via `/record decision` or
 | 2026-08-01-repository-task-executor-defaults | [Resolve Task Executor Policy Before Last-Used Profile](2026-08-01-repository-task-executor-defaults.md) | accepted | frontend | 2026-08-01 |
 | 2026-08-01-validate-mcp-tool-arguments | [Validate MCP Tool Arguments at the Shared Server Boundary](2026-08-01-validate-mcp-tool-arguments.md) | accepted | backend, protocol | 2026-08-01 |
 | 2026-08-01-global-run-scheduler-ownership | [Separate Global Run Dispatch from Office Maintenance](2026-08-01-global-run-scheduler-ownership.md) | accepted | backend, workflow | 2026-08-01 |
+| 2026-08-01-release-toggle-gating-contract | [Release Toggles Are Install-Wide Fail-Closed Gates](2026-08-01-release-toggle-gating-contract.md) | proposed | backend, frontend, workflow | 2026-08-01 |

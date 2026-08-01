@@ -155,11 +155,11 @@ Production Kandev plugins live in dedicated repositories, not in this monorepo. 
 
 **`profiles.yaml` at the repo root** is the single source of truth for env-driven runtime defaults — feature flags, mock providers (agent / GitHub / Jira / Linear), debug switches, and e2e tuning knobs. The backend embeds it (`//go:embed` via `apps/backend/internal/profiles/`) and at startup calls `profiles.ApplyProfile()` to write the matching profile's env vars onto its own process, *only when each var is not already set* — so launchers, shells, and per-spec overrides still win.
 
-Runtime feature toggles add a SQLite-backed override tier managed through `Settings > System > Feature Toggles`. Effective values use this precedence: explicit environment variable > SQLite override > profile default. The typed runtime flag registry lives in `apps/backend/internal/runtimeflags/registry.go`; add or update registry metadata when exposing a flag in the UI.
+Runtime feature toggles add a SQLite-backed override tier managed through `Settings > System > Feature Toggles`. Effective values use this precedence: explicit environment variable > SQLite override > profile default. The typed runtime flag registry lives in `apps/backend/internal/runtimeflags/registry.go`; each registration owns the public metadata, environment variable, config reader, and config applier. Do not add parallel per-flag maps or switches.
 
 Profile selection: `KANDEV_E2E_MOCK=true` → `e2e`, `KANDEV_DEBUG_DEV_MODE=true` → `dev`, otherwise `prod`. `apps/cli/src/dev.ts` and `apps/web/e2e/fixtures/backend.ts` set only the selector — they no longer hardcode the underlying values.
 
-To flip a feature on for every user: change its `prod:` to `"true"` in `profiles.yaml`. To add a new feature flag: 1 line in `profiles.yaml` + 1 `FeaturesConfig` field + the runtime flag registry entry when it should be user-toggleable + the gate at the call site + the frontend additions (`FeatureFlags` type, `useFeature` checks, `notFound()` from a server-side layout). Full pattern in `docs/decisions/0007-runtime-feature-flags.md`; runtime overrides and restart support are documented in `docs/decisions/0018-runtime-settings-overrides.md` and `docs/decisions/0019-restart-supervisor.md`.
+To roll out a risky feature: merge it off in every profile, enable it on a selected install with an admin override or explicit environment, restart and test, then change `prod:` to `"true"` for the all-user release while retaining the registry entry as a kill-switch. Remove the flag end-to-end after the feature is permanent, and never reuse its key. To add a new feature flag: add the profile entry, typed `FeaturesConfig` field/tags, one registry metadata/read/apply binding, authoritative backend gates, and the frontend `defaultFeatureFlags` declaration/gates. Completeness tests cover the registry/profile/frontend contracts. Full pattern in `docs/decisions/0007-runtime-feature-flags.md`; runtime overrides and restart support are documented in `docs/decisions/0018-runtime-settings-overrides.md` and `docs/decisions/0019-restart-supervisor.md`.
 
 ---
 
@@ -177,4 +177,4 @@ For developing in ephemeral cloud VMs (Cursor Cloud, Codex, GitHub Codespaces, e
 
 ---
 
-**Last Updated**: 2026-07-27
+**Last Updated**: 2026-08-01
