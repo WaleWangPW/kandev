@@ -80,13 +80,14 @@ automation under different GitHub Apps without operating separate Kandev deploym
   another ambient helper after a managed-helper failure.
 - Managed Git helper execution does not depend on the post-startup `PATH`: Git resolves an
   absolute Kandev-owned `agentctl` executable published before the first managed Git operation.
-  Remote preparation binds the helper to the installed executor binary before cloning, and a
-  running `agentctl` publishes its own executable for child processes. Non-interactive Unix login
-  shells that replace their inherited `PATH` restore the managed CLI-shim directory after profile
-  initialization for broker-enabled tasks, while preserving pre-existing Bash environment hooks,
-  including hook paths containing `$VAR` or `${VAR}` references from the effective child
-  environment. Broker-disabled and executor-inheritance processes receive no shell hook or
-  managed-tool path.
+  Local and Worktree preparation binds the helper to the standalone launcher's absolute executable
+  before checkout or setup scripts run. Remote preparation binds it to the installed executor
+  binary before cloning, and a running `agentctl` publishes its own executable for child processes.
+  Non-interactive Unix login shells that replace their inherited `PATH` restore the managed
+  CLI-shim directory after profile initialization for broker-enabled tasks, while preserving
+  pre-existing Bash environment hooks, including hook paths containing `$VAR` or `${VAR}`
+  references from the effective child environment. Broker-disabled and executor-inheritance
+  processes receive no shell hook or managed-tool path.
 - Under managed routing, every authorized task execution surface receives the same current
   task-scoped Git environment: the agent subprocess, terminal shells, passthrough-agent PTYs, and
   task-scoped command processes. This includes the broker contract, managed indexed Git
@@ -613,6 +614,10 @@ registration and never creates a global default.
 - **GIVEN** a broker-enabled managed task whose login profile replaces its inherited `PATH`,
   **WHEN** Git requests GitHub HTTPS credentials, **THEN** the configured helper invokes the
   instance-owned `agentctl` directly and does not search or fall through to an ambient helper.
+- **GIVEN** a broker-enabled Local or Worktree task whose checkout or setup script invokes Git
+  before the task instance is created, **WHEN** Git requests GitHub HTTPS credentials, **THEN** the
+  configured helper invokes the standalone launcher's absolute `agentctl` executable without
+  consulting `PATH` or an ambient helper.
 - **GIVEN** a broker-enabled Docker or Sprites task whose prepare script clones before `agentctl`
   starts, **WHEN** Git requests GitHub HTTPS credentials during that clone, **THEN** the configured
   helper invokes the already-installed absolute executor binary and redeems the task lease without

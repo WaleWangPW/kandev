@@ -85,6 +85,12 @@ func (e *Executor) SetGitHubCredentialBroker(issuer GitHubCredentialLeaseIssuer,
 	e.githubCredentialBrokerURL = strings.TrimSpace(brokerURL)
 }
 
+// SetAgentctlBinaryPath configures the launcher-owned helper executable used
+// by host-side Local and Worktree preparation before agentctl startup.
+func (e *Executor) SetAgentctlBinaryPath(path string) {
+	e.agentctlBinaryPath = strings.TrimSpace(path)
+}
+
 // SetTaskGitCredentialPolicyResolver configures workspace-specific task Git routing.
 func (e *Executor) SetTaskGitCredentialPolicyResolver(resolver TaskGitCredentialPolicyResolver) {
 	e.githubCredentialPolicyResolver = resolver
@@ -197,6 +203,12 @@ func (e *Executor) configureGitHubCredentialBrokerForRepositories(
 	req.Env[githubauth.CredentialHostEnv] = primary.Host
 	req.Env[githubauth.CredentialScopesEnv] = string(encodedScopes)
 	req.Env["GIT_TERMINAL_PROMPT"] = "0"
+	switch models.ExecutorType(req.ExecutorType) {
+	case "", models.ExecutorTypeLocal, models.ExecutorTypeWorktree:
+		if e.agentctlBinaryPath != "" {
+			req.Env[githubauth.CredentialHelperPathEnv] = e.agentctlBinaryPath
+		}
+	}
 	// An empty helper resets inherited GitHub HTTPS helpers before the scoped
 	// broker helper is appended. Other indexed Git configuration remains intact.
 	appendGitConfig(req.Env, "credential.https://github.com.helper", "")
@@ -211,6 +223,7 @@ func removeManagedGitHubCredentials(req *LaunchAgentRequest) error {
 	}
 	for _, key := range []string{
 		githubauth.CredentialBrokerURLEnv,
+		githubauth.CredentialHelperPathEnv,
 		githubauth.CredentialLeaseEnv,
 		githubauth.CredentialTaskIDEnv,
 		githubauth.CredentialSessionIDEnv,

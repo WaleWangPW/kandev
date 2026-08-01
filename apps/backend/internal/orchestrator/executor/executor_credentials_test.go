@@ -215,6 +215,7 @@ printf 'username=x-access-token\npassword=fake-token\n'
 	issuer := &fakeGitHubCredentialLeaseIssuer{lease: GitHubCredentialLease{Token: "opaque-lease"}}
 	exec := newTestExecutor(t, &mockAgentManager{}, newMockRepository())
 	exec.SetGitHubCredentialBroker(issuer, "https://kandev.example/api/github/credentials/resolve")
+	exec.SetAgentctlBinaryPath(helper)
 	req := &LaunchAgentRequest{
 		TaskID: "task-1", WorkspaceID: "workspace-1", SessionID: "session-1",
 		ExecutorType: string(models.ExecutorTypeWorktree), Env: map[string]string{},
@@ -237,7 +238,6 @@ printf 'username=x-access-token\npassword=fake-token\n'
 		env[key] = value
 	}
 	env[githubauth.CredentialBrokerURLEnv] = "https://kandev.example/api/github/credentials/resolve"
-	env["KANDEV_GITHUB_CREDENTIAL_HELPER_PATH"] = helper
 	env["PATH"] = "/usr/bin:/bin"
 	commandEnv := make([]string, 0, len(env))
 	for key, value := range env {
@@ -254,6 +254,32 @@ printf 'username=x-access-token\npassword=fake-token\n'
 	if !strings.Contains(string(output), "username=x-access-token") ||
 		!strings.Contains(string(output), "password=fake-token") {
 		t.Fatalf("credential output = %q, want fake helper credentials", output)
+	}
+}
+
+func TestConfigureGitHubCredentialBrokerPublishesLocalHelperBeforePreparation(t *testing.T) {
+	helperPath := filepath.Join(t.TempDir(), "managed agentctl")
+	for _, executorType := range []models.ExecutorType{models.ExecutorTypeLocal, models.ExecutorTypeWorktree} {
+		t.Run(string(executorType), func(t *testing.T) {
+			issuer := &fakeGitHubCredentialLeaseIssuer{lease: GitHubCredentialLease{Token: "opaque-lease"}}
+			exec := newTestExecutor(t, &mockAgentManager{}, newMockRepository())
+			exec.SetGitHubCredentialBroker(issuer, "https://kandev.example/api/github/credentials/resolve")
+			exec.SetAgentctlBinaryPath(helperPath)
+			req := &LaunchAgentRequest{
+				TaskID: "task-1", WorkspaceID: "workspace-1", SessionID: "session-1",
+				ExecutorType: string(executorType), Env: map[string]string{},
+			}
+			info := &repoInfo{RepositoryID: "repo-1", Repository: &models.Repository{
+				Provider: "github", ProviderOwner: "acme", ProviderName: "widgets",
+			}}
+
+			if err := exec.configureGitHubCredentialBroker(context.Background(), req, info); err != nil {
+				t.Fatalf("configureGitHubCredentialBroker() error = %v", err)
+			}
+			if got := req.Env[githubauth.CredentialHelperPathEnv]; got != helperPath {
+				t.Fatalf("credential helper path = %q, want %q before preparation", got, helperPath)
+			}
+		})
 	}
 }
 
@@ -332,6 +358,7 @@ func TestConfigureGitHubCredentialBrokerSkipsExecutorInheritedPolicy(t *testing.
 	})
 	req := &LaunchAgentRequest{WorkspaceID: "workspace-1", Env: map[string]string{
 		githubauth.CredentialBrokerURLEnv:  "http://broker.example/resolve",
+		githubauth.CredentialHelperPathEnv: "/opt/kandev/agentctl",
 		githubauth.CredentialLeaseEnv:      "lease",
 		githubauth.CredentialTaskIDEnv:     "task-1",
 		githubauth.CredentialSessionIDEnv:  "session-1",
@@ -365,7 +392,7 @@ func TestConfigureGitHubCredentialBrokerSkipsExecutorInheritedPolicy(t *testing.
 	if got := req.Env[githubauth.CredentialBrokerURLEnv]; got != "" {
 		t.Fatalf("broker URL = %q, want none for executor inheritance", got)
 	}
-	for _, key := range []string{githubauth.CredentialLeaseEnv, githubauth.CredentialTaskIDEnv, githubauth.CredentialSessionIDEnv, githubauth.CredentialRepositoryEnv, githubauth.CredentialOwnerEnv, githubauth.CredentialRepoEnv, githubauth.CredentialHostEnv, githubauth.CredentialScopesEnv} {
+	for _, key := range []string{githubauth.CredentialHelperPathEnv, githubauth.CredentialLeaseEnv, githubauth.CredentialTaskIDEnv, githubauth.CredentialSessionIDEnv, githubauth.CredentialRepositoryEnv, githubauth.CredentialOwnerEnv, githubauth.CredentialRepoEnv, githubauth.CredentialHostEnv, githubauth.CredentialScopesEnv} {
 		if _, ok := req.Env[key]; ok {
 			t.Fatalf("Env[%q] still contains a managed credential value", key)
 		}

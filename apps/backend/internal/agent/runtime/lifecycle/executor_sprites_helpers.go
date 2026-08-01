@@ -129,7 +129,7 @@ func extractUploadHTTPStatus(msg string) int {
 }
 
 func (r *SpritesExecutor) buildSpriteEnv(env map[string]string) []string {
-	result := make([]string, 0, len(env)+1)
+	result := make([]string, 0, len(env))
 	for k, v := range env {
 		if k == githubauth.CredentialHelperPathEnv {
 			continue

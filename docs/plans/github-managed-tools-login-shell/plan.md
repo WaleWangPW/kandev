@@ -126,16 +126,22 @@ tests.
   Task 03 records their TDD remediation. Its RED checks failed at all four intended boundaries;
   the focused remediation suite passed 73 tests and the complete affected-package suite passed
   2,000 tests across six packages.
+- PR #2141 review found that Local and Worktree preparation also precedes task-instance creation,
+  so those host paths still lacked the launcher-owned helper executable. It also found an
+  overflow-prone Sprites slice-capacity expression. Task 04 records the TDD and CodeQL remediation;
+  six focused regressions and 2,934 tests across four affected packages passed, and the CI-style
+  changed-file Go lint reported no issues.
 - `git diff --check` passed. No temporary artifacts remain.
 
 ## Implementation Waves And Parallel Candidates
 
-Execute sequentially in the primary conversation. Both tasks change the shared managed GitHub
-runtime-environment contract, so neither is parallel-safe.
+Execute sequentially in the primary conversation. The tasks change the shared managed GitHub
+runtime-environment contract, so they are not parallel-safe.
 
 - [x] [Task 01: Path-independent Git credential helper](task-01-path-independent-git-helper.md)
 - [x] [Task 02: Login-shell shim restoration](task-02-login-shell-shim-restoration.md)
 - [x] [Task 03: Review blocker remediation](task-03-review-blocker-remediation.md)
+- [x] [Task 04: PR review fixup](task-04-pr-review-fixup.md)
 
 ## Risks And Out Of Scope
 
