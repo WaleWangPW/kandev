@@ -1,0 +1,5 @@
+{
+  "webapp.assetReadFailed": "Could not read a web asset.",
+  "webapp.devServerUnavailable": "The Vite dev server is unavailable.",
+  "webapp.shellUnavailable": "The Kandev web app is unavailable."
+}
