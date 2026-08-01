@@ -42,7 +42,9 @@ function launchText(payload: AzureDevOpsLaunchPayload) {
     ].join("\n");
     return {
       title: truncateRemoteTaskTitle(
-        payload.action ? `${payload.action.label}: ${item.title}` : `${item.type} ${item.id}: ${item.title}`,
+        payload.action
+          ? `${payload.action.label}: ${item.title}`
+          : `${item.type} ${item.id}: ${item.title}`,
       ),
       description: actionDescription(
         payload.action,
