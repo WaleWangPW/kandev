@@ -19,8 +19,8 @@ spec: "../../specs/feature-toggles/spec.md"
 - **Acceptance:** Generic tests fail when a `FeaturesConfig` field lacks a
   registry/profile binding or when its binding mutates the wrong field.
 - **Verification:** Red first with the completeness/round-trip test, then run
-  `cd apps/backend && go test ./internal/runtimeflags ./internal/common/config ./internal/profiles`;
-  run `make -C apps/backend lint` from the repo root.
+  `make -C apps/backend test`; run `make -C apps/backend lint` from the repo
+  root.
 - **Files likely touched:**
   - `apps/backend/internal/runtimeflags/registry.go`
   - `apps/backend/internal/runtimeflags/config.go`
@@ -46,7 +46,7 @@ spec: "../../specs/feature-toggles/spec.md"
   Debug implied-environment behavior remains in its named applier.
 - Added reflective registry/profile/config round-trip coverage and generic
   `FeaturesConfig` JSON/tag coverage.
-- Verification: `rtk go test ./internal/runtimeflags ./internal/common/config ./internal/profiles`
-  passed (87 tests across 3 packages); `rtk make -C apps/backend lint` passed
-  with 0 issues.
+- Verification: focused `go test ./internal/runtimeflags ./internal/common/config ./internal/profiles`
+  passed (87 tests across 3 packages), `make -C apps/backend test` passed, and
+  `make -C apps/backend lint` passed with 0 issues.
 - External side effects: none.

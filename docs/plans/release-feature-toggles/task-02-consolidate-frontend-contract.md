@@ -18,9 +18,10 @@ spec: "../../specs/feature-toggles/spec.md"
 - **Acceptance:** Focused tests derive their complete feature fixtures instead
   of maintaining a second hardcoded list.
 - **Verification:** Red first with the single-declaration/fail-closed tests, then
-  run `cd apps && pnpm install --frozen-lockfile` if `apps/node_modules` is
-  absent; run `cd apps && pnpm --filter @kandev/web exec vitest run lib/state/slices/features/features-slice.test.ts app/actions/features.test.ts`; run `cd apps/web && pnpm run typecheck`.
-  Run `cd apps && pnpm --filter @kandev/web lint`.
+  run `cd apps && pnpm install --frozen-lockfile`; run `cd apps && pnpm --filter
+  @kandev/web exec vitest run lib/state/slices/features/features-slice.test.ts
+  app/actions/features.test.ts`; run `cd apps/web && pnpm run typecheck`. Run
+  `cd apps && pnpm --filter @kandev/web lint`.
 - **Files likely touched:**
   - `apps/web/lib/state/slices/features/types.ts`
   - `apps/web/lib/state/slices/features/features-slice.ts`
@@ -43,7 +44,7 @@ spec: "../../specs/feature-toggles/spec.md"
 - Updated the Zustand slice and server action to consume that declaration;
   malformed, missing, and unreachable values remain fail-closed.
 - Updated slice/action tests to derive complete fixtures from the declaration.
-- Verification: focused Vitest passed (2 files, 8 tests); `pnpm run typecheck`
-  passed; `pnpm run lint` passed.
+- Verification: `pnpm install --frozen-lockfile` passed; focused Vitest passed
+  (2 files, 8 tests); `pnpm run typecheck` passed; `pnpm run lint` passed.
 - Rendered/mobile impact: none; state/type normalization only.
 - External side effects: none.

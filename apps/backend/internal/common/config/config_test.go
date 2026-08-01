@@ -175,6 +175,8 @@ func TestFeatures_ProductionDefaults(t *testing.T) {
 	// host shell cannot change the production-profile defaults under test.
 	t.Setenv("KANDEV_FEATURES_OFFICE", "")
 	unsetEnv(t, "KANDEV_FEATURES_APP_STATUS_BAR")
+	unsetEnv(t, "KANDEV_FEATURES_AUTH")
+	unsetEnv(t, "KANDEV_FEATURES_CLAUDE_BACKGROUND_PROMPT_HANDOFF")
 	t.Setenv("KANDEV_DEBUG_DEV_MODE", "")
 	t.Setenv("KANDEV_DEBUG_PPROF_ENABLED", "")
 	t.Setenv("KANDEV_E2E_MOCK", "")
@@ -189,6 +191,12 @@ func TestFeatures_ProductionDefaults(t *testing.T) {
 	}
 	if cfg.Features.AppStatusBar {
 		t.Error("Features.AppStatusBar = true, want false (status surface must remain opt-in by default)")
+	}
+	if cfg.Features.Auth {
+		t.Error("Features.Auth = true, want false (authentication must remain opt-in by default)")
+	}
+	if cfg.Features.ClaudeBackgroundPromptHandoff {
+		t.Error("Features.ClaudeBackgroundPromptHandoff = true, want false (experiment must remain opt-in by default)")
 	}
 }
 

@@ -182,10 +182,10 @@ and be released independently.
 
 ## Verification Results
 
-- Backend focused tests: passed (87 tests across runtimeflags, common/config,
+- Backend-focused tests: passed (87 tests across runtimeflags, common/config,
   and profiles).
 - Backend lint: passed with 0 issues.
-- Frontend focused Vitest: passed (2 files, 8 tests).
+- Frontend-focused Vitest: passed (2 files, 8 tests).
 - Frontend typecheck and lint: passed.
 - Public docs validation: passed (58 tests; 41 published pages).
 - `git diff --check`: passed.
