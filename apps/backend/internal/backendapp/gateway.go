@@ -27,6 +27,7 @@ import (
 	orchestratorhandlers "github.com/kandev/kandev/internal/orchestrator/handlers"
 	sqliterepo "github.com/kandev/kandev/internal/task/repository/sqlite"
 	taskservice "github.com/kandev/kandev/internal/task/service"
+	"github.com/kandev/kandev/internal/task/statussummary"
 	terminalrepo "github.com/kandev/kandev/internal/terminal/repository"
 	terminalservice "github.com/kandev/kandev/internal/terminal/service"
 	userservice "github.com/kandev/kandev/internal/user/service"
@@ -273,6 +274,26 @@ func provideGateway(
 
 	go gateway.Hub.Run(ctx)
 	gateways.RegisterTaskNotifications(ctx, eventBus, gateway.Hub, log)
+	if taskRepo != nil && eventBus != nil {
+		projector := statussummary.NewProjector(statussummary.ProjectorConfig{
+			Store:    taskRepo,
+			EventBus: eventBus,
+			ResolveWorkspace: func(ctx context.Context, taskID string) (string, error) {
+				task, err := taskRepo.GetTask(ctx, taskID)
+				if err != nil {
+					return "", err
+				}
+				if task == nil {
+					return "", fmt.Errorf("task %q not found", taskID)
+				}
+				return task.WorkspaceID, nil
+			},
+			Logger: log,
+		})
+		if err := projector.Start(ctx); err != nil {
+			log.Error("failed to start task status summary projector", zap.Error(err))
+		}
+	}
 	gateways.RegisterUserNotifications(ctx, eventBus, gateway.Hub, log)
 	gateways.RegisterOfficeNotifications(ctx, eventBus, gateway.Hub, taskWorkspaceResolver(taskRepo), log)
 	gateways.RegisterRunNotifications(ctx, eventBus, gateway.Hub, log)

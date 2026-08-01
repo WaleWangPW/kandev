@@ -1,5 +1,5 @@
 ---
-status: approved
+status: implemented
 created: 2026-08-01
 owner: kandev
 ---
@@ -98,10 +98,11 @@ remain during migration, but switchers use the summary when present.
   server cannot enqueue control traffic, it closes the connection so the
   client enters explicit reconnect/reconciliation instead of waiting on a
   response that was silently discarded.
-- Web clients send `message_id` with `message.add`. The first accepted request
-  owns that ID. A retry in the same authorized task returns the persisted
-  message and skips session-state transitions, turn-start hooks, message
-  creation, and prompt dispatch. Reuse outside that scope is rejected.
+- Web clients send a stable `client_message_id` with `message.add` (the
+  backend also accepts `message_id` as a compatibility alias). The first
+  accepted request owns that ID. A retry in the same authorized task returns
+  the persisted message and skips session-state transitions, turn-start hooks,
+  message creation, and prompt dispatch. Reuse outside that scope is rejected.
 
 ## Persistence guarantees
 
@@ -132,8 +133,8 @@ remain during migration, but switchers use the summary when present.
 - If Git monitoring fails, the summary retains the last observation and does
   not claim a clean tree from missing data.
 - If a message response is interrupted, the client reconciles the same
-  `message_id` from the response, notification, or message list, then retries
-  that ID when needed. It reports an unknown outcome only after bounded
+  `client_message_id`/persisted message ID from the response, notification, or
+  message list, then retries that ID when needed. It reports an unknown outcome only after bounded
   reconciliation cannot determine acceptance.
 - Notification overload may coalesce or drop replaceable notifications, but
   it cannot silently discard a correlated response/error.
@@ -160,7 +161,7 @@ remain during migration, but switchers use the summary when present.
   session sends `message.add`, **THEN** the correlated response is delivered
   first or the connection closes for deterministic reconciliation.
 - **GIVEN** the first message response becomes uncertain, **WHEN** the client
-  retries the same `message_id`, **THEN** exactly one user message is stored and
+  retries the same `client_message_id`, **THEN** exactly one user message is stored and
   the duplicate request does not dispatch a second prompt.
 - **GIVEN** many background sessions are active, **WHEN** the selected agent
   publishes model configuration, **THEN** the selected chat retains its model

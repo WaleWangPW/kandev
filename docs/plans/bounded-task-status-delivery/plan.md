@@ -1,7 +1,7 @@
 ---
 spec: docs/specs/platform/bounded-task-status-delivery.md
 created: 2026-08-01
-status: approved
+status: implemented
 ---
 
 # Implementation Plan: Bounded Task Status Delivery
@@ -127,9 +127,10 @@ unknown decoration; never restore an inactive subscription.
 
 ### Retry-safe message submission
 
-Generate one stable `message_id` when the user submits and include it in
-`message.add`. Keep that ID across reconnect/retry and optimistic/response/
-notification hydration.
+Generate one stable `client_message_id` when the user submits and include it
+in `message.add` (the backend accepts `message_id` as a compatibility alias).
+Keep that ID across reconnect/retry and optimistic/response/notification
+hydration.
 
 On the backend, serialize acceptance by message ID and check for an existing
 authorized user message before session-state validation, `on_turn_start`,
@@ -197,7 +198,9 @@ when reconciliation cannot establish whether the ID was accepted.
 
 Update the existing session-focus, sidebar-diff, and message-response-gap E2E
 tests so they enforce the new transport contract rather than preserving the
-old bulk-subscription behavior.
+old bulk-subscription behavior. The 27-task gateway capture lives in
+`apps/web/e2e/tests/session/session-stream-budget.spec.ts` and shares the
+diagnostic helper in `apps/web/e2e/helpers/ws-traffic.ts`.
 
 ## Mobile design contract
 
@@ -223,21 +226,21 @@ old bulk-subscription behavior.
 Implementation remains sequential in the user-started session because the
 tasks evolve shared task, event, runtime, and WebSocket contracts.
 
-- [ ] [Task 01: Persist task status summaries](task-01-persist-task-status-summaries.md)
-- [ ] [Task 02: Publish live task status](task-02-publish-live-task-status.md)
-- [ ] [Task 03: Decouple Git polling from viewers](task-03-decouple-git-polling.md)
-- [ ] [Task 04: Stabilize session transport](task-04-stabilize-session-transport.md)
-- [ ] [Task 05: Consume summaries in task switchers](task-05-consume-task-summaries.md)
-- [ ] [Task 06: Make message submission idempotent](task-06-idempotent-message-submission.md)
-- [ ] [Task 07: Prove bounded task traffic](task-07-prove-bounded-task-traffic.md)
+- [x] [Task 01: Persist task status summaries](task-01-persist-task-status-summaries.md)
+- [x] [Task 02: Publish live task status](task-02-publish-live-task-status.md)
+- [x] [Task 03: Decouple Git polling from viewers](task-03-decouple-git-polling.md)
+- [x] [Task 04: Stabilize session transport](task-04-stabilize-session-transport.md)
+- [x] [Task 05: Consume summaries in task switchers](task-05-consume-task-summaries.md)
+- [x] [Task 06: Make message submission idempotent](task-06-idempotent-message-submission.md)
+- [x] [Task 07: Prove bounded task traffic](task-07-prove-bounded-task-traffic.md)
 
 ## Verification
 
 ```bash
 make -C apps/backend test
 make -C apps/backend lint
-cd apps && pnpm --filter @kandev/web test
-cd apps && pnpm --filter @kandev/web lint
+cd apps/web && pnpm exec vitest run
+cd apps/web && pnpm run lint
 cd apps/web && pnpm run typecheck
 cd apps/web && pnpm e2e:run tests/session/session-stream-budget.spec.ts \
   -- --project=chromium

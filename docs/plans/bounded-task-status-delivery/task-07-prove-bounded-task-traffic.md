@@ -1,7 +1,7 @@
 ---
 id: "07-prove-bounded-task-traffic"
 title: "Prove bounded task traffic"
-status: pending
+status: completed
 wave: 7
 depends_on:
   - "03-decouple-git-polling"
@@ -57,6 +57,7 @@ cd apps/web && pnpm run typecheck
 ## Files likely touched
 
 - `apps/web/e2e/tests/session/session-stream-budget.spec.ts`
+- `apps/web/e2e/helpers/ws-traffic.ts`
 - `apps/web/e2e/tests/task/task-status-summary.spec.ts`
 - `apps/web/e2e/tests/task/mobile-task-status-summary.spec.ts`
 - `apps/web/e2e/tests/chat/message-send-pressure.spec.ts`
@@ -94,7 +95,40 @@ Sequential final integration/QA task.
 
 ## Verification results
 
-Pending implementation.
+The implementation-level backend and frontend verification is complete:
+
+- `make -C apps/backend lint` — passed with 0 issues.
+- Broad backend task/gateway/backendapp/lifecycle/orchestrator tests — passed.
+- `cd apps/web && pnpm run typecheck` — passed.
+- `cd apps/web && pnpm run lint` — passed.
+- `cd apps/web && pnpm exec vitest run` — passed (1,011 files; 7,743 tests, 4 skipped).
+- `cd apps/web && pnpm e2e:run --host tests/task/sidebar-diff-stats.spec.ts` — passed
+  (1 test; 7.2s), confirming persisted diff badges survive a backend restart for
+  an inactive sidebar task.
+
+- `cd apps/web && pnpm e2e:run --host --no-build
+  tests/session/session-stream-budget.spec.ts` — passed (1 test; 9.0s).
+  The 27-task capture measured 479 gateway frames / 86,243 bytes across five
+  task switches, with 5 `session.subscribe` frames, 4 `session.unsubscribe`
+  frames, and zero inactive-session detail frames.
+
+- `cd apps/web && pnpm e2e:run --host --no-build
+  tests/task/task-status-summary.spec.ts` — passed (1 test; 2.7s), confirming
+  an inactive desktop row receives clarification, error, and PR revisions
+  while another task remains selected.
+- `cd apps/web && pnpm e2e:run --host --no-build
+  tests/task/mobile-task-status-summary.spec.ts` — passed (1 test; 2.8s),
+  confirming the native mobile task switcher receives the same bounded status
+  revisions without horizontal overflow.
+- `cd apps/web && pnpm e2e:run --host --no-build
+  tests/chat/message-send-pressure.spec.ts` — passed (1 test; 12.6s),
+  confirming 80 streamed tool-call notifications do not hide the model
+  selector and a dropped `message.add` response reconciles to one persisted
+  user message and one new turn.
+
+The dedicated 27-task capture and summary-pressure scenarios are now complete;
+their byte totals remain diagnostic while inactive-session detail isolation and
+constant subscription work are the correctness assertions.
 
 ## Output contract
 

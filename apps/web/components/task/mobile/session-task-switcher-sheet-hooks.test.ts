@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { toSheetItem } from "./session-task-switcher-sheet-hooks";
-import {
-  sessionId as toSessionId,
-  taskId as toTaskId,
-  type Message,
-  type TaskSession,
-} from "@/lib/types/http";
 
 type SheetTask = Parameters<typeof toSheetItem>[0];
 type SheetCtx = Parameters<typeof toSheetItem>[1];
@@ -15,13 +9,6 @@ function emptyCtx(): SheetCtx {
     repositoryPathsById: new Map(),
     workflowNameById: new Map(),
     stepTitleById: new Map(),
-    sessionsById: {},
-    sessionsByTaskId: {},
-    gitStatusByEnvId: {},
-    envIdBySessionId: {},
-    messagesBySession: {},
-    dismissedAgentErrors: {},
-    acknowledgedAgentErrors: {},
   };
 }
 
@@ -34,29 +21,6 @@ function task(overrides: Partial<SheetTask> = {}): SheetTask {
     workflowStepId: "step-1",
     ...overrides,
   } as SheetTask;
-}
-
-function session(id: string, state: TaskSession["state"]): TaskSession {
-  return {
-    id: toSessionId(id),
-    task_id: toTaskId("t1"),
-    state,
-    started_at: "2026-07-22T00:00:00Z",
-    updated_at: "2026-07-22T00:00:00Z",
-  };
-}
-
-function pendingPermission(id: string, sessionId: string): Message {
-  return {
-    id,
-    session_id: toSessionId(sessionId),
-    task_id: toTaskId("t1"),
-    author_type: "agent",
-    content: "Allow?",
-    type: "permission_request",
-    metadata: { status: "pending" },
-    created_at: "2026-07-22T00:00:00Z",
-  };
 }
 
 describe("toSheetItem", () => {
@@ -78,29 +42,38 @@ describe("toSheetItem", () => {
     expect(item.foregroundActivity).toBeUndefined();
   });
 
-  it("finds pending permission in a secondary waiting session", () => {
-    const ctx = emptyCtx();
-    ctx.sessionsByTaskId.t1 = [
-      session("primary", "STARTING"),
-      session("secondary", "WAITING_FOR_INPUT"),
-    ];
-    ctx.messagesBySession.primary = [];
-    ctx.messagesBySession.secondary = [pendingPermission("permission", "secondary")];
-
-    const item = toSheetItem(task({ primarySessionId: "primary" }), ctx);
-
+  it("reads pending permission from the task status summary", () => {
+    const item = toSheetItem(
+      task({
+        statusSummary: {
+          revision: 2,
+          updated_at: "2026-07-22T00:00:00Z",
+          pending_action: "permission",
+        },
+      }),
+      emptyCtx(),
+    );
     expect(item.hasPendingPermission).toBe(true);
     expect(item.hasPendingClarification).toBe(false);
   });
 
-  it("excludes stale pending permission from a starting session", () => {
-    const ctx = emptyCtx();
-    ctx.sessionsByTaskId.t1 = [session("starting", "STARTING")];
-    ctx.messagesBySession.starting = [pendingPermission("stale-permission", "starting")];
+  it("reads an active error from the task status summary", () => {
+    const item = toSheetItem(
+      task({
+        statusSummary: {
+          revision: 3,
+          updated_at: "2026-07-22T00:00:00Z",
+          active_error: {
+            session_id: "session-1",
+            stamp: "error-3",
+            occurred_at: "2026-07-22T00:00:00Z",
+            preview: "Agent failed",
+          },
+        },
+      }),
+      emptyCtx(),
+    );
 
-    const item = toSheetItem(task({ primarySessionId: "starting" }), ctx);
-
-    expect(item.hasPendingPermission).toBe(false);
-    expect(item.hasPendingClarification).toBe(false);
+    expect(item.agentErrorMessage).toBe("Agent failed");
   });
 });

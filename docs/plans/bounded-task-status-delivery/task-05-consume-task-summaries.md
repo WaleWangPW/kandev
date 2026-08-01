@@ -1,7 +1,7 @@
 ---
 id: "05-consume-task-summaries"
 title: "Consume summaries in task switchers"
-status: pending
+status: completed
 wave: 5
 depends_on: ["04-stabilize-session-transport"]
 plan: "plan.md"
@@ -85,7 +85,17 @@ Sequential. Desktop/mobile share derivation and must migrate in one task.
 
 ## Verification results
 
-Pending implementation.
+- `cd apps/web && pnpm exec vitest run` — passed (1,011 files; 7,743 tests, 4 skipped).
+- `cd apps/web && pnpm run typecheck` — passed.
+- `cd apps/web && pnpm run lint` — passed.
+- Desktop and mobile task rows now derive Git, PR, error, pending, activity,
+  and primary-session state from `statusSummary` with coarse-field fallback.
+- The sidebar no longer mounts `useBulkGitStatusSubscription`, raw session
+  message decoration, or workspace-wide PR decoration fetches. Active detail
+  surfaces retain their session Git/message/PR subscriptions.
+- A dedicated Playwright subscription-spy scenario is still part of Task 07;
+  the component-level behavior is covered by the summary mapper/reducer tests
+  and source inspection.
 
 ## Output contract
 

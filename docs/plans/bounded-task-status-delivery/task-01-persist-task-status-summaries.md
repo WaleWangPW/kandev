@@ -1,7 +1,7 @@
 ---
 id: "01-persist-task-status-summaries"
 title: "Persist task status summaries"
-status: pending
+status: completed
 wave: 1
 depends_on: []
 plan: "plan.md"
@@ -78,7 +78,10 @@ Sequential. Task 02 consumes the persisted contract and projector interface.
 
 ## Verification results
 
-Pending implementation.
+- RED schema replay test initially failed because the new table was absent.
+- `cd apps/backend && go test ./internal/task/statussummary ./internal/task/repository/... ./internal/backendapp/... ./internal/task/dto` — passed (539 tests across 6 packages).
+- The focused boot snapshot test confirms summaries are hydrated through the batch path and serialized as `statusSummary`.
+- The Postgres replay test is environment-gated and skips when no isolated Postgres DSN is configured.
 
 ## Output contract
 

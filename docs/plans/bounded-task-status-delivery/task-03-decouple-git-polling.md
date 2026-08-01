@@ -1,7 +1,7 @@
 ---
 id: "03-decouple-git-polling"
 title: "Decouple Git polling from viewers"
-status: pending
+status: completed
 wave: 3
 depends_on: ["02-publish-live-task-status"]
 plan: "plan.md"
@@ -72,7 +72,13 @@ runtime-owned monitoring exists.
 
 ## Verification results
 
-Pending implementation.
+- `cd apps/backend && go test ./internal/agent/runtime/lifecycle` — passed.
+- Broad backend integration packages — passed.
+- Runtime-only executions retain slow workspace monitoring without a browser
+  subscriber; focus upgrades to fast mode, duplicate interest is idempotent,
+  and removal/recovery paths release the runtime reference safely.
+- Git observations remain keyed by environment/repository and feed the task
+  summary without making browser session membership responsible for polling.
 
 ## Output contract
 

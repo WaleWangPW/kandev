@@ -207,6 +207,7 @@ const (
 	ActionSessionMessageDeleted       = "session.message.deleted"
 	ActionSessionStateChanged         = "session.state_changed"
 	ActionSessionActivityChanged      = "session.activity_changed"
+	ActionTaskStatusSummaryUpdated    = "task.status_summary.updated"
 	ActionSessionAgentctlStarting     = "session.agentctl_starting"
 	ActionSessionAgentctlReady        = "session.agentctl_ready"
 	ActionSessionAgentctlError        = "session.agentctl_error"
@@ -291,6 +292,12 @@ const (
 
 	// Session git event (unified notification)
 	ActionSessionGitEvent = "session.git.event" // Notification: unified git event
+
+	// Session git refresh (explicit detail-surface git snapshot request)
+	ActionSessionGitRefresh = "session.git.refresh"
+	// Retained for older clients. New detail surfaces should use the narrower
+	// ActionSessionGitRefresh request instead.
+	ActionSessionDataRefresh = "session.data.refresh"
 
 	// Process runner actions
 	ActionSessionProcessOutput = "session.process.output"

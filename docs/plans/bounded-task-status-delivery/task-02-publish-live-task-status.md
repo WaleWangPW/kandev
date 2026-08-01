@@ -1,7 +1,7 @@
 ---
 id: "02-publish-live-task-status"
 title: "Publish live task status"
-status: pending
+status: completed
 wave: 2
 depends_on: ["01-persist-task-status-summaries"]
 plan: "plan.md"
@@ -80,7 +80,14 @@ Sequential. Tasks 03 and 05 rely on the live projection behavior.
 
 ## Verification results
 
-Pending implementation.
+- `cd apps/backend && go test ./internal/task/statussummary` — passed.
+- Broad task, gateway, backendapp, lifecycle, and orchestrator integration
+  packages — passed.
+- Projector tests cover bounded error previews, lifecycle/activity/pending
+  precedence, irrelevant message filtering, multi-repository Git aggregation,
+  PR aggregation, semantic no-ops, restart state, and workspace event output.
+- The projector subscribes to bounded source occurrences only; it does not
+  subscribe to agent stream, shell, process, model, or MCP subjects.
 
 ## Output contract
 

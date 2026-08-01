@@ -1,7 +1,7 @@
 ---
 id: "04-stabilize-session-transport"
 title: "Stabilize session transport"
-status: pending
+status: completed
 wave: 4
 depends_on: ["03-decouple-git-polling"]
 plan: "plan.md"
@@ -80,7 +80,12 @@ on response-delivery semantics.
 
 ## Verification results
 
-Pending implementation.
+- `cd apps/backend && go test ./internal/gateway/websocket/...` — passed.
+- Gateway tests cover duplicate subscribe/focus ACK-only behavior, targeted
+  Git refresh, reserved control delivery under notification pressure, and
+  explicit control-queue overflow closure.
+- The frontend now uses `session.git.refresh` for selected detail Git refresh;
+  focus no longer replays a full session snapshot.
 
 ## Output contract
 

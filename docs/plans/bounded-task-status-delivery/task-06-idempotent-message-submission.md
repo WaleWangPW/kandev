@@ -1,7 +1,7 @@
 ---
 id: "06-idempotent-message-submission"
 title: "Make message submission idempotent"
-status: pending
+status: completed
 wave: 6
 depends_on: ["04-stabilize-session-transport", "05-consume-task-summaries"]
 plan: "plan.md"
@@ -86,7 +86,16 @@ Task 07 exercises retries.
 
 ## Verification results
 
-Pending implementation.
+- Backend message handler/service/repository integration packages — passed.
+- `cd apps/web && pnpm exec vitest run` — passed (1,011 files; 7,743 tests, 4 skipped).
+- Every in-repository direct `message.add` UI caller now supplies a stable
+  `client_message_id`; timeout/connection-closed reconciliation retries the
+  exact same ID and upserts the accepted message.
+- Backend acceptance is serialized per ID, checks an existing authorized row
+  before session/turn-start side effects, and reloads after a uniqueness race.
+- The remaining limitation is the approved crash window: exactly-once
+  external agent execution cannot be guaranteed across a complete backend
+  process crash.
 
 ## Output contract
 

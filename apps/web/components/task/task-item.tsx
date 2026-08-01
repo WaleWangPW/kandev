@@ -352,7 +352,11 @@ function TaskPRIcon({
   if (state === "merged") color = "text-purple-500";
   else if (state === "closed") color = "text-red-500";
   return (
-    <span className={cn("inline-flex items-center shrink-0", color)}>
+    <span
+      data-testid={taskId ? `pr-task-icon-${taskId}` : "pr-task-icon"}
+      data-pr-state={prInfo.state}
+      className={cn("inline-flex items-center shrink-0", color)}
+    >
       <IconGitPullRequest className="h-3.5 w-3.5" />
     </span>
   );
