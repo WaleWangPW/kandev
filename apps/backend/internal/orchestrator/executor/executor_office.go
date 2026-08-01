@@ -191,10 +191,6 @@ func (e *Executor) tryReuseExistingSession(
 func (e *Executor) createOfficeSession(
 	ctx context.Context, task *v1.Task, agentInstanceID, agentProfileID, executorID, executorProfileID string,
 ) (*models.TaskSession, error) {
-	creationLock := e.officeSessionLock(task.ID)
-	creationLock.Lock()
-	defer creationLock.Unlock()
-
 	metadata := cloneMetadata(task.Metadata)
 
 	primaryTaskRepo, err := e.repo.GetPrimaryTaskRepository(ctx, task.ID)
@@ -257,6 +253,9 @@ func (e *Executor) persistOfficeSession(ctx context.Context, taskID string, sess
 	if creator, ok := e.repo.(officeTaskSessionCreator); ok {
 		return creator.CreateOfficeTaskSession(ctx, session)
 	}
+	creationLock := e.officeSessionLock(taskID)
+	creationLock.Lock()
+	defer creationLock.Unlock()
 	return e.persistOfficeSessionFallback(ctx, taskID, session)
 }
 

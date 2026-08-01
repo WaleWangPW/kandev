@@ -17,6 +17,7 @@ import (
 	"github.com/kandev/kandev/internal/db"
 	"github.com/kandev/kandev/internal/db/dialect"
 	"github.com/kandev/kandev/internal/task/models"
+	"github.com/kandev/kandev/internal/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -138,6 +139,56 @@ func TestCreateOfficeTaskSessionMarksOnlyTheFirstConcurrentSessionAsOrigin(t *te
 	sessions := []*models.TaskSession{
 		{ID: "office-origin-agent-1", TaskID: taskID, AgentProfileID: "agent-1", State: models.TaskSessionStateCreated},
 		{ID: "office-origin-agent-2", TaskID: taskID, AgentProfileID: "agent-2", State: models.TaskSessionStateCreated},
+	}
+	errs := make([]error, len(sessions))
+	var wg sync.WaitGroup
+	for i, session := range sessions {
+		wg.Add(1)
+		go func(i int, session *models.TaskSession) {
+			defer wg.Done()
+			errs[i] = repo.CreateOfficeTaskSession(ctx, session)
+		}(i, session)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("CreateOfficeTaskSession(%d): %v", i, err)
+		}
+	}
+
+	created, err := repo.ListTaskSessions(ctx, taskID)
+	if err != nil {
+		t.Fatalf("ListTaskSessions: %v", err)
+	}
+	if len(created) != len(sessions) {
+		t.Fatalf("created sessions = %d, want %d", len(created), len(sessions))
+	}
+	originCount := 0
+	for _, session := range created {
+		if models.IsOriginalTaskSession(session.Metadata) {
+			originCount++
+		}
+	}
+	if originCount != 1 {
+		t.Fatalf("origin-marked sessions = %d, want exactly one", originCount)
+	}
+}
+
+func TestPostgresCreateOfficeTaskSessionMarksOnlyTheFirstConcurrentSessionAsOrigin(t *testing.T) {
+	db := openIsolatedPostgresMultiConn(t, testutil.PostgresDSNFromEnv(t), 2)
+	repo, err := NewWithDB(db, db, nil)
+	if err != nil {
+		t.Fatalf("init postgres schema: %v", err)
+	}
+	ctx := context.Background()
+	const taskID = "task-office-origin-race-postgres"
+	if err := repo.CreateTask(ctx, &models.Task{ID: taskID, Title: "Office origin race (Postgres)"}); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	sessions := []*models.TaskSession{
+		{ID: "office-origin-postgres-agent-1", TaskID: taskID, AgentProfileID: "agent-1", State: models.TaskSessionStateCreated},
+		{ID: "office-origin-postgres-agent-2", TaskID: taskID, AgentProfileID: "agent-2", State: models.TaskSessionStateCreated},
 	}
 	errs := make([]error, len(sessions))
 	var wg sync.WaitGroup
