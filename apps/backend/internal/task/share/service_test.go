@@ -33,7 +33,7 @@ func (m *mockBackend) CheckAccess(_ context.Context, workspaceID string) error {
 	return m.accessErr
 }
 
-func (m *mockBackend) Upload(_ context.Context, workspaceID string, _ *Snapshot) (string, string, error) {
+func (m *mockBackend) Upload(_ context.Context, workspaceID string, _ *Snapshot, _ string) (string, string, error) {
 	if m.uploadErr != nil {
 		return "", "", m.uploadErr
 	}
@@ -79,7 +79,7 @@ func TestService_CreateShare_HappyPath(t *testing.T) {
 	mock := &mockBackend{nextID: "abc", nextURL: "https://gist.github.com/u/abc"}
 	svc := New(repo, completedSession(), mock, nil, "test-version")
 
-	share, err := svc.CreateShare(context.Background(), "s-1")
+	share, err := svc.CreateShare(context.Background(), "s-1", "en")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestService_CreateShare_RejectsPreHistorySession(t *testing.T) {
 	mock := &mockBackend{}
 	svc := New(repo, reader, mock, nil, "v")
 
-	_, err := svc.CreateShare(context.Background(), "s-1")
+	_, err := svc.CreateShare(context.Background(), "s-1", "en")
 	if !errors.Is(err, ErrSessionNotShareable) {
 		t.Fatalf("expected ErrSessionNotShareable, got %v", err)
 	}
@@ -126,7 +126,7 @@ func TestService_CreateShare_AllowsRunningSession(t *testing.T) {
 	mock := &mockBackend{nextID: "g1"}
 	svc := New(repo, reader, mock, nil, "v")
 
-	share, err := svc.CreateShare(context.Background(), "s-1")
+	share, err := svc.CreateShare(context.Background(), "s-1", "en")
 	if err != nil {
 		t.Fatalf("running session should be shareable, got %v", err)
 	}
@@ -141,7 +141,7 @@ func TestService_CreateShare_BackendErrorLeavesNoRow(t *testing.T) {
 	mock := &mockBackend{uploadErr: errors.New("gateway down")}
 	svc := New(repo, completedSession(), mock, nil, "v")
 
-	_, err := svc.CreateShare(context.Background(), "s-1")
+	_, err := svc.CreateShare(context.Background(), "s-1", "en")
 	if err == nil {
 		t.Fatal("expected upload error")
 	}
@@ -163,7 +163,7 @@ func TestService_RevokeShare_DeletesAndMarksRevoked(t *testing.T) {
 	mock := &mockBackend{nextID: "abc"}
 	svc := New(repo, completedSession(), mock, nil, "v")
 
-	share, err := svc.CreateShare(context.Background(), "s-1")
+	share, err := svc.CreateShare(context.Background(), "s-1", "en")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestService_CreateShare_FailsClosedWithoutTaskWorkspace(t *testing.T) {
 	reader.task.WorkspaceID = ""
 	mock := &mockBackend{}
 	svc := New(repo, reader, mock, nil, "v")
-	_, err := svc.CreateShare(context.Background(), "s-1")
+	_, err := svc.CreateShare(context.Background(), "s-1", "en")
 	if !errors.Is(err, ErrWorkspaceRequired) || mock.uploads != 0 {
 		t.Fatalf("CreateShare() error = %v, uploads = %d", err, mock.uploads)
 	}
@@ -204,7 +204,7 @@ func TestService_RevokeShare_IsIdempotentOnSecondCall(t *testing.T) {
 	mock := &mockBackend{nextID: "abc"}
 	svc := New(repo, completedSession(), mock, nil, "v")
 
-	share, err := svc.CreateShare(context.Background(), "s-1")
+	share, err := svc.CreateShare(context.Background(), "s-1", "en")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestService_RevokeShare_SurvivesUpstream404(t *testing.T) {
 	mock := &mockBackend{nextID: "abc"}
 	svc := New(repo, completedSession(), mock, nil, "v")
 
-	share, err := svc.CreateShare(context.Background(), "s-1")
+	share, err := svc.CreateShare(context.Background(), "s-1", "en")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestService_RevokeShare_PropagatesOtherBackendErrors(t *testing.T) {
 	mock := &mockBackend{nextID: "abc"}
 	svc := New(repo, completedSession(), mock, nil, "v")
 
-	share, err := svc.CreateShare(context.Background(), "s-1")
+	share, err := svc.CreateShare(context.Background(), "s-1", "en")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

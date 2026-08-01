@@ -137,7 +137,7 @@ func TestHTTP_List_ReturnsSharesNewestFirst(t *testing.T) {
 	handlers, svc := newHandlersForTest(t, reader, backend, true)
 	router := newGinRouter(handlers)
 
-	if _, err := svc.CreateShare(context.Background(), "s-1"); err != nil {
+	if _, err := svc.CreateShare(context.Background(), "s-1", "en"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/t-1/sessions/s-1/shares", nil)
@@ -163,7 +163,7 @@ func TestHTTP_Revoke_Success(t *testing.T) {
 	handlers, svc := newHandlersForTest(t, reader, backend, true)
 	router := newGinRouter(handlers)
 
-	share, err := svc.CreateShare(context.Background(), "s-1")
+	share, err := svc.CreateShare(context.Background(), "s-1", "en")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

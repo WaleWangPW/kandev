@@ -7,8 +7,14 @@
 // harder without helping a user. See docs/i18n.md ("Backend").
 //
 // What this package covers is the surface a user reads straight from Go: the
-// plain-text error pages served when the SPA bundle cannot be delivered, and any
+// plain-text error pages served when the SPA bundle cannot be delivered, the
+// shared-task artifacts (share.html, the gist README and description), and any
 // future server-rendered copy.
+//
+// A shared task is a static file on GitHub — nobody makes a request to us when
+// they open it — so its locale is fixed when the share is created, from the
+// creator's request, and threaded down to the builders as an argument. See
+// docs/decisions/2026-08-01-share-artifact-locale.md.
 //
 // Catalogs mirror the frontend's shape (`locales/<locale>.json`, flat
 // `key: message`) and are embedded, so no runtime file access is needed.
@@ -165,6 +171,75 @@ func T(locale, key string) string {
 		}
 	}
 	return key
+}
+
+// Tf returns the message for key in locale with every `{{name}}` placeholder
+// replaced by the matching entry in vars. It is the only supported way to build
+// a message that carries a value: `fmt.Sprintf` on the result of T would freeze
+// the argument order in English, and a translator cannot move a placeholder that
+// is not in the catalog.
+//
+// When vars carries a "count", the i18next plural suffixes are resolved first —
+// `key_one` for exactly 1, `key_other` for anything else — falling back to the
+// unsuffixed key when the catalog defines no plural forms. That keeps the
+// contract identical to the frontend's `t("key", { count })` and is why no call
+// site ever appends an English "s" itself.
+//
+// Values are substituted verbatim; escaping (HTML, Markdown) belongs to the call
+// site, which is the only place that knows the target syntax.
+func Tf(locale, key string, vars map[string]any) string {
+	return interpolate(T(locale, pluralKey(locale, key, vars)), vars)
+}
+
+// pluralKey picks the plural variant of key that the catalog actually defines,
+// so a message with only a base form still resolves.
+func pluralKey(locale, key string, vars map[string]any) string {
+	count, ok := countVar(vars)
+	if !ok {
+		return key
+	}
+	suffixed := key + "_other"
+	if count == 1 {
+		suffixed = key + "_one"
+	}
+	// T echoes the key back when it is missing — that is how we detect a catalog
+	// that never defined the plural forms.
+	if T(locale, suffixed) != suffixed {
+		return suffixed
+	}
+	return key
+}
+
+// countVar reads the plural selector out of vars. Non-numeric values are ignored
+// rather than erroring: a bad "count" degrades to the unsuffixed key.
+func countVar(vars map[string]any) (int, bool) {
+	value, ok := vars["count"]
+	if !ok {
+		return 0, false
+	}
+	switch n := value.(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	}
+	return 0, false
+}
+
+// interpolate replaces `{{name}}` with vars[name]. Placeholders with no matching
+// var are left in place, which makes the omission visible instead of silently
+// producing a sentence with a hole in it.
+func interpolate(message string, vars map[string]any) string {
+	if len(vars) == 0 || !strings.Contains(message, "{{") {
+		return message
+	}
+	pairs := make([]string, 0, len(vars)*2)
+	for name, value := range vars {
+		pairs = append(pairs, "{{"+name+"}}", fmt.Sprint(value))
+	}
+	return strings.NewReplacer(pairs...).Replace(message)
 }
 
 // Keys lists every key in the source catalog; used by the drift test that keeps
