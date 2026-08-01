@@ -96,3 +96,4 @@ Read individual ADRs for full context. Create new ones via `/record decision` or
 | 2026-07-31-system-service-user-continuity | [Preserve System Service Identity Across Reinstallation](2026-07-31-system-service-user-continuity.md) | accepted | backend, cli, security, operations | 2026-07-31 |
 | 2026-08-01-validate-mcp-tool-arguments | [Validate MCP Tool Arguments at the Shared Server Boundary](2026-08-01-validate-mcp-tool-arguments.md) | accepted | backend, protocol | 2026-08-01 |
 | 2026-08-01-global-run-scheduler-ownership | [Separate Global Run Dispatch from Office Maintenance](2026-08-01-global-run-scheduler-ownership.md) | accepted | backend, workflow | 2026-08-01 |
+| 2026-08-01-standalone-plugin-sdk-module | [Publish Plugin Authoring as a Versioned Go Module](2026-08-01-standalone-plugin-sdk-module.md) | accepted | backend, protocol, infra, workflow | 2026-08-01 |
