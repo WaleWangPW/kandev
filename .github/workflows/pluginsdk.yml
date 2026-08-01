@@ -45,7 +45,7 @@ jobs:
       - name: Check SDK formatting
         run: |
           set -euo pipefail
-          mapfile -t sdk_go_files < <(git ls-files pluginsdk -- '*.go')
+          mapfile -t sdk_go_files < <(git ls-files -- 'pluginsdk/*.go' 'pluginsdk/**/*.go')
           if [[ "${#sdk_go_files[@]}" -eq 0 ]]; then
             echo "No SDK Go files found."
             exit 1
