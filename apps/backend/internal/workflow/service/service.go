@@ -225,6 +225,10 @@ func (s *Service) CreateStepsFromTemplate(ctx context.Context, workflowID, templ
 			StageType:             stepDef.StageType,
 		}
 
+		if err := models.ValidateWorkflowStep(step); err != nil {
+			return fmt.Errorf("validate template step %q: %w", step.Name, err)
+		}
+
 		if err := s.repo.CreateStep(ctx, step); err != nil {
 			s.logger.Error("failed to create step from template",
 				zap.String("workflow_id", workflowID),
@@ -280,6 +284,9 @@ func (s *Service) CreateStep(ctx context.Context, step *models.WorkflowStep) err
 // CreateStepWithStartStepUpdates creates a new workflow step and returns any
 // other workflow steps whose start-step flag was cleared.
 func (s *Service) CreateStepWithStartStepUpdates(ctx context.Context, step *models.WorkflowStep) ([]*models.WorkflowStep, error) {
+	if err := models.ValidateWorkflowStep(step); err != nil {
+		return nil, err
+	}
 	if step.ID == "" {
 		step.ID = uuid.New().String()
 	}
@@ -301,6 +308,9 @@ func (s *Service) UpdateStep(ctx context.Context, step *models.WorkflowStep) err
 // UpdateStepWithStartStepUpdates updates a workflow step and returns any other
 // workflow steps whose start-step flag was cleared.
 func (s *Service) UpdateStepWithStartStepUpdates(ctx context.Context, step *models.WorkflowStep) ([]*models.WorkflowStep, error) {
+	if err := models.ValidateWorkflowStep(step); err != nil {
+		return nil, err
+	}
 	demoted, err := s.repo.UpdateStepWithDemotedStartSteps(ctx, step)
 	if err != nil {
 		s.logger.Error("failed to update step", zap.String("step_id", step.ID), zap.Error(err))
@@ -539,6 +549,9 @@ func (s *Service) importSingleWorkflow(ctx context.Context, workspaceID string, 
 	// Create each step with remapped events.
 	for _, sp := range pw.Steps {
 		step := s.stepFromPortable(wf.ID, sp, posToID)
+		if err := models.ValidateWorkflowStep(step); err != nil {
+			return nil, fmt.Errorf("validate step %q: %w", sp.Name, err)
+		}
 		if err := s.repo.CreateStep(ctx, step); err != nil {
 			return nil, fmt.Errorf("create step %q: %w", sp.Name, err)
 		}

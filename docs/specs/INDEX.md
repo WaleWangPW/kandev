@@ -72,6 +72,7 @@ Kandev's task model: documents, execution stages, labels, blocker escalation, su
 | [mcp-task-agent-profile-default](tasks/mcp-task-agent-profile-default/spec.md) | shipped |
 | [runtime-state-publication-order](tasks/runtime-state-publication-order.md) | shipped |
 | [explicit-completion-signal](workflow/explicit-completion-signal/spec.md) | shipped |
+| [conditional-session-settings](workflow-session-settings/spec.md) | approved |
 
 ## agents/ — agent governance
 

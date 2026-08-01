@@ -164,6 +164,10 @@ func (s *Service) updateSyncedWorkflow(ctx context.Context, wf *taskmodels.Workf
 	}
 	for _, sp := range pw.Steps {
 		step := s.stepFromPortable(wf.ID, sp, posToID)
+		if err := models.ValidateWorkflowStep(step); err != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("workflow %q: invalid step %q: %v", wf.Name, sp.Name, err))
+			return
+		}
 		if existing, ok := existingByName[sp.Name]; ok {
 			step.CreatedAt = existing.CreatedAt
 			step.StageType = existing.StageType // not carried by the portable format
