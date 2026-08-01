@@ -77,6 +77,28 @@ func TestEnsureSessionForAgent_CreatesWhenMissing(t *testing.T) {
 	}
 }
 
+func TestEnsureSessionForAgent_DoesNotMarkExistingTaskSessionAsOrigin(t *testing.T) {
+	repo := newMockRepository()
+	repo.sessions["sess-existing"] = &models.TaskSession{
+		ID:             "sess-existing",
+		TaskID:         "task-office",
+		AgentProfileID: "agent-existing",
+		State:          models.TaskSessionStateIdle,
+		StartedAt:      time.Now().UTC(),
+	}
+	exec := newTestExecutor(t, &mockAgentManager{}, repo)
+
+	got, err := exec.EnsureSessionForAgent(
+		context.Background(), officeTestTask(), "agent-new", "profile-1", "exec-1", "",
+	)
+	if err != nil {
+		t.Fatalf("EnsureSessionForAgent: %v", err)
+	}
+	if _, marked := got.Metadata[models.SessionMetaKeyOrigin]; marked {
+		t.Fatalf("new Office session metadata = %#v, must not claim task origin when another session exists", got.Metadata)
+	}
+}
+
 func TestEnsureSessionForAgent_RebindsExecutionProfileOnReuse(t *testing.T) {
 	repo := newMockRepository()
 	exec := newTestExecutor(t, &mockAgentManager{}, repo)
