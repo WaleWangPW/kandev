@@ -5,6 +5,7 @@ import { ScrollArea } from "@kandev/ui/scroll-area";
 import { useAppStore } from "@/components/state-provider";
 import type { OfficeTask, OfficeTaskStatus } from "@/lib/state/slices/office/types";
 import { StatusIcon } from "./status-icon";
+import { useI18n } from "@/lib/i18n/locale";
 
 const FALLBACK_COLUMNS: { status: OfficeTaskStatus; label: string }[] = [
   { status: "backlog", label: "Backlog" },
@@ -49,11 +50,12 @@ function BoardColumn({
   status: OfficeTaskStatus;
   tasks: OfficeTask[];
 }) {
+  const { t } = useI18n();
   return (
     <div className="flex flex-col min-w-[240px] max-w-[300px] flex-1">
       <div className="flex items-center gap-2 px-2 py-2 mb-2">
         <StatusIcon status={status} className="h-3.5 w-3.5" />
-        <span className="text-xs font-medium">{label}</span>
+        <span className="text-xs font-medium">{t(label)}</span>
         <span className="text-xs text-muted-foreground">{tasks.length}</span>
       </div>
       <ScrollArea className="flex-1">

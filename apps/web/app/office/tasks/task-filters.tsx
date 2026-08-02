@@ -13,6 +13,7 @@ import type {
   OfficeTaskPriority,
 } from "@/lib/state/slices/office/types";
 import { StatusIcon } from "./status-icon";
+import { useI18n } from "@/lib/i18n/locale";
 
 const FALLBACK_STATUSES: { value: OfficeTaskStatus; label: string }[] = [
   { value: "backlog", label: "Backlog" },
@@ -42,6 +43,7 @@ function toggleInArray<T>(arr: T[], value: T): T[] {
 }
 
 export function TaskFilters({ filters, onFilterChange }: IssueFiltersProps) {
+  const { t } = useI18n();
   const meta = useAppStore((s) => s.office.meta);
   const STATUSES = meta
     ? meta.statuses.map((s) => ({ value: s.id as OfficeTaskStatus, label: s.label }))
@@ -75,10 +77,10 @@ export function TaskFilters({ filters, onFilterChange }: IssueFiltersProps) {
             </Button>
           </PopoverTrigger>
         </TooltipTrigger>
-        <TooltipContent>Filter</TooltipContent>
+        <TooltipContent>{t("Filter")}</TooltipContent>
       </Tooltip>
       <PopoverContent className="w-56 p-3" align="end">
-        <p className="text-xs font-medium mb-2">Status</p>
+        <p className="text-xs font-medium mb-2">{t("Status")}</p>
         <div className="flex flex-col gap-1.5">
           {STATUSES.map((s) => (
             <label key={s.value} className="flex items-center gap-2 text-sm cursor-pointer">
@@ -90,12 +92,12 @@ export function TaskFilters({ filters, onFilterChange }: IssueFiltersProps) {
                 className="cursor-pointer"
               />
               <StatusIcon status={s.value} className="h-3.5 w-3.5" />
-              {s.label}
+              {t(s.label)}
             </label>
           ))}
         </div>
         <Separator className="my-2" />
-        <p className="text-xs font-medium mb-2">Priority</p>
+        <p className="text-xs font-medium mb-2">{t("Priority")}</p>
         <div className="flex flex-col gap-1.5">
           {PRIORITIES.map((p) => (
             <label key={p.value} className="flex items-center gap-2 text-sm cursor-pointer">
@@ -106,7 +108,7 @@ export function TaskFilters({ filters, onFilterChange }: IssueFiltersProps) {
                 }
                 className="cursor-pointer"
               />
-              {p.label}
+              {t(p.label)}
             </label>
           ))}
         </div>

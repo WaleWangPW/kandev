@@ -25,6 +25,7 @@ import (
 const dockerWorkspacePath = "/workspace"
 const dockerStopContainerTimeout = 30 * time.Second
 const dockerFallbackCleanupTimeout = dockerStopContainerTimeout + 5*time.Second
+const MetadataKeyDockerHost = "docker_host"
 
 // getMetadataString retrieves a string value from metadata map.
 func getMetadataString(metadata map[string]interface{}, key string) string {
@@ -131,6 +132,28 @@ func (r *DockerExecutor) ensureClient() (*docker.Client, *ContainerManager, erro
 	return r.docker, r.containerMgr, nil
 }
 
+// clientForMetadata selects the Docker daemon configured on the executor
+// record. DockerExecutor keeps the application-level client cached for
+// maintenance operations, but a local_docker executor may target a different
+// daemon (for example, a named Colima profile). Those per-launch clients must
+// not overwrite the shared default client, or a concurrent task could be sent
+// to the wrong daemon.
+func (r *DockerExecutor) clientForMetadata(metadata map[string]interface{}) (*docker.Client, *ContainerManager, error) {
+	host := strings.TrimSpace(getMetadataString(metadata, MetadataKeyDockerHost))
+	if host == "" || host == r.cfg.Host {
+		return r.ensureClient()
+	}
+
+	cfg := r.cfg
+	cfg.Host = host
+	cli, err := r.newClientFunc(cfg, r.logger)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create docker client: %w", err)
+	}
+	cli.SetActivityCoordinator(r.activity)
+	return cli, NewContainerManager(cli, "", r.kandevHomeDir, r.logger), nil
+}
+
 func (r *DockerExecutor) SetActivityCoordinator(coordinator *activity.Coordinator) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -162,7 +185,7 @@ func (r *DockerExecutor) HealthCheck(_ context.Context) error {
 }
 
 func (r *DockerExecutor) CreateInstance(ctx context.Context, req *ExecutorCreateRequest) (instance *ExecutorInstance, err error) {
-	dockerClient, containerMgr, err := r.ensureClient()
+	dockerClient, containerMgr, err := r.clientForMetadata(req.Metadata)
 	if err != nil {
 		return nil, fmt.Errorf("docker unavailable: %w", err)
 	}
@@ -267,6 +290,9 @@ func (r *DockerExecutor) buildCreatedInstance(req *ExecutorCreateRequest, result
 	metadata := map[string]interface{}{
 		MetadataKeyIsRemote: true,
 	}
+	if dockerHost := getMetadataString(req.Metadata, MetadataKeyDockerHost); dockerHost != "" {
+		metadata[MetadataKeyDockerHost] = dockerHost
+	}
 	if worktreeID := getMetadataString(req.Metadata, MetadataKeyWorktreeID); worktreeID != "" {
 		metadata["worktree_id"] = worktreeID
 		metadata["worktree_path"] = dockerWorkspacePath
@@ -330,13 +356,21 @@ func (r *DockerExecutor) reconnectToContainer(ctx context.Context, dockerClient 
 		ContainerID:   info.ID,
 		ContainerIP:   containerIP,
 		WorkspacePath: dockerWorkspacePath,
-		Metadata: map[string]interface{}{
-			MetadataKeyIsRemote:      true,
-			MetadataKeyContainerID:   info.ID,
-			"reuse_existing_process": conn.reusingProcess,
-		},
-		AuthToken: refreshedAuthToken,
+		Metadata:      dockerInstanceMetadata(req.Metadata, info.ID, conn.reusingProcess),
+		AuthToken:     refreshedAuthToken,
 	}, nil
+}
+
+func dockerInstanceMetadata(requestMetadata map[string]interface{}, containerID string, reusingProcess bool) map[string]interface{} {
+	metadata := map[string]interface{}{
+		MetadataKeyIsRemote:      true,
+		MetadataKeyContainerID:   containerID,
+		"reuse_existing_process": reusingProcess,
+	}
+	if dockerHost := getMetadataString(requestMetadata, MetadataKeyDockerHost); dockerHost != "" {
+		metadata[MetadataKeyDockerHost] = dockerHost
+	}
+	return metadata
 }
 
 // ensureContainerRunning inspects containerRef, starts it if it's stopped,
@@ -665,7 +699,7 @@ func (r *DockerExecutor) StopInstance(ctx context.Context, instance *ExecutorIns
 		return nil
 	}
 
-	dockerClient, _, err := r.ensureClient()
+	dockerClient, _, err := r.clientForMetadata(instance.Metadata)
 	if err != nil {
 		return fmt.Errorf("docker unavailable: %w", err)
 	}

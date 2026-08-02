@@ -55,6 +55,28 @@ func TestNewDockerExecutor(t *testing.T) {
 	}
 }
 
+func TestDockerExecutor_ClientForMetadataUsesExecutorDockerHost(t *testing.T) {
+	exec := NewDockerExecutor(config.DockerConfig{Host: "unix:///var/run/docker.sock"}, "", newTestDockerLogger())
+	var gotHost string
+	exec.newClientFunc = func(cfg config.DockerConfig, _ *logger.Logger) (*docker.Client, error) {
+		gotHost = cfg.Host
+		return &docker.Client{}, nil
+	}
+
+	_, _, err := exec.clientForMetadata(map[string]interface{}{
+		MetadataKeyDockerHost: " unix:///tmp/kandev-test.sock ",
+	})
+	if err != nil {
+		t.Fatalf("clientForMetadata: %v", err)
+	}
+	if gotHost != "unix:///tmp/kandev-test.sock" {
+		t.Fatalf("docker host = %q, want executor host", gotHost)
+	}
+	if exec.initialized {
+		t.Fatal("per-executor client must not replace the shared default client")
+	}
+}
+
 func TestSetActivityCoordinatorReachesLazilyCreatedDockerClient(t *testing.T) {
 	log := newTestDockerLogger()
 	dockerExec := NewDockerExecutor(config.DockerConfig{}, "", log)

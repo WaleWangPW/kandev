@@ -54,6 +54,7 @@ func (s *stubEnvRepo) DeleteTaskEnvironmentsByTask(context.Context, string) erro
 
 type stubDestroyer struct {
 	containerCalls       []string
+	containerProfiles    []string
 	sandboxCalls         []string
 	worktreeCalls        []string
 	cancelAfterContainer context.CancelFunc
@@ -64,8 +65,9 @@ type stubDestroyer struct {
 	pushErr              error
 }
 
-func (s *stubDestroyer) DestroyContainer(_ context.Context, id string) error {
-	s.containerCalls = append(s.containerCalls, id)
+func (s *stubDestroyer) DestroyContainer(_ context.Context, env *models.TaskEnvironment) error {
+	s.containerCalls = append(s.containerCalls, env.ContainerID)
+	s.containerProfiles = append(s.containerProfiles, env.ExecutorProfileID)
 	if s.cancelAfterContainer != nil {
 		s.cancelAfterContainer()
 	}
@@ -83,7 +85,7 @@ func (s *stubDestroyer) PushEnvironmentBranch(context.Context, *models.TaskEnvir
 	s.pushCalls++
 	return s.pushErr
 }
-func (s *stubDestroyer) GetContainerLiveStatus(context.Context, string) (*ContainerLiveStatus, error) {
+func (s *stubDestroyer) GetContainerLiveStatus(context.Context, *models.TaskEnvironment) (*ContainerLiveStatus, error) {
 	return nil, nil
 }
 
@@ -154,11 +156,12 @@ func TestSessionBlocksEnvironmentReset(t *testing.T) {
 
 func TestResetTaskEnvironment_DestroysEachResourceTypeAndDeletesRow(t *testing.T) {
 	repo := &stubEnvRepo{env: &models.TaskEnvironment{
-		ID:          "env-1",
-		TaskID:      "task-1",
-		ContainerID: "container-abc",
-		SandboxID:   "sandbox-xyz",
-		WorktreeID:  "wt-1",
+		ID:                "env-1",
+		TaskID:            "task-1",
+		ExecutorProfileID: "profile-colima",
+		ContainerID:       "container-abc",
+		SandboxID:         "sandbox-xyz",
+		WorktreeID:        "wt-1",
 	}}
 	destroyer := &stubDestroyer{}
 	svc := newResetTestService(t, repo)
@@ -173,6 +176,9 @@ func TestResetTaskEnvironment_DestroysEachResourceTypeAndDeletesRow(t *testing.T
 	}
 	if len(destroyer.containerCalls) != 1 || destroyer.containerCalls[0] != "container-abc" {
 		t.Errorf("expected 1 container destroy call, got %v", destroyer.containerCalls)
+	}
+	if len(destroyer.containerProfiles) != 1 || destroyer.containerProfiles[0] != "profile-colima" {
+		t.Errorf("expected executor profile to reach container destroyer, got %v", destroyer.containerProfiles)
 	}
 	if len(destroyer.sandboxCalls) != 1 || destroyer.sandboxCalls[0] != "sandbox-xyz" {
 		t.Errorf("expected 1 sandbox destroy call, got %v", destroyer.sandboxCalls)

@@ -79,6 +79,7 @@ func provideWorktreeManager(dbPool *db.Pool, cfg *config.Config, log *logger.Log
 		taskSvc.SetEnvironmentDestroyer(&environmentDestroyerAdapter{
 			lifecycle: lifecycleMgr,
 			worktrees: manager,
+			profiles:  taskSvc,
 		})
 	}
 
@@ -108,10 +109,19 @@ func provideWorktreeManager(dbPool *db.Pool, cfg *config.Config, log *logger.Log
 type environmentDestroyerAdapter struct {
 	lifecycle *lifecycle.Manager
 	worktrees *worktree.Manager
+	profiles  executorProfileGetter
 }
 
-func (a *environmentDestroyerAdapter) DestroyContainer(ctx context.Context, containerID string) error {
-	return a.lifecycle.DestroyContainer(ctx, containerID)
+type executorProfileGetter interface {
+	GetExecutorProfile(ctx context.Context, id string) (*models.ExecutorProfile, error)
+}
+
+func (a *environmentDestroyerAdapter) DestroyContainer(ctx context.Context, env *models.TaskEnvironment) error {
+	dockerHost, err := a.dockerHostForEnvironment(ctx, env)
+	if err != nil {
+		return err
+	}
+	return a.lifecycle.DestroyContainer(ctx, env.ContainerID, dockerHost)
 }
 
 func (a *environmentDestroyerAdapter) DestroySandbox(ctx context.Context, sandboxID, executionID string) error {
@@ -123,8 +133,12 @@ func (a *environmentDestroyerAdapter) DestroyWorktree(ctx context.Context, workt
 	return a.worktrees.RemoveByID(ctx, worktreeID, false)
 }
 
-func (a *environmentDestroyerAdapter) GetContainerLiveStatus(ctx context.Context, containerID string) (*taskservice.ContainerLiveStatus, error) {
-	live, err := a.lifecycle.GetContainerLiveStatus(ctx, containerID)
+func (a *environmentDestroyerAdapter) GetContainerLiveStatus(ctx context.Context, env *models.TaskEnvironment) (*taskservice.ContainerLiveStatus, error) {
+	dockerHost, err := a.dockerHostForEnvironment(ctx, env)
+	if err != nil {
+		return nil, err
+	}
+	live, err := a.lifecycle.GetContainerLiveStatus(ctx, env.ContainerID, dockerHost)
 	if err != nil || live == nil {
 		return nil, err
 	}
@@ -143,6 +157,23 @@ func (a *environmentDestroyerAdapter) GetContainerLiveStatus(ctx context.Context
 		out.FinishedAt = live.FinishedAt.Format(time.RFC3339)
 	}
 	return out, nil
+}
+
+func (a *environmentDestroyerAdapter) dockerHostForEnvironment(ctx context.Context, env *models.TaskEnvironment) (string, error) {
+	if env == nil || strings.TrimSpace(env.ExecutorProfileID) == "" {
+		return "", nil
+	}
+	if a.profiles == nil {
+		return "", fmt.Errorf("executor profile resolver is not configured")
+	}
+	profile, err := a.profiles.GetExecutorProfile(ctx, env.ExecutorProfileID)
+	if err != nil {
+		return "", fmt.Errorf("resolve executor profile %s: %w", env.ExecutorProfileID, err)
+	}
+	if profile == nil {
+		return "", fmt.Errorf("resolve executor profile %s: profile not found", env.ExecutorProfileID)
+	}
+	return strings.TrimSpace(profile.Config[lifecycle.MetadataKeyDockerHost]), nil
 }
 
 // pushBranchTimeout caps how long we'll wait for `git push` before treating

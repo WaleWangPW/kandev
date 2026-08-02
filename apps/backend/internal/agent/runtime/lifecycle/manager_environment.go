@@ -24,7 +24,7 @@ type ContainerLiveStatus struct {
 // DestroyContainer removes a Docker container (forcefully, along with its filesystem).
 // Used by Reset Environment to tear down the container layer without touching worktrees
 // or sprite sandboxes.
-func (m *Manager) DestroyContainer(ctx context.Context, containerID string) error {
+func (m *Manager) DestroyContainer(ctx context.Context, containerID, dockerHost string) error {
 	if containerID == "" {
 		return nil
 	}
@@ -36,14 +36,14 @@ func (m *Manager) DestroyContainer(ctx context.Context, containerID string) erro
 	if !ok {
 		return fmt.Errorf("docker backend has unexpected type %T", backend)
 	}
-	// Force lazy initialization here. After a backend restart this method
-	// can be the first caller to touch Docker, and a missing daemon should
-	// surface as a clear "docker unavailable" error rather than a generic
-	// "container manager not initialized".
-	if _, _, err := dockerExec.ensureClient(); err != nil {
+	// Resolve the same per-profile Docker host used for launch. After a backend
+	// restart this method can be the first caller to touch that daemon, so a
+	// missing host must surface clearly instead of silently falling back to the
+	// process-wide default socket.
+	_, cm, err := dockerExec.clientForMetadata(map[string]interface{}{MetadataKeyDockerHost: dockerHost})
+	if err != nil {
 		return fmt.Errorf("initialize docker backend: %w", err)
 	}
-	cm := dockerExec.ContainerMgr()
 	if cm == nil {
 		return fmt.Errorf("docker container manager not initialized")
 	}
@@ -52,7 +52,7 @@ func (m *Manager) DestroyContainer(ctx context.Context, containerID string) erro
 
 // GetContainerLiveStatus inspects a Docker container and returns a live
 // snapshot. Returns Missing=true when the container has been removed.
-func (m *Manager) GetContainerLiveStatus(ctx context.Context, containerID string) (*ContainerLiveStatus, error) {
+func (m *Manager) GetContainerLiveStatus(ctx context.Context, containerID, dockerHost string) (*ContainerLiveStatus, error) {
 	if containerID == "" {
 		return nil, nil
 	}
@@ -64,10 +64,10 @@ func (m *Manager) GetContainerLiveStatus(ctx context.Context, containerID string
 	if !ok {
 		return nil, fmt.Errorf("docker backend has unexpected type %T", backend)
 	}
-	if _, _, err := dockerExec.ensureClient(); err != nil {
+	_, cm, err := dockerExec.clientForMetadata(map[string]interface{}{MetadataKeyDockerHost: dockerHost})
+	if err != nil {
 		return nil, fmt.Errorf("initialize docker backend: %w", err)
 	}
-	cm := dockerExec.ContainerMgr()
 	if cm == nil {
 		return nil, fmt.Errorf("docker container manager not initialized")
 	}

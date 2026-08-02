@@ -333,7 +333,7 @@ func (s *Service) StartCreatedSession(
 	skipMessageRecord, planMode, autoStart bool,
 	attachments []v1.MessageAttachment,
 	references []v1.EntityReference,
-) (*executor.TaskExecution, error) {
+) (_ *executor.TaskExecution, retErr error) {
 	s.logger.Debug("starting created session",
 		zap.String("task_id", taskID),
 		zap.String("session_id", sessionID),
@@ -425,6 +425,18 @@ func (s *Service) StartCreatedSession(
 			zap.Error(err))
 		return nil, err
 	}
+	// Any later failure used to leave this task in SCHEDULING when it happened
+	// before the executor could persist its own launch failure. Keep this exact
+	// session identity: workflow processing below can redirect sessionID, but
+	// the cleanup must not fail an unrelated replacement session.
+	scheduledSessionID := sessionID
+	defer func() {
+		if retErr != nil {
+			_ = s.handleSessionLaunchFailure(
+				context.WithoutCancel(ctx), taskID, scheduledSessionID, retErr,
+			)
+		}
+	}()
 
 	task, err := s.scheduler.GetTask(ctx, taskID)
 	if err != nil {

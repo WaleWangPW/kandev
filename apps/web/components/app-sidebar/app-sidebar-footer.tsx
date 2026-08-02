@@ -6,6 +6,7 @@ import {
   IconBuildings,
   IconChartBar,
   IconLayoutKanban,
+  IconLanguage,
   IconSettings,
   IconSparkles,
   IconStethoscope,
@@ -23,6 +24,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { CurrentUserChip } from "./current-user-chip";
 import { linkToTask } from "@/lib/links";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/lib/i18n/locale";
 import {
   isOfficeWorkspace,
   rememberLastOfficeWorkspace,
@@ -98,6 +100,20 @@ function FooterIconButton({
       <TooltipTrigger asChild>{trigger}</TooltipTrigger>
       <TooltipContent side={collapsed ? "right" : "top"}>{label}</TooltipContent>
     </Tooltip>
+  );
+}
+
+function LocaleToggle({ collapsed }: Pick<FooterIconButtonProps, "collapsed">) {
+  const { locale, setLocale } = useI18n();
+
+  return (
+    <FooterIconButton
+      icon={IconLanguage}
+      label={locale === "zh-CN" ? "切换为 English" : "切换为简体中文"}
+      collapsed={collapsed}
+      onClick={() => setLocale(locale === "zh-CN" ? "en" : "zh-CN")}
+      testId="sidebar-locale-toggle"
+    />
   );
 }
 
@@ -211,6 +227,7 @@ export function AppSidebarFooter({ collapsed, onToggleSettingsMode }: AppSidebar
   const authMode = useAppStore((s) => s.auth.mode);
   const authUser = useAppStore((s) => s.auth.user);
   const showCurrentUser = authMode === "enabled" && authUser !== null;
+  const { t } = useI18n();
 
   return (
     <div
@@ -221,7 +238,7 @@ export function AppSidebarFooter({ collapsed, onToggleSettingsMode }: AppSidebar
     >
       <FooterIconButton
         icon={IconSettings}
-        label={settingsMode ? "Close settings" : "Settings"}
+        label={t(settingsMode ? "Close settings" : "Settings")}
         collapsed={collapsed}
         onClick={enterSettings}
         active={settingsMode}
@@ -229,14 +246,14 @@ export function AppSidebarFooter({ collapsed, onToggleSettingsMode }: AppSidebar
       />
       <FooterIconButton
         icon={IconChartBar}
-        label="Stats"
+        label={t("Stats")}
         collapsed={collapsed}
         onClick={() => router.push("/stats")}
         testId="sidebar-stats-button"
       />
       <FooterIconButton
         icon={IconStethoscope}
-        label="Improve Kandev"
+        label={t("Improve Kandev")}
         collapsed={collapsed}
         onClick={() => setImproveOpen(true)}
         testId="sidebar-improve-kandev-button"
@@ -244,7 +261,7 @@ export function AppSidebarFooter({ collapsed, onToggleSettingsMode }: AppSidebar
       {releaseNotes.showTopbarButton && (
         <FooterIconButton
           icon={IconSparkles}
-          label="What's new"
+          label={t("What's new")}
           collapsed={collapsed}
           onClick={releaseNotes.openDialog}
           badge={releaseNotes.hasUnseen}
@@ -254,7 +271,7 @@ export function AppSidebarFooter({ collapsed, onToggleSettingsMode }: AppSidebar
       {officeEnabled && (
         <FooterIconButton
           icon={activeIsOffice ? IconLayoutKanban : IconBuildings}
-          label={activeIsOffice ? "Kanban" : "Office"}
+          label={t(activeIsOffice ? "Kanban" : "Office")}
           collapsed={collapsed}
           onClick={() => {
             if (!activeIsOffice) rememberLastKanbanWorkspace(activeWorkspace);
@@ -268,6 +285,7 @@ export function AppSidebarFooter({ collapsed, onToggleSettingsMode }: AppSidebar
           testId={activeIsOffice ? "sidebar-kanban-button" : "sidebar-office-button"}
         />
       )}
+      <LocaleToggle collapsed={collapsed} />
       <ThemeToggle />
       <SidebarConnectionFallback collapsed={collapsed} appStatusBarEnabled={appStatusBarEnabled} />
       {showCurrentUser && (

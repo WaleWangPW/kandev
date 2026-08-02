@@ -13,6 +13,7 @@ import { TaskCreateDialog } from "@/components/task-create-dialog";
 import { linkToTask } from "@/lib/links";
 import type { Task } from "@/lib/types/http";
 import { subscribeNewTaskCreationRequests } from "@/lib/desktop/new-task-request";
+import { useI18n } from "@/lib/i18n/locale";
 
 // The Office "New issue" dialog only renders on `/office` routes, but this item
 // lives in the global sidebar (every page). Lazy-load it so its office-only
@@ -85,6 +86,7 @@ export function AppSidebarNewTaskItem({ collapsed }: AppSidebarNewTaskItemProps)
   const inOffice = useInOffice();
   const handleOpenQuickChat = useQuickChatLauncher(workspaceId);
   const [open, setOpen] = useState(false);
+  const { t } = useI18n();
   useNewTaskCreationRequest(workspaceId, setOpen);
 
   const canOpenQuickChat = !collapsed && !!workspaceId;
@@ -112,7 +114,7 @@ export function AppSidebarNewTaskItem({ collapsed }: AppSidebarNewTaskItemProps)
       <div className="relative">
         <AppSidebarNavItem
           icon={IconSquarePlus}
-          label="New Task"
+          label={t("New Task")}
           onClick={() => setOpen(true)}
           collapsed={collapsed}
           disabled={!workspaceId}
@@ -123,7 +125,7 @@ export function AppSidebarNewTaskItem({ collapsed }: AppSidebarNewTaskItemProps)
           <div className="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-1 sidebar-fade-in">
             <RowActionButton
               icon={IconMessageCircle}
-              label="Quick Chat"
+              label={t("Quick Chat")}
               testId="sidebar-quick-chat-shortcut"
               onClick={handleOpenQuickChat}
             />

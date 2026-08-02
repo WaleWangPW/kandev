@@ -2816,6 +2816,35 @@ func TestHandleSessionLaunchFailure_ConcurrentLaunchesCreateOneMessage(t *testin
 	}
 }
 
+func TestStartCreatedSession_PostSchedulingErrorMarksTaskAndSessionFailed(t *testing.T) {
+	ctx := context.Background()
+	repo := setupTestRepo(t)
+	seedTaskAndSession(t, repo, "task1", "session1", models.TaskSessionStateCreated)
+	taskRepo := newMockTaskRepo()
+	taskRepo.tasks["task1"] = &v1.Task{ID: "task1", State: v1.TaskStateInProgress}
+	taskRepo.getTaskErr = errors.New("scheduler task lookup failed")
+	svc := createTestServiceWithScheduler(repo, newMockStepGetter(), taskRepo, &mockAgentManager{})
+	svc.eventBus = bus.NewMemoryEventBus(testLogger())
+
+	_, err := svc.StartCreatedSession(ctx, "task1", "session1", "profile1", "start task", true, false, false, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "scheduler task lookup failed") {
+		t.Fatalf("StartCreatedSession error = %v, want scheduler lookup failure", err)
+	}
+
+	failedSession, err := repo.GetTaskSession(ctx, "session1")
+	if err != nil {
+		t.Fatalf("GetTaskSession: %v", err)
+	}
+	if failedSession.State != models.TaskSessionStateFailed {
+		t.Fatalf("session state = %s, want FAILED", failedSession.State)
+	}
+	taskRepo.mu.Lock()
+	defer taskRepo.mu.Unlock()
+	if got := taskRepo.updatedStates["task1"]; got != v1.TaskStateFailed {
+		t.Fatalf("task state = %s, want FAILED", got)
+	}
+}
+
 func TestPrepareAndStartCreatedSession_MissingRemoteRefClaimsRecoveryOnce(t *testing.T) {
 	ctx := context.Background()
 	repo := setupTestRepo(t)

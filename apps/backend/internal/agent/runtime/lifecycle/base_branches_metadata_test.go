@@ -5,6 +5,20 @@ import (
 	"testing"
 )
 
+func TestBuildLaunchMetadata_ExecutorDockerHostWins(t *testing.T) {
+	req := &LaunchRequest{
+		Metadata: map[string]interface{}{MetadataKeyDockerHost: "unix:///task.sock"},
+		ExecutorConfig: map[string]string{
+			MetadataKeyDockerHost: "unix:///executor.sock",
+		},
+	}
+
+	got := buildLaunchMetadata(req, "", "", "")
+	if got[MetadataKeyDockerHost] != "unix:///executor.sock" {
+		t.Fatalf("docker_host = %q, want executor configuration", got[MetadataKeyDockerHost])
+	}
+}
+
 // TestCollectBaseBranches_MultiRepo verifies the per-repo map populated for
 // multi-repo launches: one entry per RepoLaunchSpec keyed by RepoName, plus
 // the legacy unkeyed entry when LaunchRequest carries the singular top-level

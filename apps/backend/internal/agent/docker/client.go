@@ -131,6 +131,17 @@ func (c *Client) SetActivityCoordinator(coordinator *activity.Coordinator) {
 	c.mu.Unlock()
 }
 
+// ServerPlatform returns the daemon platform used to validate bind mounts and
+// run containers. It is intentionally the daemon's platform, not the host
+// platform: a macOS control plane may target a Linux Colima VM.
+func (c *Client) ServerPlatform(ctx context.Context) (goos, goarch string, err error) {
+	result, err := c.cli.Info(ctx, client.InfoOptions{})
+	if err != nil {
+		return "", "", fmt.Errorf("docker daemon info: %w", err)
+	}
+	return result.Info.OSType, result.Info.Architecture, nil
+}
+
 // Close closes the Docker client.
 func (c *Client) Close() error {
 	c.logger.Debug("Closing Docker client")

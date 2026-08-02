@@ -3,6 +3,7 @@
 import { cn } from "@/lib/utils";
 import type { OfficeTaskStatus } from "@/lib/state/slices/office/types";
 import { normalizeTaskStatus } from "./normalize-status";
+import { translate } from "@/lib/i18n/locale";
 
 /**
  * Status icon for office tasks. Colored outline ring per status, with an
@@ -36,7 +37,7 @@ type StatusIconProps = {
 
 export function StatusIcon({ status, className }: StatusIconProps) {
   const normalised = normalizeTaskStatus(status);
-  const label = statusLabels[normalised];
+  const label = translate(statusLabels[normalised]);
   return (
     <span
       className={cn(

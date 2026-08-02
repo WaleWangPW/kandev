@@ -15,6 +15,7 @@ import { SidebarViewsSyncBridge } from "@/components/sidebar-views-sync-bridge";
 import { ThemeProvider } from "@/components/theme-provider";
 import { ToastProvider } from "@/components/toast-provider";
 import { WebSocketConnector } from "@/components/ws-connector";
+import { LocaleDocumentBridge } from "@/components/i18n/locale-document-bridge";
 import { CommandRegistryProvider } from "@/lib/commands/command-registry";
 import { Toaster as SonnerToaster } from "@kandev/ui/sonner";
 import { TooltipProvider } from "@kandev/ui/tooltip";
@@ -29,6 +30,7 @@ export function AppShell({ children }: AppShellProps) {
       <DiffWorkerPoolProvider>
         <TooltipProvider>
           <ToastProvider>
+            <LocaleDocumentBridge />
             <SonnerToaster richColors position="top-right" />
             <SessionFailureToastBridge />
             <TaskDeletedToastBridge />

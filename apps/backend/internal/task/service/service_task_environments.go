@@ -17,7 +17,7 @@ import (
 // Worktree destruction preserves the underlying branch — user data that hasn't been
 // pushed is never deleted by reset.
 type EnvironmentDestroyer interface {
-	DestroyContainer(ctx context.Context, containerID string) error
+	DestroyContainer(ctx context.Context, env *models.TaskEnvironment) error
 	DestroySandbox(ctx context.Context, sandboxID, executionID string) error
 	DestroyWorktree(ctx context.Context, worktreeID string) error
 	// PushEnvironmentBranch best-effort pushes the current branch of the environment's
@@ -26,7 +26,7 @@ type EnvironmentDestroyer interface {
 	PushEnvironmentBranch(ctx context.Context, env *models.TaskEnvironment) error
 	// GetContainerLiveStatus returns a real-time snapshot of a Docker container,
 	// or nil when the executor type doesn't have a container layer.
-	GetContainerLiveStatus(ctx context.Context, containerID string) (*ContainerLiveStatus, error)
+	GetContainerLiveStatus(ctx context.Context, env *models.TaskEnvironment) (*ContainerLiveStatus, error)
 }
 
 // ContainerLiveStatus mirrors lifecycle.ContainerLiveStatus for the task service
@@ -104,7 +104,7 @@ func (s *Service) GetTaskEnvironmentLiveStatus(ctx context.Context, taskID strin
 	if env.ContainerID == "" || s.envDestroyer == nil {
 		return nil, nil
 	}
-	return s.envDestroyer.GetContainerLiveStatus(ctx, env.ContainerID)
+	return s.envDestroyer.GetContainerLiveStatus(ctx, env)
 }
 
 // GetSSHLiveStatus returns the SSH-specific runtime info for the task's
@@ -354,7 +354,7 @@ func (s *Service) teardownEnvironmentResources(ctx context.Context, env *models.
 		if err := contextError(); err != nil {
 			return err
 		}
-		if err := s.envDestroyer.DestroyContainer(ctx, env.ContainerID); err != nil {
+		if err := s.envDestroyer.DestroyContainer(ctx, env); err != nil {
 			errs = append(errs, fmt.Errorf("destroy container %s: %w", env.ContainerID, err))
 		}
 	}

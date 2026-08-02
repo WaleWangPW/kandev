@@ -1,4 +1,5 @@
 import type { TaskState, TaskSessionState } from "@/lib/types/http";
+import { translate } from "@/lib/i18n/locale";
 
 const TASK_STATE_LABELS: Record<TaskState, string> = {
   CREATED: "Created",
@@ -25,11 +26,11 @@ const TASK_SESSION_STATE_LABELS: Record<TaskSessionState, string> = {
 };
 
 export function formatTaskStateLabel(state: TaskState | null | undefined): string {
-  if (!state) return "Not started";
-  return TASK_STATE_LABELS[state] ?? state;
+  if (!state) return translate("Not started");
+  return translate(TASK_STATE_LABELS[state] ?? state);
 }
 
 export function formatTaskSessionStateLabel(state: TaskSessionState | null | undefined): string {
   if (!state) return "";
-  return TASK_SESSION_STATE_LABELS[state] ?? state;
+  return translate(TASK_SESSION_STATE_LABELS[state] ?? state);
 }

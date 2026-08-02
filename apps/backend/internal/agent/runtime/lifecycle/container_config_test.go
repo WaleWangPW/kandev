@@ -1,6 +1,8 @@
 package lifecycle
 
 import (
+	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -9,6 +11,39 @@ import (
 	"github.com/kandev/kandev/internal/agent/docker"
 	"github.com/kandev/kandev/internal/common/logger"
 )
+
+func TestPrepareDockerAgentctlMount_UsesDaemonPlatformAndManagedCopy(t *testing.T) {
+	cm := newCMTest(t)
+	cm.kandevHomeDir = t.TempDir()
+	source := filepath.Join(t.TempDir(), "agentctl-linux-arm64")
+	if err := os.WriteFile(source, []byte("linux-arm64-helper"), 0o755); err != nil {
+		t.Fatalf("write source helper: %v", err)
+	}
+	var resolved SSHRemotePlatform
+	cm.resolveDockerPlatform = func(context.Context) (SSHRemotePlatform, error) {
+		return SSHRemotePlatform{GOOS: "linux", GOARCH: "arm64"}, nil
+	}
+	cm.resolveAgentctlBinary = func(platform SSHRemotePlatform) (string, error) {
+		resolved = platform
+		return source, nil
+	}
+
+	got, err := cm.prepareDockerAgentctlMount(context.Background())
+	if err != nil {
+		t.Fatalf("prepareDockerAgentctlMount: %v", err)
+	}
+	if resolved != (SSHRemotePlatform{GOOS: "linux", GOARCH: "arm64"}) {
+		t.Fatalf("resolved platform = %#v", resolved)
+	}
+	want := filepath.Join(cm.kandevHomeDir, "docker-bin", "agentctl-linux-arm64")
+	if got != want {
+		t.Fatalf("mount path = %q, want %q", got, want)
+	}
+	contents, err := os.ReadFile(got)
+	if err != nil || string(contents) != "linux-arm64-helper" {
+		t.Fatalf("managed helper content mismatch: %q, %v", contents, err)
+	}
+}
 
 // configStubAgent wraps MockAgent and overrides Runtime() with a fixed
 // RuntimeConfig that mimics ACP agents (image+tag, {workspace} placeholder).

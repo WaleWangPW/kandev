@@ -50,6 +50,7 @@ type ContainerConfig struct {
 	ImageTagOverride               string                 // If set, replaces the agent runtime's default image (e.g. profile.config.image_tag)
 	LocalClonePath                 string                 // Host path for file:// repository clone URLs; mounted read-only at the same path.
 	BootstrapNonce                 string                 // one-time nonce for agentctl handshake (set internally)
+	AgentctlBinaryPath             string                 // Internal: daemon-visible helper path prepared before container creation.
 	Metadata                       map[string]interface{} // Optional metadata (e.g., office runtime dir)
 	// BaseBranches maps RepositoryName → base branch ref; forwarded into
 	// agentctl's CreateInstanceRequest so each WorkspaceTracker resolves
@@ -83,9 +84,12 @@ type ContainerManager struct {
 	// Empty means "fall back to legacy {home}/.<agent>" — production callers
 	// always pass a non-empty value.
 	kandevHomeDir string
-	// resolveAgentctlBinary returns the host path to a linux/amd64 agentctl
-	// binary. Indirected so tests can inject a stub.
-	resolveAgentctlBinary func() (string, error)
+	// resolveAgentctlBinary returns the host path to an agentctl binary for
+	// the Docker daemon's platform. Indirected so tests can inject a stub.
+	resolveAgentctlBinary func(SSHRemotePlatform) (string, error)
+	// resolveDockerPlatform reports the daemon platform rather than the local
+	// control-plane platform (e.g. Linux arm64 for a Colima VM on macOS).
+	resolveDockerPlatform func(context.Context) (SSHRemotePlatform, error)
 	// resolveMockAgentBinary returns the host path to a linux/amd64 mock-agent
 	// binary. When it returns "" without error, no mock-agent mount is added
 	// (production case). Used by Docker E2E tests.
@@ -100,12 +104,19 @@ func NewContainerManager(dockerClient *docker.Client, networkName, kandevHomeDir
 	resolver := NewAgentctlResolver(log)
 	mockResolver := NewMockAgentResolver(log)
 	return &ContainerManager{
-		dockerClient:           dockerClient,
-		commandBuilder:         NewCommandBuilder(),
-		logger:                 log.WithFields(zap.String("component", "container-manager")),
-		networkName:            networkName,
-		kandevHomeDir:          kandevHomeDir,
-		resolveAgentctlBinary:  resolver.ResolveLinuxBinary,
+		dockerClient:          dockerClient,
+		commandBuilder:        NewCommandBuilder(),
+		logger:                log.WithFields(zap.String("component", "container-manager")),
+		networkName:           networkName,
+		kandevHomeDir:         kandevHomeDir,
+		resolveAgentctlBinary: resolver.ResolveRemoteBinary,
+		resolveDockerPlatform: func(ctx context.Context) (SSHRemotePlatform, error) {
+			goos, goarch, err := dockerClient.ServerPlatform(ctx)
+			if err != nil {
+				return SSHRemotePlatform{}, err
+			}
+			return SSHRemotePlatform{GOOS: strings.ToLower(strings.TrimSpace(goos)), GOARCH: normalizeDockerArchitecture(goarch)}, nil
+		},
 		resolveMockAgentBinary: mockResolver.ResolveLinuxBinary,
 	}
 }
@@ -186,6 +197,13 @@ func (cm *ContainerManager) LaunchContainer(ctx context.Context, config Containe
 func (cm *ContainerManager) createAndStartContainer(
 	ctx context.Context, config ContainerConfig,
 ) (string, string, string, int, error) {
+	if cm.resolveAgentctlBinary != nil {
+		agentctlPath, err := cm.prepareDockerAgentctlMount(ctx)
+		if err != nil {
+			return "", "", "", 0, err
+		}
+		config.AgentctlBinaryPath = agentctlPath
+	}
 	containerCfg, err := cm.buildContainerConfig(config)
 	if err != nil {
 		return "", "", "", 0, fmt.Errorf("failed to build container config: %w", err)
@@ -419,19 +437,22 @@ func (cm *ContainerManager) buildContainerConfig(config ContainerConfig) (docker
 			zap.String("path", config.LocalClonePath))
 	}
 
-	// Mount the host agentctl linux binary into the container so user-built
-	// images don't have to bake it in. Resolved via AgentctlResolver — same path
-	// the Sprites executor uses.
-	if cm.resolveAgentctlBinary != nil {
-		agentctlPath, err := cm.resolveAgentctlBinary()
-		if err != nil {
-			return docker.ContainerConfig{}, fmt.Errorf("agentctl linux binary not found: %w", err)
-		}
+	// Mount the daemon-visible agentctl binary into the container so user-built
+	// images don't have to bake it in. LaunchContainer materializes release
+	// helpers under Kandev home, which is shareable with local Docker VMs such
+	// as Colima; direct buildContainerConfig callers keep the legacy resolver.
+	if config.AgentctlBinaryPath != "" {
 		mounts = append(mounts, docker.MountConfig{
-			Source:   agentctlPath,
+			Source:   config.AgentctlBinaryPath,
 			Target:   "/usr/local/bin/agentctl",
 			ReadOnly: true,
 		})
+	} else if cm.resolveAgentctlBinary != nil {
+		agentctlPath, err := cm.resolveAgentctlBinary(SSHRemotePlatform{GOOS: sshRemoteGOOSLinux, GOARCH: sshRemoteGOARCHAMD64})
+		if err != nil {
+			return docker.ContainerConfig{}, fmt.Errorf("agentctl linux binary not found: %w", err)
+		}
+		mounts = append(mounts, docker.MountConfig{Source: agentctlPath, Target: "/usr/local/bin/agentctl", ReadOnly: true})
 	}
 
 	// Optionally mount a host mock-agent binary for Docker E2E tests. Production

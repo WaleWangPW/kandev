@@ -4,21 +4,21 @@ import type { TaskState, TaskSessionState } from "@/lib/types/http";
 
 describe("formatTaskStateLabel", () => {
   it("maps known task states to human labels", () => {
-    expect(formatTaskStateLabel("IN_PROGRESS")).toBe("In progress");
-    expect(formatTaskStateLabel("WAITING_FOR_INPUT")).toBe("Waiting for input");
-    expect(formatTaskStateLabel("TODO")).toBe("To do");
-    expect(formatTaskStateLabel("COMPLETED")).toBe("Completed");
-    expect(formatTaskStateLabel("FAILED")).toBe("Failed");
-    expect(formatTaskStateLabel("CANCELLED")).toBe("Cancelled");
-    expect(formatTaskStateLabel("BLOCKED")).toBe("Blocked");
-    expect(formatTaskStateLabel("REVIEW")).toBe("Review");
-    expect(formatTaskStateLabel("CREATED")).toBe("Created");
-    expect(formatTaskStateLabel("SCHEDULING")).toBe("Scheduling");
+    expect(formatTaskStateLabel("IN_PROGRESS")).toBe("进行中");
+    expect(formatTaskStateLabel("WAITING_FOR_INPUT")).toBe("等待输入");
+    expect(formatTaskStateLabel("TODO")).toBe("待办");
+    expect(formatTaskStateLabel("COMPLETED")).toBe("已完成");
+    expect(formatTaskStateLabel("FAILED")).toBe("失败");
+    expect(formatTaskStateLabel("CANCELLED")).toBe("已取消");
+    expect(formatTaskStateLabel("BLOCKED")).toBe("已阻塞");
+    expect(formatTaskStateLabel("REVIEW")).toBe("审核");
+    expect(formatTaskStateLabel("CREATED")).toBe("已创建");
+    expect(formatTaskStateLabel("SCHEDULING")).toBe("正在调度");
   });
 
-  it("returns 'Not started' for null/undefined", () => {
-    expect(formatTaskStateLabel(null)).toBe("Not started");
-    expect(formatTaskStateLabel(undefined)).toBe("Not started");
+  it("returns the localized not-started label for null/undefined", () => {
+    expect(formatTaskStateLabel(null)).toBe("未开始");
+    expect(formatTaskStateLabel(undefined)).toBe("未开始");
   });
 
   it("falls back to the raw value for unknown states", () => {
@@ -28,13 +28,13 @@ describe("formatTaskStateLabel", () => {
 
 describe("formatTaskSessionStateLabel", () => {
   it("maps known session states", () => {
-    expect(formatTaskSessionStateLabel("RUNNING")).toBe("Running");
-    expect(formatTaskSessionStateLabel("STARTING")).toBe("Starting");
-    expect(formatTaskSessionStateLabel("WAITING_FOR_INPUT")).toBe("Waiting for input");
-    expect(formatTaskSessionStateLabel("COMPLETED")).toBe("Completed");
-    expect(formatTaskSessionStateLabel("FAILED")).toBe("Failed");
-    expect(formatTaskSessionStateLabel("CANCELLED")).toBe("Cancelled");
-    expect(formatTaskSessionStateLabel("CREATED")).toBe("Created");
+    expect(formatTaskSessionStateLabel("RUNNING")).toBe("运行中");
+    expect(formatTaskSessionStateLabel("STARTING")).toBe("正在启动");
+    expect(formatTaskSessionStateLabel("WAITING_FOR_INPUT")).toBe("等待输入");
+    expect(formatTaskSessionStateLabel("COMPLETED")).toBe("已完成");
+    expect(formatTaskSessionStateLabel("FAILED")).toBe("失败");
+    expect(formatTaskSessionStateLabel("CANCELLED")).toBe("已取消");
+    expect(formatTaskSessionStateLabel("CREATED")).toBe("已创建");
   });
 
   it("returns empty string for null/undefined", () => {

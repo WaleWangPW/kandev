@@ -9,6 +9,7 @@ import { useAppStore } from "@/components/state-provider";
 import type { KanbanExternalLinkAvailability } from "./kanban-external-link-availability";
 import type { Repository } from "@/lib/types/http";
 import { countAdmittedTasks, formatWipCount, isOverWipLimit } from "@/lib/kanban/wip-limit";
+import { useI18n } from "@/lib/i18n/locale";
 
 export interface WorkflowStep {
   id: string;
@@ -64,6 +65,7 @@ export function KanbanColumn({
   isMultiSelectMode,
   externalLinkAvailability,
 }: KanbanColumnProps) {
+  const { t } = useI18n();
   const { setNodeRef, isOver } = useDroppable({
     id: step.id,
   });
@@ -98,7 +100,7 @@ export function KanbanColumn({
         <div className="flex items-center justify-between pb-2 mb-3 px-1">
           <div className="flex items-center gap-2">
             <div className={cn("w-2 h-2 rounded-full", step.color)} />
-            <h2 className="font-semibold text-sm">{step.title}</h2>
+            <h2 className="font-semibold text-sm">{t(step.title)}</h2>
             <Badge
               variant="secondary"
               className={cn(
@@ -107,7 +109,7 @@ export function KanbanColumn({
                   "border-amber-500/50 bg-amber-500/15 text-amber-700 dark:text-amber-300",
               )}
               aria-label={overWipLimit ? `${wipCountLabel} tasks, over WIP limit` : undefined}
-              title={overWipLimit ? "Over WIP limit" : undefined}
+              title={overWipLimit ? t("Over WIP limit") : undefined}
             >
               {wipCountLabel}
             </Badge>
