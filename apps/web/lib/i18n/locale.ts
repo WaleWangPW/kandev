@@ -67,12 +67,18 @@ export function getUiLocale(): UiLocale {
 
 export function setUiLocale(locale: UiLocale): void {
   if (typeof window === "undefined") return;
+  if (getUiLocale() === locale) return;
   try {
     window.localStorage.setItem(STORAGE_KEY, locale);
   } catch {
     // A private-mode or quota failure must not block the one-session switch.
   }
   window.dispatchEvent(new Event(LOCALE_CHANGE_EVENT));
+  // Some existing display helpers are deliberately framework-agnostic and do
+  // not subscribe to React state. A same-route reload ensures that every
+  // stored state label is rendered in the selected locale without changing
+  // task, workflow, or session data.
+  window.location.reload();
 }
 
 function subscribe(onStoreChange: () => void): () => void {
