@@ -16,6 +16,7 @@ import type {
   WorkflowSyncController,
   WorkflowSyncFormState,
 } from "@/hooks/domains/settings/use-workflow-sync";
+import { translate } from "@/lib/i18n/locale";
 
 const HELP_TEXT =
   "The directory should contain workflow export files (.yml/.yaml/.json) in the kandev_workflow format — the same format produced by workflow export.";
@@ -34,7 +35,7 @@ type RepoUrlFieldProps = {
 function RepoUrlField({ url, invalid, resolved, onChange }: RepoUrlFieldProps) {
   return (
     <div className="space-y-1.5">
-      <Label htmlFor="workflow-sync-url">Repository link</Label>
+      <Label htmlFor="workflow-sync-url">{translate("Repository link")}</Label>
       <Input
         id="workflow-sync-url"
         data-testid="workflow-sync-url-input"
@@ -44,10 +45,10 @@ function RepoUrlField({ url, invalid, resolved, onChange }: RepoUrlFieldProps) {
         aria-invalid={invalid}
       />
       {invalid ? (
-        <p className="text-xs text-destructive">Not a recognized GitHub repository link.</p>
+        <p className="text-xs text-destructive">{translate("Not a recognized GitHub repository link.")}</p>
       ) : (
         <p className="text-xs text-muted-foreground" data-testid="workflow-sync-resolved">
-          {resolved || "Paste a GitHub link — /tree/… links carry the branch and directory too."}
+          {resolved || translate("Paste a GitHub link — /tree/… links carry the branch and directory too.")}
         </p>
       )}
     </div>
@@ -75,12 +76,12 @@ function PollFields({ form, update }: FieldsProps) {
           className="cursor-pointer"
         />
         <Label htmlFor="workflow-sync-poll-toggle" className="cursor-pointer">
-          Auto-sync
+          {translate("Auto-sync")}
         </Label>
         {form.poll_enabled && (
           <div className="ml-auto flex items-center gap-2">
             <Label htmlFor="workflow-sync-interval" className="sr-only">
-              Poll interval (seconds)
+              {translate("Poll interval (seconds)")}
             </Label>
             <Input
               id="workflow-sync-interval"
@@ -91,14 +92,14 @@ function PollFields({ form, update }: FieldsProps) {
               value={form.interval_seconds}
               onChange={(e) => update("interval_seconds", Number(e.target.value) || 0)}
             />
-            <span className="text-xs text-muted-foreground">seconds</span>
+            <span className="text-xs text-muted-foreground">{translate("seconds")}</span>
           </div>
         )}
       </div>
       <p className="text-xs text-muted-foreground">
         {form.poll_enabled
-          ? "Checks the repository on this interval (minimum 60s)."
-          : "Syncs only run when you press Sync now."}
+          ? translate("Checks the repository on this interval (minimum 60s).")
+          : translate("Syncs only run when you press Sync now.")}
       </p>
     </div>
   );
@@ -140,9 +141,9 @@ export function WorkflowSyncDialog({ open, onOpenChange, sync }: WorkflowSyncDia
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg" data-testid="workflow-sync-dialog">
         <DialogHeader>
-          <DialogTitle>GitHub Sync</DialogTitle>
+          <DialogTitle>{translate("GitHub Sync")}</DialogTitle>
           <DialogDescription>
-            Automatically sync workflow definitions from a GitHub repository into this workspace.
+            {translate("Automatically sync workflow definitions from a GitHub repository into this workspace.")}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
@@ -165,7 +166,7 @@ export function WorkflowSyncDialog({ open, onOpenChange, sync }: WorkflowSyncDia
               className="sm:mr-auto cursor-pointer"
               data-testid="workflow-sync-remove"
             >
-              Remove
+              {translate("Remove")}
             </Button>
           )}
           <Button
@@ -185,6 +186,6 @@ export function WorkflowSyncDialog({ open, onOpenChange, sync }: WorkflowSyncDia
 }
 
 function saveLabel(saving: boolean, hasConfig: boolean): string {
-  if (saving) return "Saving...";
-  return hasConfig ? "Update" : "Save";
+  if (saving) return translate("Saving...");
+  return hasConfig ? translate("Update") : translate("Save");
 }

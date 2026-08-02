@@ -423,6 +423,14 @@ const LEGACY_ZH_CN: Record<string, string> = {
   "Save the workflow before exporting.": "导出前请先保存工作流。",
   "Repository link": "仓库链接",
   "Not a recognized GitHub repository link.": "不是可识别的 GitHub 仓库链接。",
+  "Paste a GitHub link — /tree/… links carry the branch and directory too.":
+    "粘贴 GitHub 链接——/tree/… 链接也会带上分支和目录。",
+  "Auto-sync": "自动同步",
+  "Poll interval (seconds)": "轮询间隔（秒）",
+  "Checks the repository on this interval (minimum 60s).": "按此间隔检查仓库（最少 60 秒）。",
+  "Syncs only run when you press Sync now.": "仅在你点击“立即同步”时执行同步。",
+  "Automatically sync workflow definitions from a GitHub repository into this workspace.":
+    "自动将 GitHub 仓库中的工作流定义同步到此工作区。",
   seconds: "秒",
   "GitHub Sync": "GitHub 同步",
   "Invite a user": "邀请用户",

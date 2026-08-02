@@ -6,6 +6,7 @@ import { Separator } from "@kandev/ui/separator";
 import { WorkflowSyncDialog } from "@/components/settings/workflow-sync-dialog";
 import { WorkflowSyncStatusCard } from "@/components/settings/workflow-sync-status-banner";
 import { useWorkflowSync } from "@/hooks/domains/settings/use-workflow-sync";
+import { translate } from "@/lib/i18n/locale";
 
 // WorkflowSyncButton is the GitHub Sync entry point, rendered alongside the
 // other workflow actions (Export / Import / Add). The dialog open state lives
@@ -22,7 +23,7 @@ export function WorkflowSyncButton({ onClick }: { onClick: () => void }) {
       data-testid="workflow-sync-open"
     >
       <IconBrandGithub className="h-4 w-4 mr-2" />
-      GitHub Sync
+      {translate("GitHub Sync")}
     </Button>
   );
 }
