@@ -14,6 +14,7 @@ import { useAppStore } from "@/components/state-provider";
 import type { AgentProfile, Project } from "@/lib/state/slices/office/types";
 import type { IssueDraft } from "./new-task-draft";
 import { ParticipantRow } from "./new-task-participant-row";
+import { useI18n } from "@/lib/i18n/locale";
 
 type Props = {
   draft: IssueDraft;
@@ -29,12 +30,13 @@ function AgentPickerPopover({
   selectedId: string;
   onSelect: (id: string) => void;
 }) {
+  const { t } = useI18n();
   const selected = agents.find((a) => a.id === selectedId);
   return (
     <Popover>
       <PopoverTrigger asChild>
         <Button variant="outline" size="sm" className="cursor-pointer h-7 text-xs">
-          {selected?.name ?? "Assignee"}
+          {selected?.name ?? t("Assignee")}
         </Button>
       </PopoverTrigger>
       <PopoverContent className="w-48 p-1" align="start">
@@ -43,7 +45,7 @@ function AgentPickerPopover({
           className="w-full text-left px-2 py-1.5 text-sm rounded hover:bg-muted cursor-pointer"
           onClick={() => onSelect("")}
         >
-          Unassigned
+          {t("Unassigned")}
         </button>
         {agents.map((agent) => (
           <button
@@ -69,12 +71,13 @@ function ProjectPickerPopover({
   selectedId: string;
   onSelect: (id: string) => void;
 }) {
+  const { t } = useI18n();
   const selected = projects.find((p) => p.id === selectedId);
   return (
     <Popover>
       <PopoverTrigger asChild>
         <Button variant="outline" size="sm" className="cursor-pointer h-7 text-xs">
-          {selected?.name ?? "Project"}
+          {selected?.name ?? t("Project")}
         </Button>
       </PopoverTrigger>
       <PopoverContent className="w-48 p-1" align="start">
@@ -83,7 +86,7 @@ function ProjectPickerPopover({
           className="w-full text-left px-2 py-1.5 text-sm rounded hover:bg-muted cursor-pointer"
           onClick={() => onSelect("")}
         >
-          No project
+          {t("No project")}
         </button>
         {projects.map((project) => (
           <button
@@ -107,19 +110,20 @@ function ProjectPickerPopover({
 }
 
 export function NewTaskSelectorRow({ draft, onUpdate }: Props) {
+  const { t } = useI18n();
   const agents = useAppStore((s) => s.office.agentProfiles);
   const projects = useAppStore((s) => s.office.projects);
 
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
-        <span>For</span>
+        <span>{t("For")}</span>
         <AgentPickerPopover
           agents={agents}
           selectedId={draft.assigneeId}
           onSelect={(id) => onUpdate({ assigneeId: id })}
         />
-        <span>in</span>
+        <span>{t("in")}</span>
         <ProjectPickerPopover
           projects={projects}
           selectedId={draft.projectId}
@@ -134,7 +138,7 @@ export function NewTaskSelectorRow({ draft, onUpdate }: Props) {
                 </Button>
               </DropdownMenuTrigger>
             </TooltipTrigger>
-            <TooltipContent>More options</TooltipContent>
+            <TooltipContent>{t("More options")}</TooltipContent>
           </Tooltip>
           <DropdownMenuContent align="start">
             <DropdownMenuItem
@@ -142,14 +146,14 @@ export function NewTaskSelectorRow({ draft, onUpdate }: Props) {
               onClick={() => onUpdate({ showReviewer: !draft.showReviewer })}
             >
               <IconEye className="h-4 w-4 mr-2" />
-              {draft.showReviewer ? "Hide reviewer" : "Add reviewer"}
+              {t(draft.showReviewer ? "Hide reviewer" : "Add reviewer")}
             </DropdownMenuItem>
             <DropdownMenuItem
               className="cursor-pointer"
               onClick={() => onUpdate({ showApprover: !draft.showApprover })}
             >
               <IconCircleCheck className="h-4 w-4 mr-2" />
-              {draft.showApprover ? "Hide approver" : "Add approver"}
+              {t(draft.showApprover ? "Hide approver" : "Add approver")}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -157,7 +161,7 @@ export function NewTaskSelectorRow({ draft, onUpdate }: Props) {
 
       {draft.showReviewer && (
         <ParticipantRow
-          label="Reviewer"
+          label={t("Reviewer")}
           agents={agents}
           selectedIds={draft.reviewerIds}
           onSelect={(ids) => onUpdate({ reviewerIds: ids })}
@@ -167,7 +171,7 @@ export function NewTaskSelectorRow({ draft, onUpdate }: Props) {
 
       {draft.showApprover && (
         <ParticipantRow
-          label="Approver"
+          label={t("Approver")}
           agents={agents}
           selectedIds={draft.approverIds}
           onSelect={(ids) => onUpdate({ approverIds: ids })}

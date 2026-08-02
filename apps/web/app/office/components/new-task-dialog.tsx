@@ -12,6 +12,7 @@ import { createTask } from "@/lib/api/domains/kanban-api";
 import { useIssueDraft, type IssueDraft } from "./new-task-draft";
 import { NewTaskSelectorRow } from "./new-task-selector-row";
 import { NewTaskBottomBar } from "./new-task-bottom-bar";
+import { useI18n } from "@/lib/i18n/locale";
 import {
   NewTaskStages,
   buildExecutionPolicy,
@@ -41,6 +42,7 @@ export function NewTaskDialog({
   defaultProjectId,
   defaultAssigneeId,
 }: NewIssueDialogProps) {
+  const { t } = useI18n();
   const workspaceId = useAppStore((s) => s.workspaces.activeId);
   const [submitting, setSubmitting] = useState(false);
   const [stages, setStages] = useState<StagesDraft>(EMPTY_STAGES);
@@ -74,13 +76,13 @@ export function NewTaskDialog({
       clearDraft();
       setStages(EMPTY_STAGES);
       onOpenChange(false);
-      toast.success("Task created");
+      toast.success(t("Task created"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to create issue");
+      toast.error(err instanceof Error ? err.message : t("Failed to create issue"));
     } finally {
       setSubmitting(false);
     }
-  }, [draft, stages, workspaceId, parentTaskId, clearDraft, onOpenChange]);
+  }, [draft, stages, workspaceId, parentTaskId, clearDraft, onOpenChange, t]);
 
   const handleDiscard = useCallback(() => {
     clearDraft();
@@ -127,18 +129,19 @@ function NewIssueDialogBody({
   onDiscard: () => void;
   onCreate: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <>
       <DialogHeader>
-        <DialogTitle className="sr-only">New issue</DialogTitle>
+        <DialogTitle className="sr-only">{t("New issue")}</DialogTitle>
         <div className="flex items-center gap-2">
           <Badge variant="outline" className="font-mono text-xs">
             KAN
           </Badge>
-          <span className="text-sm text-muted-foreground">New issue</span>
+          <span className="text-sm text-muted-foreground">{t("New issue")}</span>
           {parentTaskId && (
             <Badge variant="secondary" className="text-xs">
-              Sub-issue of {parentTaskId}
+              {t("Sub-issue of")} {parentTaskId}
             </Badge>
           )}
         </div>
@@ -146,7 +149,7 @@ function NewIssueDialogBody({
 
       <div className="space-y-4">
         <Textarea
-          placeholder="Task title"
+          placeholder={t("Task title")}
           value={draft.title}
           onChange={(e) => updateDraft({ title: e.target.value })}
           className="text-lg font-medium border-0 resize-none focus-visible:ring-0 min-h-[40px]"
@@ -155,7 +158,7 @@ function NewIssueDialogBody({
         />
         <NewTaskSelectorRow draft={draft} onUpdate={updateDraft} />
         <Textarea
-          placeholder="Add description..."
+          placeholder={t("Add description...")}
           value={draft.description}
           onChange={(e) => updateDraft({ description: e.target.value })}
           className="min-h-[120px] text-sm"
@@ -170,7 +173,7 @@ function NewIssueDialogBody({
           className="text-muted-foreground cursor-pointer"
           onClick={onDiscard}
         >
-          Discard Draft
+          {t("Discard Draft")}
         </Button>
         <CreateTaskButton draft={draft} submitting={submitting} onCreate={onCreate} />
       </DialogFooter>
@@ -187,12 +190,13 @@ export function CreateTaskButton({
   submitting: boolean;
   onCreate: () => void;
 }) {
+  const { t } = useI18n();
   const missingTitle = !draft.title.trim();
   const missingProject = !draft.projectId;
   const disabled = missingTitle || missingProject || submitting;
   let reason: string | null = null;
-  if (missingProject) reason = "Select a project to create a task";
-  else if (missingTitle) reason = "Add a title to create a task";
+  if (missingProject) reason = t("Select a project to create a task");
+  else if (missingTitle) reason = t("Add a title to create a task");
 
   const button = (
     <Button
@@ -201,7 +205,7 @@ export function CreateTaskButton({
       className="cursor-pointer"
       data-testid="new-task-create-button"
     >
-      {submitting ? "Creating..." : "Create Task"}
+      {t(submitting ? "Creating..." : "Create Task")}
     </Button>
   );
 

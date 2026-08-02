@@ -5,6 +5,7 @@ import { Button } from "@kandev/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@kandev/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@kandev/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { translate } from "@/lib/i18n/locale";
 import type { TaskGroupBy } from "@/lib/state/slices/office/types";
 
 const GROUP_OPTIONS: { value: TaskGroupBy; label: string }[] = [
@@ -36,10 +37,10 @@ export function TaskGroup({ groupBy, onGroupByChange }: IssueGroupProps) {
             </Button>
           </PopoverTrigger>
         </TooltipTrigger>
-        <TooltipContent>Group by</TooltipContent>
+          <TooltipContent>{translate("Group by")}</TooltipContent>
       </Tooltip>
       <PopoverContent className="w-44 p-2" align="end">
-        <p className="text-xs font-medium px-2 mb-1">Group by</p>
+        <p className="text-xs font-medium px-2 mb-1">{translate("Group by")}</p>
         <div className="flex flex-col gap-0.5">
           {GROUP_OPTIONS.map((opt) => (
             <button
@@ -52,7 +53,7 @@ export function TaskGroup({ groupBy, onGroupByChange }: IssueGroupProps) {
                   : "hover:bg-muted",
               )}
             >
-              {opt.label}
+              {translate(opt.label)}
             </button>
           ))}
         </div>

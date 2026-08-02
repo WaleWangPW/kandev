@@ -39,13 +39,13 @@ describe("CreateTaskButton", () => {
     renderButton({ title: "do thing" });
     expect(getButton().disabled).toBe(true);
     // The tooltip content is rendered as accessible-name on the wrapper.
-    expect(screen.getByLabelText(/select a project to create a task/i)).toBeTruthy();
+    expect(screen.getByLabelText("请先选择项目")).toBeTruthy();
   });
 
   it("disables the button and labels missing title when title empty", () => {
     renderButton({ projectId: "proj-1" });
     expect(getButton().disabled).toBe(true);
-    expect(screen.getByLabelText(/add a title to create a task/i)).toBeTruthy();
+    expect(screen.getByLabelText("请先填写任务标题")).toBeTruthy();
   });
 
   it("enables the button without a tooltip when both title and project are set", () => {
@@ -66,7 +66,7 @@ describe("CreateTaskButton", () => {
     );
     const button = getButton();
     expect(button.disabled).toBe(true);
-    expect(button.textContent).toBe("Creating...");
+    expect(button.textContent).toBe("正在创建…");
     expect(screen.queryByLabelText(/create a task/i)).toBeNull();
   });
 });
