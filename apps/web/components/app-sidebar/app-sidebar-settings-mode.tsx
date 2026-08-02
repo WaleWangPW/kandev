@@ -3,6 +3,7 @@
 import { usePathname } from "@/lib/routing/client-router";
 import { IconSettings, IconChevronLeft } from "@tabler/icons-react";
 import { useAppStore } from "@/components/state-provider";
+import { translate } from "@/lib/i18n/locale";
 import { SettingsTree } from "./sections/settings/settings-tree";
 
 /**
@@ -33,7 +34,7 @@ export function AppSidebarSettingsMode() {
       >
         <IconSettings className="h-3.5 w-3.5 group-hover/close:hidden" />
         <IconChevronLeft className="h-3.5 w-3.5 hidden group-hover/close:block" />
-        <span className="text-[11px] font-semibold uppercase tracking-wider">Settings</span>
+        <span className="text-[11px] font-semibold uppercase tracking-wider">{translate("Settings")}</span>
       </button>
       <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-0.5">
         <SettingsTree pathname={pathname} />

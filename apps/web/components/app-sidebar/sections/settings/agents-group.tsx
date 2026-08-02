@@ -4,6 +4,7 @@ import { IconRobot } from "@tabler/icons-react";
 import { AgentLogo } from "@/components/agent-logo";
 import { useAppStore } from "@/components/state-provider";
 import { useAvailableAgents } from "@/hooks/domains/settings/use-available-agents";
+import { translate } from "@/lib/i18n/locale";
 import { SettingsGroup, SettingsLeaf } from "./settings-nav-primitives";
 
 const ROOT_HREF = "/settings/agents";
@@ -20,7 +21,7 @@ export function AgentsGroup({ pathname, expanded, onToggle }: AgentsGroupProps) 
 
   return (
     <SettingsGroup
-      label="Agents"
+      label={translate("Agents")}
       icon={IconRobot}
       href={ROOT_HREF}
       isActive={pathname === ROOT_HREF}

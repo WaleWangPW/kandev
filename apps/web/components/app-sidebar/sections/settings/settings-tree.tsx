@@ -12,6 +12,7 @@ import {
 import { PluginSlot } from "@/components/plugins/plugin-slot";
 import { useAppStore } from "@/components/state-provider";
 import { useFeature } from "@/hooks/domains/features/use-feature";
+import { translate } from "@/lib/i18n/locale";
 import { AccountGroup } from "./account-group";
 import { AgentsGroup } from "./agents-group";
 import { ExecutorsGroup } from "./executors-group";
@@ -83,19 +84,19 @@ export function SettingsTree({ pathname }: { pathname: string }) {
       <AgentsGroup pathname={pathname} {...groupProps("agents")} />
       <SettingsLeaf
         href={PROMPTS_HREF}
-        label="Prompts"
+        label={translate("Prompts")}
         icon={IconMessageCircle}
         isActive={pathname === PROMPTS_HREF}
       />
       <SettingsLeaf
         href={VOICE_MODE_HREF}
-        label="Voice Mode"
+        label={translate("Voice Mode")}
         icon={IconMicrophone}
         isActive={pathname === VOICE_MODE_HREF}
       />
       <SettingsLeaf
         href={UTILITY_HREF}
-        label="Utility Agents"
+        label={translate("Utility Agents")}
         icon={IconWand}
         isActive={pathname === UTILITY_HREF}
       />
@@ -103,20 +104,20 @@ export function SettingsTree({ pathname }: { pathname: string }) {
       {/* Editors lives under General (see GeneralGroup) — no duplicate top-level leaf. */}
       <SettingsLeaf
         href={SECRETS_HREF}
-        label="Secrets"
+        label={translate("Secrets")}
         icon={IconKey}
         isActive={pathname === SECRETS_HREF}
       />
       <SettingsLeaf
         href={EXT_MCP_HREF}
-        label="External MCP"
+        label={translate("External MCP")}
         icon={IconPlugConnected}
         isActive={pathname === EXT_MCP_HREF}
       />
       <PluginSlot name="settings-nav" />
       <SettingsLeaf
         href={PLUGINS_HREF}
-        label="Plugins"
+        label={translate("Plugins")}
         icon={IconPuzzle}
         isActive={pathname === PLUGINS_HREF}
       />

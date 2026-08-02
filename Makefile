@@ -225,7 +225,7 @@ desktop-dev: desktop-runtime
 
 .PHONY: desktop-build
 desktop-build: desktop-runtime
-	@cd $(DESKTOP_DIR) && $(PNPM) tauri build --features desktop-runtime --bundles "$(DESKTOP_BUNDLES)"
+	@cd $(DESKTOP_DIR) && $(PNPM) tauri build --features desktop-runtime --bundles "$(DESKTOP_BUNDLES)" -- --bin kandev-desktop
 
 .PHONY: desktop-open
 desktop-open: desktop-build

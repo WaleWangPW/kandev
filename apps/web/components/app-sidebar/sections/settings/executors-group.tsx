@@ -3,6 +3,7 @@
 import { IconCpu } from "@tabler/icons-react";
 import { useAppStore } from "@/components/state-provider";
 import { getExecutorIcon } from "@/lib/executor-icons";
+import { translate } from "@/lib/i18n/locale";
 import { SettingsGroup, SettingsLeaf } from "./settings-nav-primitives";
 
 const ROOT_HREF = "/settings/executors";
@@ -21,7 +22,7 @@ export function ExecutorsGroup({ pathname, expanded, onToggle }: ExecutorsGroupP
 
   return (
     <SettingsGroup
-      label="Executors"
+      label={translate("Executors")}
       icon={IconCpu}
       href={ROOT_HREF}
       isActive={pathname === ROOT_HREF}

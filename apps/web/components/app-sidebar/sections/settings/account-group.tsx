@@ -1,6 +1,7 @@
 "use client";
 
 import { IconKey, IconShieldLock, IconUserCircle } from "@tabler/icons-react";
+import { translate } from "@/lib/i18n/locale";
 import { SettingsGroup, SettingsLeaf } from "./settings-nav-primitives";
 
 const ROOT_HREF = "/settings/account";
@@ -20,7 +21,7 @@ type AccountGroupProps = {
 export function AccountGroup({ pathname, expanded, onToggle }: AccountGroupProps) {
   return (
     <SettingsGroup
-      label="Account"
+      label={translate("Account")}
       icon={IconUserCircle}
       href={DEFAULT_HREF}
       isActive={pathname.startsWith(ROOT_HREF)}
@@ -31,7 +32,7 @@ export function AccountGroup({ pathname, expanded, onToggle }: AccountGroupProps
         <SettingsLeaf
           key={href}
           href={href}
-          label={label}
+          label={translate(label)}
           icon={icon}
           isActive={pathname === href}
           depth={1}

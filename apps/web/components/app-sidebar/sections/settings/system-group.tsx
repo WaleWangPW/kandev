@@ -16,6 +16,7 @@ import {
 import type { Icon as TablerIcon } from "@tabler/icons-react";
 import { useAppStore } from "@/components/state-provider";
 import { useFeature } from "@/hooks/domains/features/use-feature";
+import { translate } from "@/lib/i18n/locale";
 import { SettingsGroup, SettingsLeaf } from "./settings-nav-primitives";
 
 const ROOT_HREF = "/settings/system";
@@ -56,7 +57,7 @@ export function SystemGroup({ pathname, expanded, onToggle }: SystemGroupProps) 
 
   return (
     <SettingsGroup
-      label="System"
+      label={translate("System")}
       icon={IconServerCog}
       href={DEFAULT_HREF}
       isActive={pathname.startsWith(ROOT_HREF)}
@@ -67,7 +68,7 @@ export function SystemGroup({ pathname, expanded, onToggle }: SystemGroupProps) 
         <SettingsLeaf
           key={href}
           href={href}
-          label={label}
+          label={translate(label)}
           icon={icon}
           isActive={pathname === href}
           depth={1}

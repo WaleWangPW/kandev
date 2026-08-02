@@ -2,6 +2,7 @@
 
 import { IconSettings } from "@tabler/icons-react";
 import { GENERAL_NAV_ITEMS } from "@/components/settings/general-nav";
+import { translate } from "@/lib/i18n/locale";
 import { SettingsGroup, SettingsLeaf } from "./settings-nav-primitives";
 
 const GENERAL_HREF = "/settings/general";
@@ -15,7 +16,7 @@ type GeneralGroupProps = {
 export function GeneralGroup({ pathname, expanded, onToggle }: GeneralGroupProps) {
   return (
     <SettingsGroup
-      label="General"
+      label={translate("General")}
       icon={IconSettings}
       href={GENERAL_HREF}
       isActive={pathname === GENERAL_HREF}

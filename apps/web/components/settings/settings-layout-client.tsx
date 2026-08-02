@@ -17,6 +17,7 @@ import { safeDecodePathSegment } from "@/lib/routing/path";
 import { SettingsSaveProvider } from "@/components/settings/settings-save-provider";
 import { connectionIssueDetails } from "@/components/app-status-bar/connection-status-item";
 import { cn } from "@/lib/utils";
+import { translate } from "@/lib/i18n/locale";
 
 // Brand/initialism overrides so the derived label matches how the rest of the
 // app spells these (e.g. "github" → "GitHub", not "Github"). Anything not
@@ -50,7 +51,7 @@ function deriveCurrentPageLabel(pathname: string): string | null {
   for (let i = segments.length - 1; i >= 1; i--) {
     const seg = segments[i];
     if (/^[0-9a-f-]{8,}$/i.test(seg)) continue; // skip ids
-    return titleCase(seg);
+    return translate(titleCase(seg));
   }
   return null;
 }
@@ -64,7 +65,7 @@ function deriveParents(pathname: string): Array<{ label: string; href: string }>
   if (segments.length <= 1) return [];
 
   const parents: Array<{ label: string; href: string }> = [
-    { label: "Settings", href: "/settings" },
+    { label: translate("Settings"), href: "/settings" },
   ];
 
   const automationsMatch = pathname.match(
@@ -75,7 +76,7 @@ function deriveParents(pathname: string): Array<{ label: string; href: string }>
     // edit), not on the listing page itself — the listing page title is
     // already "Automations".
     parents.push({
-      label: "Automations",
+      label: translate("Automations"),
       href: `/settings/workspace/${automationsMatch[1]}/automations`,
     });
   }
@@ -91,9 +92,9 @@ export function SettingsLayoutClient({ children }: { children: React.ReactNode }
   if (isAgentDetail) {
     return (
       <SettingsShell
-        title="Agent"
+        title={translate("Agent")}
         backHref="/settings/agents"
-        backLabel="Agents"
+        backLabel={translate("Agents")}
         parents={[]}
         showIntegrationCopyAction={showIntegrationCopyAction}
       >
@@ -103,7 +104,7 @@ export function SettingsLayoutClient({ children }: { children: React.ReactNode }
   }
 
   const pageLabel = deriveCurrentPageLabel(pathname);
-  const title = pageLabel ?? "Settings";
+  const title = pageLabel ?? translate("Settings");
   const parents = deriveParents(pathname);
 
   return (
@@ -194,7 +195,7 @@ function SettingsMobileMenu({ pathname }: { pathname: string }) {
         data-testid="settings-mobile-menu"
       >
         <SheetHeader className="border-b px-4 py-3 text-left">
-          <SheetTitle>Settings</SheetTitle>
+          <SheetTitle>{translate("Settings")}</SheetTitle>
         </SheetHeader>
         <nav className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3">
           {statusDrawerEnabled && (
