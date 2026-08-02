@@ -111,8 +111,8 @@ describe("PrepareProgress", () => {
 
     render(<PrepareProgress sessionId="session-1" />);
 
-    expect(screen.getByText("已在新的隔离环境中完成准备")).toBeTruthy();
-    expect(screen.queryByText("环境已准备就绪，但有警告")).toBeNull();
+    expect(screen.getByText("Environment prepared on a fresh sandbox")).toBeTruthy();
+    expect(screen.queryByText("Environment prepared with warnings")).toBeNull();
   });
 
   it("uses the generic warnings header when warnings are unrelated to fallback", () => {
@@ -128,8 +128,8 @@ describe("PrepareProgress", () => {
 
     render(<PrepareProgress sessionId="session-1" />);
 
-    expect(screen.getByText("环境已准备就绪，但有警告")).toBeTruthy();
-    expect(screen.queryByText("已在新的隔离环境中完成准备")).toBeNull();
+    expect(screen.getByText("Environment prepared with warnings")).toBeTruthy();
+    expect(screen.queryByText("Environment prepared on a fresh sandbox")).toBeNull();
   });
 
   it("keeps failed preparation diagnostics collapsed until requested", () => {
@@ -148,11 +148,11 @@ describe("PrepareProgress", () => {
 
     render(<PrepareProgress sessionId="session-1" />);
 
-    expect(screen.getByText("环境准备失败")).toBeTruthy();
+    expect(screen.getByText("Environment setup failed")).toBeTruthy();
     expect(screen.queryByText(/branch feature\/very-long-name not found/)).toBeNull();
     expect(screen.queryByText(CREATE_WORKTREE)).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "显示环境准备详情" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show preparation details" }));
 
     expect(screen.getByText(/branch feature\/very-long-name not found/)).toBeTruthy();
     expect(screen.getByText(CREATE_WORKTREE)).toBeTruthy();
@@ -211,7 +211,7 @@ describe("PrepareProgress per-repo setup script", () => {
 
     render(<PrepareProgress sessionId="session-1" />);
 
-    fireEvent.click(screen.getByRole("button", { name: "显示环境准备详情" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show preparation details" }));
     expect(screen.getByText("Script exited with code 2")).toBeTruthy();
   });
 });

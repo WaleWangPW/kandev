@@ -1,6 +1,16 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { formatTaskStateLabel, formatTaskSessionStateLabel } from "./state-labels";
 import type { TaskState, TaskSessionState } from "@/lib/types/http";
+
+const TEST_LOCALE_KEY = "__KANDEV_TEST_UI_LOCALE__";
+
+beforeEach(() => {
+  (globalThis as Record<string, unknown>)[TEST_LOCALE_KEY] = "zh-CN";
+});
+
+afterEach(() => {
+  (globalThis as Record<string, unknown>)[TEST_LOCALE_KEY] = "en";
+});
 
 describe("formatTaskStateLabel", () => {
   it("maps known task states to human labels", () => {

@@ -6,6 +6,7 @@ export type UiLocale = (typeof UI_LOCALES)[number];
 const STORAGE_KEY = "kandev.ui.locale";
 const LOCALE_CHANGE_EVENT = "kandev:ui-locale-change";
 const DEFAULT_LOCALE: UiLocale = "zh-CN";
+const TEST_LOCALE_KEY = "__KANDEV_TEST_UI_LOCALE__";
 
 const ZH_CN: Record<string, string> = {
   Home: "主页",
@@ -154,7 +155,14 @@ function isUiLocale(value: string | null): value is UiLocale {
   return value !== null && UI_LOCALES.includes(value as UiLocale);
 }
 
+function getTestLocale(): UiLocale | null {
+  const value = (globalThis as Record<string, unknown>)[TEST_LOCALE_KEY];
+  return typeof value === "string" && isUiLocale(value) ? value : null;
+}
+
 export function getUiLocale(): UiLocale {
+  const testLocale = getTestLocale();
+  if (testLocale) return testLocale;
   if (typeof window === "undefined") return DEFAULT_LOCALE;
   try {
     const stored = window.localStorage.getItem(STORAGE_KEY);

@@ -1,5 +1,12 @@
-import { describe, expect, it } from "vitest";
-import { translate } from "./locale";
+import { afterEach, describe, expect, it } from "vitest";
+import { getUiLocale, translate } from "./locale";
+
+const TEST_LOCALE_KEY = "__KANDEV_TEST_UI_LOCALE__";
+
+afterEach(() => {
+  (globalThis as Record<string, unknown>)[TEST_LOCALE_KEY] = "en";
+  globalThis.localStorage.clear();
+});
 
 describe("translate", () => {
   it("translates the standard workflow labels without changing unknown names", () => {
@@ -12,5 +19,10 @@ describe("translate", () => {
 
   it("keeps the original text when English is selected", () => {
     expect(translate("New Task", "en")).toBe("New Task");
+  });
+
+  it("defaults to Simplified Chinese outside the test-only locale override", () => {
+    delete (globalThis as Record<string, unknown>)[TEST_LOCALE_KEY];
+    expect(getUiLocale()).toBe("zh-CN");
   });
 });

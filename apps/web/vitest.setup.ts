@@ -32,6 +32,11 @@ Object.defineProperty(globalThis, "localStorage", {
   value: localStorageMock,
 });
 
+// Product default is Simplified Chinese. Existing unit tests intentionally
+// exercise the upstream English baseline unless a locale-specific test opts
+// out, so translation does not force unrelated assertions to be rewritten.
+(globalThis as Record<string, unknown>).__KANDEV_TEST_UI_LOCALE__ = "en";
+
 if (typeof window !== "undefined") {
   const happyDOMWindow = window as unknown as HappyDOMWindow;
   happyDOMWindow.happyDOM.settings.fetch.interceptor = {
