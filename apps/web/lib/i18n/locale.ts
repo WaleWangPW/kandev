@@ -431,6 +431,11 @@ const LEGACY_ZH_CN: Record<string, string> = {
   "Syncs only run when you press Sync now.": "仅在你点击“立即同步”时执行同步。",
   "Automatically sync workflow definitions from a GitHub repository into this workspace.":
     "自动将 GitHub 仓库中的工作流定义同步到此工作区。",
+  "The directory should contain workflow export files (.yml/.yaml/.json) in the kandev_workflow format — the same format produced by workflow export.":
+    "目录应包含 kandev_workflow 格式的工作流导出文件（.yml/.yaml/.json）——即工作流导出生成的相同格式。",
+  Syncing: "正在同步",
+  directory: "目录",
+  "(repository root)": "（仓库根目录）",
   seconds: "秒",
   "GitHub Sync": "GitHub 同步",
   "Invite a user": "邀请用户",

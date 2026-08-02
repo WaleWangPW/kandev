@@ -18,8 +18,9 @@ import type {
 } from "@/hooks/domains/settings/use-workflow-sync";
 import { translate } from "@/lib/i18n/locale";
 
-const HELP_TEXT =
-  "The directory should contain workflow export files (.yml/.yaml/.json) in the kandev_workflow format — the same format produced by workflow export.";
+const HELP_TEXT = translate(
+  "The directory should contain workflow export files (.yml/.yaml/.json) in the kandev_workflow format — the same format produced by workflow export.",
+);
 
 type RepoUrlFieldProps = {
   url: string;
@@ -127,7 +128,7 @@ export function WorkflowSyncDialog({ open, onOpenChange, sync }: WorkflowSyncDia
     !sync.form.repo_owner.trim() ||
     !sync.form.repo_name.trim();
   const resolved = sync.form.repo_owner
-    ? `Syncing ${sync.form.repo_owner}/${sync.form.repo_name} @ ${sync.form.branch || "main"} — directory ${sync.form.path || "(repository root)"}.`
+    ? `${translate("Syncing")} ${sync.form.repo_owner}/${sync.form.repo_name} @ ${sync.form.branch || "main"} — ${translate("directory")} ${sync.form.path || translate("(repository root)")}.`
     : "";
 
   const handleSave = async () => {
