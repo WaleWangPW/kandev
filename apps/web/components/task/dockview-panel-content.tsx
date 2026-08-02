@@ -24,6 +24,7 @@ import { TaskChatPanel } from "./task-chat-panel";
 import { TaskPlanPanel } from "./task-plan-panel";
 import { TerminalPanel } from "./terminal-panel";
 import { VscodePanel } from "./vscode-panel";
+import { translate } from "@/lib/i18n/locale";
 
 export const CHAT_PANEL_FALLBACK_LABEL = "Agent";
 
@@ -134,7 +135,7 @@ function ChangesContent({ panelId }: { panelId: string }) {
   const totalCount = useSessionChangesCount(activeSessionId);
 
   useEffect(() => {
-    const title = totalCount > 0 ? `Changes (${totalCount})` : "Changes";
+    const title = totalCount > 0 ? `${translate("Changes")} (${totalCount})` : translate("Changes");
     setPanelTitle(panelId, title);
   }, [totalCount, panelId]);
 

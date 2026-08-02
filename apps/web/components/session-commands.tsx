@@ -29,6 +29,7 @@ import { useDockviewStore } from "@/lib/state/dockview-store";
 import { NewSessionDialog } from "@/components/task/new-session-dialog";
 import { NewSubtaskDialog } from "@/components/task/new-subtask-dialog";
 import type { CommandItem } from "@/lib/commands/types";
+import { translate } from "@/lib/i18n/locale";
 
 type SessionCommandsProps = {
   sessionId: string | null;
@@ -53,7 +54,7 @@ function buildSessionCommands(
   if (isAgentRunning)
     items.push({
       id: "session-cancel",
-      label: "Cancel Turn",
+      label: translate("Cancel Turn"),
       group: "Agent",
       icon: <IconPlayerStop className="size-3.5" />,
       keywords: ["cancel", "stop", "turn", "cancel agent", "stop agent", "interrupt agent"],
@@ -72,7 +73,7 @@ function buildGitCommands(
   return [
     {
       id: "git-commit",
-      label: "Commit Changes",
+      label: translate("Commit Changes"),
       group: "Git",
       icon: <IconGitCommit className="size-3.5" />,
       keywords: ["commit", "git", "save changes", "git commit"],
@@ -80,7 +81,7 @@ function buildGitCommands(
     },
     {
       id: "git-push",
-      label: "Push",
+      label: translate("Push"),
       group: "Git",
       icon: <IconArrowUp className="size-3.5" />,
       keywords: ["push", "git", "push changes", "push to remote", "upload changes"],
@@ -88,7 +89,7 @@ function buildGitCommands(
     },
     {
       id: "git-pull",
-      label: "Pull",
+      label: translate("Pull"),
       group: "Git",
       icon: <IconArrowDown className="size-3.5" />,
       keywords: ["pull", "git", "pull changes", "download changes"],
@@ -96,7 +97,7 @@ function buildGitCommands(
     },
     {
       id: "git-create-pr",
-      label: "Create PR",
+      label: translate("Create PR"),
       group: "Git",
       icon: <IconGitPullRequest className="size-3.5" />,
       keywords: ["pull request", "pr", "open pull request", "submit pull request", "git"],
@@ -104,7 +105,7 @@ function buildGitCommands(
     },
     {
       id: "git-rebase",
-      label: "Rebase",
+      label: translate("Rebase"),
       group: "Git",
       icon: <IconGitBranch className="size-3.5" />,
       keywords: ["rebase", "git", "branch"],
@@ -115,7 +116,7 @@ function buildGitCommands(
     },
     {
       id: "git-merge",
-      label: "Merge",
+      label: translate("Merge"),
       group: "Git",
       icon: <IconGitMerge className="size-3.5" />,
       keywords: ["merge", "git", "branch"],
@@ -131,8 +132,8 @@ function buildWorkspaceCommands(sessionId: string): CommandItem[] {
   return [
     {
       id: "workspace-create-file",
-      label: "Create File",
-      group: "Workspace",
+      label: translate("Create File"),
+      group: translate("Workspace"),
       icon: <IconFilePlus className="size-3.5" />,
       keywords: ["create", "new", "file", "add"],
       enterMode: "input",
@@ -163,7 +164,7 @@ function buildTaskCommands(
   return [
     {
       id: "agent-new",
-      label: "New Agent",
+      label: translate("New Agent"),
       group: "Agent",
       icon: <IconMessagePlus className="size-3.5" />,
       keywords: ["new", "agent", "session", "start agent", "new session"],
@@ -171,7 +172,7 @@ function buildTaskCommands(
     },
     {
       id: "subtask-create",
-      label: "Create Subtask",
+      label: translate("Create Subtask"),
       group: "Tasks",
       icon: <IconSubtask className="size-3.5" />,
       keywords: ["subtask", "create", "new subtask", "new sub-task", "child task"],
@@ -187,7 +188,7 @@ function buildPanelCommands(
   const items: CommandItem[] = [
     {
       id: "panel-browser",
-      label: "Add Browser Panel",
+      label: translate("Add Browser Panel"),
       group: "Panels",
       icon: <IconBrowser className="size-3.5" />,
       keywords: ["browser", "preview", "web", "open browser preview", "web preview", "app preview"],
@@ -195,7 +196,7 @@ function buildPanelCommands(
     },
     {
       id: "panel-terminal",
-      label: "Add Terminal Panel",
+      label: translate("Add Terminal Panel"),
       group: "Panels",
       icon: <IconTerminal2 className="size-3.5" />,
       keywords: ["terminal", "shell", "console", "new terminal", "open terminal", "command line"],
@@ -205,7 +206,7 @@ function buildPanelCommands(
   if (!isPassthrough)
     items.push({
       id: "panel-plan",
-      label: "Add Plan Panel",
+      label: translate("Add Plan Panel"),
       group: "Panels",
       icon: <IconFileText className="size-3.5" />,
       keywords: ["plan", "document", "task plan", "implementation plan", "plan details"],
@@ -214,7 +215,7 @@ function buildPanelCommands(
   items.push({
     id: "panel-changes",
     label: "Add Changes Panel",
-    group: "Panels",
+    group: translate("Panels"),
     icon: <IconFileDiff className="size-3.5" />,
     keywords: [
       "changes",

@@ -275,6 +275,7 @@ export function LastAgentErrorNotice({
   sessionId: string | null;
   error: LastAgentError | null;
 }) {
+  const { t } = useI18n();
   const stamp = error ? lastAgentErrorStamp(error) : "";
   const dismissedStamp = useAppStore((state) =>
     sessionId ? state.dismissedAgentErrors[sessionId] : undefined,
@@ -318,7 +319,7 @@ export function LastAgentErrorNotice({
         <button
           type="button"
           className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded hover:bg-destructive/10 cursor-pointer"
-          aria-label="Hide previous agent error"
+          aria-label={t("Hide previous agent error")}
           onClick={dismiss}
         >
           <IconX className="h-3.5 w-3.5" aria-hidden="true" />

@@ -15,6 +15,7 @@ import { Badge } from "@kandev/ui/badge";
 import type { MobileSessionPanel } from "@/lib/state/slices/ui/types";
 import type { ConnectionIssueSeverity } from "@/lib/types/connection";
 import { connectionIssueDetails } from "@/components/app-status-bar/connection-status-item";
+import { useI18n } from "@/lib/i18n/locale";
 
 type SessionMobileBottomNavProps = {
   activePanel: MobileSessionPanel;
@@ -44,16 +45,17 @@ export function SessionMobileBottomNav({
   onOpenStatus,
   connectionIssueSeverity = "none",
 }: SessionMobileBottomNavProps) {
+  const { t } = useI18n();
   const items: NavItem[] = useMemo(
     () => [
       {
         panel: "chat",
-        label: "Chat",
+        label: t("Chat"),
         icon: <IconMessage className="h-5 w-5" />,
       },
       {
         panel: "plan",
-        label: "Plan",
+        label: t("Plan"),
         icon: <IconListCheck className="h-5 w-5" />,
         badge: planBadge ? (
           <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-amber-500" />
@@ -61,7 +63,7 @@ export function SessionMobileBottomNav({
       },
       {
         panel: "changes",
-        label: "Changes",
+        label: t("Changes"),
         icon: <IconGitBranch className="h-5 w-5" />,
         badge:
           changesBadge > 0 ? (
@@ -75,27 +77,27 @@ export function SessionMobileBottomNav({
       },
       {
         panel: "files",
-        label: "Files",
+        label: t("Files"),
         icon: <IconFolder className="h-5 w-5" />,
       },
       ...(hasReview
         ? [
             {
               panel: "review" as const,
-              label: "Review",
+              label: t("Review"),
               icon: <IconGitMerge className="h-5 w-5" />,
             },
           ]
         : []),
       {
         panel: "terminal",
-        label: "Terminal",
+        label: t("Terminal"),
         icon: <IconTerminal2 className="h-5 w-5" />,
       },
       ...(showStatus
         ? [
             {
-              label: "Status",
+              label: t("Status"),
               icon: <IconActivity className="h-5 w-5" />,
               onClick: onOpenStatus,
               ...(connectionIssueSeverity !== "none" && { connectionIssueSeverity }),
@@ -103,7 +105,7 @@ export function SessionMobileBottomNav({
           ]
         : []),
     ],
-    [planBadge, changesBadge, hasReview, showStatus, onOpenStatus, connectionIssueSeverity],
+    [planBadge, changesBadge, hasReview, showStatus, onOpenStatus, connectionIssueSeverity, t],
   );
 
   return (

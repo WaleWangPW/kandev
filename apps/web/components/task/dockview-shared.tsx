@@ -12,6 +12,7 @@ import { useFileEditors } from "@/hooks/use-file-editors";
 import { usePanelActive } from "@/hooks/use-panel-active";
 import { useSessionGitStatus } from "@/hooks/domains/session/use-session-git-status";
 import { useSessionCommits } from "@/hooks/domains/session/use-session-commits";
+import { translate } from "@/lib/i18n/locale";
 import { useEnvironmentSessionId } from "@/hooks/use-environment-session-id";
 import type { ReviewSource } from "@/hooks/domains/session/use-review-sources";
 
@@ -306,7 +307,7 @@ function ChangesContent({ panelId }: { panelId: string }) {
   const totalCount = fileCount + commits.length;
 
   useEffect(() => {
-    const title = totalCount > 0 ? `Changes (${totalCount})` : "Changes";
+    const title = totalCount > 0 ? `${translate("Changes")} (${totalCount})` : translate("Changes");
     setPanelTitle(panelId, title);
   }, [totalCount, panelId]);
 

@@ -22,6 +22,7 @@ import type {
   PrepareStepInfo,
   SessionPrepareState,
 } from "@/lib/state/slices/session-runtime/types";
+import { useI18n } from "@/lib/i18n/locale";
 
 const debug = createDebugLogger("chat:prepare-progress");
 
@@ -461,6 +462,7 @@ function hasPrepareDetails(
 }
 
 export function PrepareProgress({ sessionId }: PrepareProgressProps) {
+  const { t } = useI18n();
   const { status, prepareState } = usePrepareStatus(sessionId);
   const session = useAppStore((state) => state.taskSessions.items[sessionId]);
   const setupScriptSteps = useSetupScriptSteps(sessionId);
@@ -526,20 +528,20 @@ export function PrepareProgress({ sessionId }: PrepareProgressProps) {
               data-testid="prepare-progress-toggle"
               className={cn(headerClass, "min-w-0 break-words font-medium")}
             >
-              {headerLabel}
+              {t(headerLabel)}
             </span>
             {hasExpandableContent && (
               <button
                 type="button"
                 aria-expanded={expanded}
-                aria-label={expanded ? "Hide preparation details" : "Show preparation details"}
+                aria-label={t(expanded ? "Hide preparation details" : "Show preparation details")}
                 className="min-h-11 cursor-pointer text-xs text-muted-foreground underline-offset-4 hover:underline sm:min-h-0"
                 onClick={(event) => {
                   event.stopPropagation();
                   setExpanded(!expanded);
                 }}
               >
-                {expanded ? "Hide details" : "Show details"}
+                {t(expanded ? "Hide details" : "Show details")}
               </button>
             )}
           </div>
