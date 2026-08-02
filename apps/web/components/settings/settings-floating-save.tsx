@@ -17,6 +17,7 @@ import { createPortal } from "react-dom";
 import { useConfigChatFloatingActionsHost } from "@/components/config-chat/config-chat-provider";
 import type { NavigationIntent } from "@/lib/routing/navigation-guard";
 import { cn } from "@/lib/utils";
+import { translate } from "@/lib/i18n/locale";
 
 export type SettingsSaveStatus = "dirty" | "saving" | "saved" | "error";
 
@@ -45,7 +46,7 @@ export function SettingsFloatingSave({
   const isSaved = status === "saved";
   const isInvalid = Boolean(invalidReason);
   const isBusy = isSaving || isDiscarding;
-  const buttonLabel = status === "error" ? "Retry save" : "Save changes";
+  const buttonLabel = status === "error" ? translate("Retry save") : translate("Save changes");
   const accessibleLabel = getAccessibleLabel(status, buttonLabel);
   const configChatFloatingActionsHost = useConfigChatFloatingActionsHost();
   const isHostedByConfigChat = configChatFloatingActionsHost !== null;
@@ -63,7 +64,7 @@ export function SettingsFloatingSave({
         {status === "error" && (
           <span className="flex items-center gap-1 text-xs text-destructive" role="status">
             <IconAlertCircle className="size-4" />
-            Couldn't save
+            {translate("Couldn't save")}
           </span>
         )}
         {invalidReason && (
@@ -80,7 +81,9 @@ export function SettingsFloatingSave({
           onClick={() => void onSave()}
         >
           <SaveButtonIcon status={status} />
-          {accessibleLabel === "Saving changes" ? "Saving..." : accessibleLabel}
+          {accessibleLabel === translate("Saving changes")
+            ? translate("Saving...")
+            : accessibleLabel}
         </Button>
       </div>
     </div>
@@ -93,9 +96,9 @@ export function SettingsFloatingSave({
       <AlertDialog open={navigationIntent !== null}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Save changes before leaving?</AlertDialogTitle>
+          <AlertDialogTitle>{translate("Save changes before leaving?")}</AlertDialogTitle>
             <AlertDialogDescription>
-              This page has unsaved changes. Save them, discard them, or continue editing.
+              {translate("This page has unsaved changes. Save them, discard them, or continue editing.")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -104,7 +107,7 @@ export function SettingsFloatingSave({
               disabled={isBusy}
               onClick={onContinueEditing}
             >
-              Continue editing
+              {translate("Continue editing")}
             </AlertDialogCancel>
             <Button
               type="button"
@@ -113,7 +116,7 @@ export function SettingsFloatingSave({
               disabled={isBusy}
               onClick={() => void onDiscardAndLeave()}
             >
-              {isDiscarding ? "Discarding..." : "Discard and leave"}
+              {isDiscarding ? translate("Discarding...") : translate("Discard and leave")}
             </Button>
             <AlertDialogAction
               className="cursor-pointer bg-success text-success-foreground hover:bg-success/85 focus-visible:border-success focus-visible:ring-success/35"
@@ -124,7 +127,7 @@ export function SettingsFloatingSave({
                 void onSave();
               }}
             >
-              {isSaving ? "Saving..." : "Save and leave"}
+              {isSaving ? translate("Saving...") : translate("Save and leave")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -140,7 +143,7 @@ function SaveButtonIcon({ status }: { status: SettingsSaveStatus }) {
 }
 
 function getAccessibleLabel(status: SettingsSaveStatus, buttonLabel: string): string {
-  if (status === "saving") return "Saving changes";
-  if (status === "saved") return "Saved";
+  if (status === "saving") return translate("Saving changes");
+  if (status === "saved") return translate("Saved");
   return buttonLabel;
 }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { getUiLocale, translate } from "./locale";
+import { getUiLocale, translate, translateRenderedDom } from "./locale";
 
 const TEST_LOCALE_KEY = "__KANDEV_TEST_UI_LOCALE__";
 
@@ -29,6 +29,25 @@ describe("translate", () => {
 
   it("keeps the original text when English is selected", () => {
     expect(translate("New Task", "en")).toBe("New Task");
+  });
+
+  it("covers mounted controls, options, and attributes while preserving authored content", () => {
+    document.body.innerHTML = `
+      <main>
+        <button aria-label="Toggle theme">Toggle theme</button>
+        <label><input placeholder="Search files..." /></label>
+        <select><option>Light</option></select>
+        <div contenteditable="true">Task title</div>
+      </main>
+    `;
+
+    translateRenderedDom(document.body, "zh-CN");
+
+    expect(document.querySelector("button")?.textContent).toBe("切换主题");
+    expect(document.querySelector("button")?.getAttribute("aria-label")).toBe("切换主题");
+    expect(document.querySelector("input")?.getAttribute("placeholder")).toBe("搜索文件…");
+    expect(document.querySelector("option")?.textContent).toBe("浅色");
+    expect(document.querySelector("[contenteditable]")?.textContent).toBe("Task title");
   });
 
   it("defaults to Simplified Chinese outside the test-only locale override", () => {

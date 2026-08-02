@@ -6,6 +6,7 @@ import { Checkbox } from "@kandev/ui/checkbox";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@kandev/ui/tooltip";
 import { EVENT_LABELS } from "@/lib/notifications/events";
 import type { NotificationProvider } from "@/lib/types/http";
+import { translate } from "@/lib/i18n/locale";
 
 type Props = {
   tableProviders: NotificationProvider[];
@@ -19,7 +20,7 @@ function eventMeta(eventType: string) {
   return (
     EVENT_LABELS[eventType] ?? {
       title: eventType,
-      description: "Notify when this event occurs.",
+      description: translate("Notify when this event occurs."),
     }
   );
 }
@@ -44,7 +45,7 @@ function EventCheckbox({
   ).includes(eventType);
   const checkbox = (
     <Checkbox
-      aria-label={`${meta.title} for ${provider.name}`}
+      aria-label={`${meta.title} ${translate("for")} ${provider.name}`}
       checked={checked}
       data-settings-dirty={checked !== baselineChecked}
       onCheckedChange={() => onToggleEvent(provider, eventType)}
@@ -78,13 +79,13 @@ function TestProviderButton({
             variant="ghost"
             size="icon"
             className={mobile ? "h-11 w-11 shrink-0 cursor-pointer" : "h-6 w-6 cursor-pointer"}
-            aria-label={`Send test notification for ${provider.name}`}
+            aria-label={`${translate("Send test notification for")} ${provider.name}`}
             onClick={() => void onTestProvider(provider.id)}
           >
             <IconBell className="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>Send test notification</TooltipContent>
+        <TooltipContent>{translate("Send test notification")}</TooltipContent>
       </Tooltip>
     </TooltipProvider>
   );
@@ -149,7 +150,7 @@ function DesktopEventTable({
       <table className="min-w-full text-sm">
         <thead className="bg-muted/40">
           <tr>
-            <th className="px-4 py-3 text-left font-medium">Notification type</th>
+            <th className="px-4 py-3 text-left font-medium">{translate("Notification type")}</th>
             {tableProviders.map((provider) => (
               <th key={provider.id} className="px-4 py-3 text-center font-medium">
                 <div className="flex items-center justify-center gap-1.5">
@@ -192,7 +193,7 @@ function DesktopEventTable({
 
 export function NotificationEventsTable(props: Props) {
   if (props.tableProviders.length === 0) {
-    return <p className="text-sm text-muted-foreground">No providers configured yet.</p>;
+    return <p className="text-sm text-muted-foreground">{translate("No providers configured yet.")}</p>;
   }
 
   return (

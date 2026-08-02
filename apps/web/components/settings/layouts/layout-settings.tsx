@@ -27,15 +27,16 @@ import { useSettingsSaveContributor } from "@/components/settings/settings-save-
 import { LayoutEditor } from "./layout-editor";
 import { LayoutProfileList } from "./layout-profile-list";
 import { useLayoutSettings } from "./use-layout-settings";
+import { translate } from "@/lib/i18n/locale";
 
 type Controller = ReturnType<typeof useLayoutSettings>;
 
 function defaultActionHelp(selectedSavedDefault: boolean, selectedIsDefault: boolean) {
   if (selectedSavedDefault) {
-    return "Make the original Default layout the starting layout for new tasks.";
+    return translate("Make the original Default layout the starting layout for new tasks.");
   }
-  if (selectedIsDefault) return "This layout is used as the starting layout for new tasks.";
-  return "Use this layout as the starting layout for new tasks.";
+  if (selectedIsDefault) return translate("This layout is used as the starting layout for new tasks.");
+  return translate("Use this layout as the starting layout for new tasks.");
 }
 
 function LayoutSettingsHeader() {
@@ -44,10 +45,10 @@ function LayoutSettingsHeader() {
       <div className="min-w-0">
         <h2 className="flex items-center gap-2 text-2xl font-bold">
           <IconLayoutDashboard className="h-5 w-5" />
-          Layouts
+          {translate("Layouts")}
         </h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          Configure the initial desktop task workbench.
+          {translate("Configure the initial desktop task workbench.")}
         </p>
       </div>
       <Separator />
@@ -64,14 +65,14 @@ function ResetBuiltInButton({ onClick }: { onClick: () => void }) {
           size="sm"
           variant="outline"
           className="min-h-11 cursor-pointer sm:min-h-8"
-          aria-label="Reset built-in layout"
+          aria-label={translate("Reset built-in layout")}
           onClick={onClick}
         >
-          <IconRestore className="h-4 w-4" /> Reset
+          <IconRestore className="h-4 w-4" /> {translate("Reset")}
         </Button>
       </TooltipTrigger>
       <TooltipContent>
-        Restore the original built-in layout and discard its override.
+        {translate("Restore the original built-in layout and discard its override.")}
       </TooltipContent>
     </Tooltip>
   );
@@ -86,13 +87,13 @@ function DeleteProfileButton({ onClick }: { onClick: () => void }) {
           size="icon-sm"
           variant="outline"
           className="min-h-11 min-w-11 cursor-pointer sm:min-h-8 sm:min-w-8"
-          aria-label="Delete layout profile"
+          aria-label={translate("Delete layout profile")}
           onClick={onClick}
         >
           <IconTrash className="h-4 w-4" />
         </Button>
       </TooltipTrigger>
-      <TooltipContent>Delete this custom layout after confirmation.</TooltipContent>
+      <TooltipContent>{translate("Delete this custom layout after confirmation.")}</TooltipContent>
     </Tooltip>
   );
 }
@@ -109,7 +110,7 @@ function SelectedLayoutHeader({
       <div className="min-w-0 flex-1">
         {controller.selectedCustom ? (
           <Input
-            aria-label="Layout profile name"
+            aria-label={translate("Layout profile name")}
             value={controller.selectedCustom.name}
             onChange={(event) => controller.updateSelected({ name: event.target.value })}
             className="min-h-11 max-w-md sm:min-h-9"
@@ -117,8 +118,8 @@ function SelectedLayoutHeader({
         ) : (
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="text-lg font-semibold">{controller.selectedName}</h3>
-            <Badge variant="outline">Built-in</Badge>
-            {controller.selectedBuiltInOverride && <Badge variant="secondary">Customized</Badge>}
+            <Badge variant="outline">{translate("Built-in")}</Badge>
+            {controller.selectedBuiltInOverride && <Badge variant="secondary">{translate("Customized")}</Badge>}
           </div>
         )}
       </div>
@@ -134,7 +135,7 @@ function SelectedLayoutHeader({
                 disabled={controller.defaultActionDisabled}
                 onClick={controller.setDefault}
               >
-                {controller.defaultActionLabel}
+            {translate(controller.defaultActionLabel)}
               </Button>
             </span>
           </TooltipTrigger>
@@ -157,7 +158,7 @@ function SelectedLayoutEditor({ controller }: { controller: Controller }) {
     return (
       <Alert>
         <IconAlertTriangle className="h-4 w-4" />
-        <AlertTitle>Visual editor unavailable</AlertTitle>
+        <AlertTitle>{translate("Visual editor unavailable")}</AlertTitle>
         <AlertDescription>
           {controller.compatibility?.issues.map((issue) => issue.message).join(". ")}
         </AlertDescription>
@@ -192,18 +193,18 @@ function DeleteProfileDialog({
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>
-            Delete {controller.selectedCustom?.name ?? "layout profile"}?
+            {translate("Delete")} {controller.selectedCustom?.name ?? translate("layout profile")}?
           </AlertDialogTitle>
           <AlertDialogDescription>
             {controller.selectedCustom?.is_default
-              ? "The built-in Default layout will become the default."
-              : "This profile will be removed when you save."}
+              ? translate("The built-in Default layout will become the default.")
+              : translate("This profile will be removed when you save.")}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel className="cursor-pointer">Cancel</AlertDialogCancel>
+          <AlertDialogCancel className="cursor-pointer">{translate("Cancel")}</AlertDialogCancel>
           <AlertDialogAction className="cursor-pointer" onClick={confirm}>
-            Delete
+            {translate("Delete")}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
@@ -220,7 +221,7 @@ export function LayoutSettings() {
     revision: controller.profilesKey,
     isDirty: controller.isDirty,
     canSave: !invalidName,
-    invalidReason: invalidName ? "Layout profile names must not be empty" : undefined,
+    invalidReason: invalidName ? translate("Layout profile names must not be empty") : undefined,
     save: controller.save,
     discard: controller.cancel,
   });
@@ -230,7 +231,7 @@ export function LayoutSettings() {
       {controller.error && (
         <Alert variant="destructive">
           <IconAlertTriangle className="h-4 w-4" />
-          <AlertTitle>Layout profiles were not saved</AlertTitle>
+          <AlertTitle>{translate("Layout profiles were not saved")}</AlertTitle>
           <AlertDescription>{controller.error}</AlertDescription>
         </Alert>
       )}
@@ -242,7 +243,7 @@ export function LayoutSettings() {
           onCreate={controller.create}
           onDuplicate={controller.duplicate}
         />
-        <section className="min-w-0 space-y-3" aria-label={`${controller.selectedName} editor`}>
+        <section className="min-w-0 space-y-3" aria-label={`${translate(controller.selectedName)} ${translate("editor")}`}>
           <SelectedLayoutHeader controller={controller} onDelete={() => setDeleteOpen(true)} />
           <SelectedLayoutEditor controller={controller} />
         </section>

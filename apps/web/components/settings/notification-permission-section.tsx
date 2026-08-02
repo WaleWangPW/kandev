@@ -8,6 +8,7 @@ import {
   type NativeNotificationPermission,
 } from "@/lib/desktop/native-notification-client";
 import type { PermissionRefresh } from "./notifications-settings-actions";
+import { translate } from "@/lib/i18n/locale";
 
 type NotificationPermissionState =
   | NativeNotificationPermission
@@ -23,9 +24,9 @@ type DesktopNotificationsSectionProps = {
 };
 
 function permissionActionLabel(permission: NotificationPermissionState) {
-  if (permission === "granted") return "Enabled";
-  if (permission === "error") return "Retry";
-  return "Enable";
+  if (permission === "granted") return translate("Enabled");
+  if (permission === "error") return translate("Retry");
+  return translate("Enable");
 }
 
 export function DesktopNotificationsSection({
@@ -38,14 +39,14 @@ export function DesktopNotificationsSection({
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-4">
         <div>
-          <div className="text-base font-medium">Desktop Notifications</div>
+          <div className="text-base font-medium">{translate("Desktop Notifications")}</div>
           <p className="text-sm text-muted-foreground">
-            Notify this device when a selected agent turn, question, or Office event occurs.
+            {translate("Notify this device when a selected agent turn, question, or Office event occurs.")}
           </p>
         </div>
         <div className="flex items-center gap-2">
           <Button
-            title="Enable desktop notifications"
+            title={translate("Enable desktop notifications")}
             variant="default"
             size="sm"
             onClick={() => void onRequestPermission()}
@@ -66,20 +67,20 @@ export function DesktopNotificationsSection({
                 <Button
                   variant="ghost"
                   size="icon"
-                  aria-label="Refresh notification permission"
+                  aria-label={translate("Refresh notification permission")}
                   className="cursor-pointer"
                   onClick={() => void onRefreshPermission()}
                 >
                   <IconRefresh className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>Refresh permission status</TooltipContent>
+              <TooltipContent>{translate("Refresh permission status")}</TooltipContent>
             </Tooltip>
           </TooltipProvider>
           <HoverCard>
             <HoverCardTrigger asChild>
               <Button
-                title="Send test notification"
+                title={translate("Send test notification")}
                 variant="outline"
                 className="cursor-pointer"
                 size="icon"
@@ -91,7 +92,7 @@ export function DesktopNotificationsSection({
               </Button>
             </HoverCardTrigger>
             <HoverCardContent side="top" className="text-sm">
-              If you do not see notifications, check your OS settings and allow this browser.
+              {translate("If you do not see notifications, check your OS settings and allow this browser.")}
             </HoverCardContent>
           </HoverCard>
         </div>
@@ -100,19 +101,18 @@ export function DesktopNotificationsSection({
       {notificationPermission === "denied" && (
         <p className="text-sm text-amber-600">
           {nativeNotifications.isAvailable()
-            ? "Notifications are blocked in your OS app notification settings. Enable them there, then click Refresh."
-            : "Notifications are blocked in your browser. Enable them in site settings, then click Refresh."}
+            ? translate("Notifications are blocked in your OS app notification settings. Enable them there, then click Refresh.")
+            : translate("Notifications are blocked in your browser. Enable them in site settings, then click Refresh.")}
         </p>
       )}
       {notificationPermission === "unsupported" && (
         <p className="text-sm text-amber-600">
-          This browser does not support desktop notifications.
+          {translate("This browser does not support desktop notifications.")}
         </p>
       )}
       {notificationPermission === "error" && (
         <p className="text-sm text-amber-600">
-          Kandev could not check notification permission. Try again, then check your browser or OS
-          notification settings.
+          {translate("Kandev could not check notification permission. Try again, then check your browser or OS notification settings.")}
         </p>
       )}
     </div>

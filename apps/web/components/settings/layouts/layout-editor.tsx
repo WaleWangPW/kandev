@@ -17,6 +17,7 @@ import {
   type LayoutState,
 } from "@/lib/state/layout-manager";
 import { LayoutEditorActions, type LayoutEditorActionAnchor } from "./layout-editor-toolbar";
+import { translate } from "@/lib/i18n/locale";
 
 type LayoutEditorProps = {
   layout: LayoutState;
@@ -30,7 +31,7 @@ function PlaceholderPanel({ api }: IDockviewPanelProps) {
       className="flex h-full items-center justify-center bg-background/60 p-4 text-center text-sm text-muted-foreground"
       data-testid={`layout-placeholder-${api.id}`}
     >
-      {api.title ?? api.id}
+      {translate(api.title ?? api.id)}
     </div>
   );
 }

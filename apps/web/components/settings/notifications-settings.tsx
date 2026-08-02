@@ -12,6 +12,7 @@ import { SettingsPageTemplate } from "@/components/settings/settings-page-templa
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@kandev/ui/tooltip";
 import { DEFAULT_NOTIFICATION_EVENTS } from "@/lib/notifications/events";
 import type { NotificationProvider } from "@/lib/types/http";
+import { translate } from "@/lib/i18n/locale";
 import {
   DesktopNotificationsSection,
   useNotificationPermission,
@@ -45,13 +46,13 @@ function AppriseProviderCardActions({
               variant="outline"
               size="icon"
               className="h-8 w-8 cursor-pointer"
-              aria-label={`Send test notification for ${provider.name}`}
+              aria-label={`${translate("Send test notification for")} ${provider.name}`}
               onClick={() => void onTestProvider(provider.id)}
             >
               <IconBell className="h-4 w-4" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Send test notification</TooltipContent>
+          <TooltipContent>{translate("Send test notification")}</TooltipContent>
         </Tooltip>
       </TooltipProvider>
       <Button
@@ -60,7 +61,7 @@ function AppriseProviderCardActions({
         className="cursor-pointer"
         onClick={() => onOpenForm("edit", provider)}
       >
-        Edit
+        {translate("Edit")}
       </Button>
       <Button
         variant="outline"
@@ -68,7 +69,7 @@ function AppriseProviderCardActions({
         className="cursor-pointer"
         onClick={() => onDeleteProvider(provider.id)}
       >
-        Remove
+        {translate("Remove")}
       </Button>
     </div>
   );
@@ -209,27 +210,27 @@ function ExternalProvidersSection({
   return (
     <div className="space-y-4">
       <div>
-        <div className="text-base font-medium">External Providers</div>
+        <div className="text-base font-medium">{translate("External Providers")}</div>
         <p className="text-sm text-muted-foreground">
-          Configure external providers for remote notifications.
+          {translate("Configure external providers for remote notifications.")}
         </p>
       </div>
       {!appriseAvailable && (
         <p className="text-sm text-muted-foreground">
-          Apprise is not installed yet. You can add it later to enable remote notifications.{" "}
+          {translate("Apprise is not installed yet. You can add it later to enable remote notifications.")}{" "}
           <a
             className="underline"
             href="https://github.com/caronc/apprise?tab=readme-ov-file#installation"
             target="_blank"
             rel="noreferrer"
           >
-            View installation instructions
+            {translate("View installation instructions")}
           </a>
           .
         </p>
       )}
       {appriseProviders.length === 0 && (
-        <p className="text-sm text-muted-foreground">No Apprise providers configured yet.</p>
+        <p className="text-sm text-muted-foreground">{translate("No Apprise providers configured yet.")}</p>
       )}
       <AppriseProviderList
         providers={appriseProviders}
@@ -257,7 +258,7 @@ function ExternalProvidersSection({
             onClick={() => onOpenForm("create")}
             disabled={showAppriseForm}
           >
-            Add Apprise Provider
+            {translate("Add Apprise Provider")}
           </Button>
           {showAppriseForm && appriseFormMode === "create" && (
             <AppriseProviderForm
@@ -331,7 +332,7 @@ function useNotificationPageSaveState(state: NotificationsState, soundIsDirty: b
     providerIsDirty,
     cardIsDirty: providerIsDirty || soundIsDirty,
     canSave,
-    invalidReason: canSave ? undefined : "At least one Apprise service URL is required.",
+    invalidReason: canSave ? undefined : translate("At least one Apprise service URL is required."),
     revision,
   };
 }
@@ -359,8 +360,8 @@ export function NotificationsSettings() {
   const appriseProviders = providers.filter((provider) => provider.type === "apprise");
   return (
     <SettingsPageTemplate
-      title="Notifications"
-      description="Configure providers and choose which events should alert you."
+      title={translate("Notifications")}
+      description={translate("Configure providers and choose which events should alert you.")}
       isDirty={saveState.providerIsDirty}
       cardIsDirty={saveState.cardIsDirty}
       saveStatus={saveRequest.status}
@@ -402,9 +403,9 @@ export function NotificationsSettings() {
       <Separator className="my-4" />
       <div className="space-y-4">
         <div>
-          <div className="text-base font-medium">Notification Events</div>
+          <div className="text-base font-medium">{translate("Notification Events")}</div>
           <p className="text-sm text-muted-foreground">
-            Select which providers should receive each notification type.
+            {translate("Select which providers should receive each notification type.")}
           </p>
         </div>
         {tableProviders.length > 0 && (
@@ -456,18 +457,18 @@ function AppriseProviderForm({
       data-settings-dirty={formIsDirty}
       data-settings-dirty-level="container"
     >
-      <div className="text-base font-medium">Apprise Provider</div>
+      <div className="text-base font-medium">{translate("Apprise Provider")}</div>
       <Input
         value={name}
         onChange={(event) => onNameChange(event.target.value)}
-        placeholder="Provider name"
+        placeholder={translate("Provider name")}
         data-settings-dirty={nameIsDirty}
       />
       <Textarea
         value={urls}
         onChange={(event) => onUrlsChange(event.target.value)}
         onInput={onInput}
-        placeholder="Service URL(s)"
+        placeholder={translate("Service URL(s)")}
         rows={1}
         className="min-h-0 h-auto"
         data-settings-dirty={urlsIsDirty}
@@ -475,11 +476,11 @@ function AppriseProviderForm({
       <div className="flex items-center gap-2">
         {showSubmit && (
           <Button className="cursor-pointer" onClick={onSubmit}>
-            {mode === "create" ? "Add provider" : "Done"}
+            {mode === "create" ? translate("Add provider") : translate("Complete")}
           </Button>
         )}
         <Button variant="ghost" className="cursor-pointer" onClick={onCancel}>
-          Cancel
+          {translate("Cancel")}
         </Button>
       </div>
     </div>

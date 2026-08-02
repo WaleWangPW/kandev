@@ -17,7 +17,7 @@ import { safeDecodePathSegment } from "@/lib/routing/path";
 import { SettingsSaveProvider } from "@/components/settings/settings-save-provider";
 import { connectionIssueDetails } from "@/components/app-status-bar/connection-status-item";
 import { cn } from "@/lib/utils";
-import { translate } from "@/lib/i18n/locale";
+import { useI18n } from "@/lib/i18n/locale";
 
 // Brand/initialism overrides so the derived label matches how the rest of the
 // app spells these (e.g. "github" → "GitHub", not "Github"). Anything not
@@ -45,13 +45,13 @@ function titleCase(segment: string): string {
 // deepest non-id path segment. /settings → null (the topbar still shows
 // "Settings" as the page itself). UUID-looking segments are skipped so e.g.
 // /settings/workspace/<uuid> resolves to "Workspace" not the raw id.
-function deriveCurrentPageLabel(pathname: string): string | null {
+function deriveCurrentPageLabel(pathname: string, t: (value: string) => string): string | null {
   const segments = pathname.split("/").filter(Boolean);
   if (segments.length <= 1) return null; // just /settings
   for (let i = segments.length - 1; i >= 1; i--) {
     const seg = segments[i];
     if (/^[0-9a-f-]{8,}$/i.test(seg)) continue; // skip ids
-    return translate(titleCase(seg));
+    return t(titleCase(seg));
   }
   return null;
 }
@@ -60,12 +60,15 @@ function deriveCurrentPageLabel(pathname: string): string | null {
 // current page title. For workspace-scoped automation pages, inject an
 // "Automations" crumb so the breadcrumb reads e.g.
 // Home > Settings > Automations > New.
-function deriveParents(pathname: string): Array<{ label: string; href: string }> {
+function deriveParents(
+  pathname: string,
+  t: (value: string) => string,
+): Array<{ label: string; href: string }> {
   const segments = pathname.split("/").filter(Boolean);
   if (segments.length <= 1) return [];
 
   const parents: Array<{ label: string; href: string }> = [
-    { label: translate("Settings"), href: "/settings" },
+    { label: t("Settings"), href: "/settings" },
   ];
 
   const automationsMatch = pathname.match(
@@ -76,7 +79,7 @@ function deriveParents(pathname: string): Array<{ label: string; href: string }>
     // edit), not on the listing page itself — the listing page title is
     // already "Automations".
     parents.push({
-      label: translate("Automations"),
+      label: t("Automations"),
       href: `/settings/workspace/${automationsMatch[1]}/automations`,
     });
   }
@@ -86,15 +89,16 @@ function deriveParents(pathname: string): Array<{ label: string; href: string }>
 
 export function SettingsLayoutClient({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const { t } = useI18n();
   const isAgentDetail = pathname.startsWith("/settings/agents/") && pathname !== "/settings/agents";
   const showIntegrationCopyAction = integrationFromPathname(pathname) !== null;
 
   if (isAgentDetail) {
     return (
       <SettingsShell
-        title={translate("Agent")}
+        title={t("Agent")}
         backHref="/settings/agents"
-        backLabel={translate("Agents")}
+        backLabel={t("Agents")}
         parents={[]}
         showIntegrationCopyAction={showIntegrationCopyAction}
       >
@@ -103,9 +107,9 @@ export function SettingsLayoutClient({ children }: { children: React.ReactNode }
     );
   }
 
-  const pageLabel = deriveCurrentPageLabel(pathname);
-  const title = pageLabel ?? translate("Settings");
-  const parents = deriveParents(pathname);
+  const pageLabel = deriveCurrentPageLabel(pathname, t);
+  const title = pageLabel ?? t("Settings");
+  const parents = deriveParents(pathname, t);
 
   return (
     <SettingsShell
@@ -146,6 +150,7 @@ function IntegrationCopyConfigAction() {
 
 function SettingsMobileMenu({ pathname }: { pathname: string }) {
   const [open, setOpen] = useState(false);
+  const { t } = useI18n();
   const { enabled: statusDrawerEnabled, issueSeverity, openStatusDrawer } = useAppStatusDrawer();
   const issueDetails = issueSeverity === "none" ? null : connectionIssueDetails(issueSeverity);
 
@@ -195,7 +200,7 @@ function SettingsMobileMenu({ pathname }: { pathname: string }) {
         data-testid="settings-mobile-menu"
       >
         <SheetHeader className="border-b px-4 py-3 text-left">
-          <SheetTitle>{translate("Settings")}</SheetTitle>
+          <SheetTitle>{t("Settings")}</SheetTitle>
         </SheetHeader>
         <nav className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3">
           {statusDrawerEnabled && (
@@ -213,7 +218,7 @@ function SettingsMobileMenu({ pathname }: { pathname: string }) {
               data-connection-severity={issueSeverity === "none" ? undefined : issueSeverity}
             >
               <IconActivity className="h-4 w-4 shrink-0" />
-              <span>Status</span>
+            <span>{t("Status")}</span>
               {issueDetails && (
                 <span
                   className={cn("ml-auto size-2 rounded-full", issueDetails.dotClass)}
@@ -228,7 +233,7 @@ function SettingsMobileMenu({ pathname }: { pathname: string }) {
             onClick={() => setOpen(false)}
           >
             <IconHome className="h-4 w-4 shrink-0" />
-            <span className="truncate">Home</span>
+            <span className="truncate">{t("Home")}</span>
           </Link>
           <div
             className="flex flex-col gap-0.5 [&_a]:min-h-10 [&_a]:text-sm [&_button]:min-h-10 [&_button]:text-sm [&_svg]:h-4 [&_svg]:w-4"

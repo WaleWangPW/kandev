@@ -33,6 +33,7 @@ import { useSettingsSaveContributor } from "@/components/settings/settings-save-
 import type { StoredShortcutOverrides } from "@/lib/keyboard/shortcut-overrides";
 import { buildPluginShortcutEntries } from "@/lib/keyboard/plugin-shortcuts";
 import { usePlugins } from "@/hooks/domains/plugins/use-plugins";
+import { translate } from "@/lib/i18n/locale";
 
 function ThemeSettingsCard({
   theme,
@@ -46,7 +47,7 @@ function ThemeSettingsCard({
   return (
     <SettingsCard isDirty={isDirty} data-testid="theme-settings-card">
       <CardHeader>
-        <CardTitle className="text-base">Color Theme</CardTitle>
+        <CardTitle className="text-base">{translate("Color Theme")}</CardTitle>
       </CardHeader>
       <CardContent>
         <div className="space-y-2">
@@ -55,9 +56,9 @@ function ThemeSettingsCard({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="system">System</SelectItem>
-              <SelectItem value="light">Light</SelectItem>
-              <SelectItem value="dark">Dark</SelectItem>
+              <SelectItem value="system">{translate("System")}</SelectItem>
+              <SelectItem value="light">{translate("Light")}</SelectItem>
+              <SelectItem value="dark">{translate("Dark")}</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -115,11 +116,11 @@ function ChangesPanelLayoutCard({
   return (
     <SettingsCard isDirty={isDirty} data-testid="changes-panel-layout-card">
       <CardHeader>
-        <CardTitle className="text-base">Changes Panel Layout</CardTitle>
+        <CardTitle className="text-base">{translate("Changes Panel Layout")}</CardTitle>
       </CardHeader>
       <CardContent>
         <div className="space-y-2">
-          <Label htmlFor="changes-panel-layout">File list view</Label>
+          <Label htmlFor="changes-panel-layout">{translate("File list view")}</Label>
           <Select value={value} onValueChange={(next) => onChange(next as "flat" | "tree")}>
             <SelectTrigger
               id="changes-panel-layout"
@@ -130,12 +131,12 @@ function ChangesPanelLayoutCard({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="flat">Flat list</SelectItem>
-              <SelectItem value="tree">Tree</SelectItem>
+              <SelectItem value="flat">{translate("Flat list")}</SelectItem>
+              <SelectItem value="tree">{translate("Tree")}</SelectItem>
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground">
-            Display changed files as a flat list with full paths, or as a folder tree.
+            {translate("Display changed files as a flat list with full paths, or as a folder tree.")}
           </p>
         </div>
       </CardContent>
@@ -265,8 +266,8 @@ export function AppearanceSettings() {
     <div className="space-y-8">
       <SettingsSection
         icon={<IconPalette className="h-5 w-5" />}
-        title="Appearance"
-        description="Customize how the application looks"
+        title={translate("Appearance")}
+        description={translate("Customize how the application looks")}
       >
         <ThemeSettingsCard
           theme={draft.theme}
@@ -282,8 +283,8 @@ export function AppearanceSettings() {
 
       <SettingsSection
         icon={<IconGitBranch className="h-5 w-5" />}
-        title="Changes Panel"
-        description="Customize how changed files are displayed"
+        title={translate("Changes Panel")}
+        description={translate("Customize how changed files are displayed")}
       >
         <ChangesPanelLayoutCard
           value={draft.changesPanelLayout}
@@ -296,8 +297,8 @@ export function AppearanceSettings() {
 
       <SettingsSection
         icon={<IconActivity className="h-5 w-5" />}
-        title="Resource Metrics"
-        description="Configure backend and execution resource sampling"
+        title={translate("Resource Metrics")}
+        description={translate("Configure backend and execution resource sampling")}
       >
         <SystemMetricsSettingsCard
           showInTopbar={draft.showMetrics}

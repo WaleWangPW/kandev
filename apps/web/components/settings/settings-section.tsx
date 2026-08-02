@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { translate } from "@/lib/i18n/locale";
 
 type SettingsSectionProps = {
   icon?: ReactNode;
@@ -27,11 +28,11 @@ export function SettingsSection({
           <div className="flex items-center gap-2">
             <h3 className="text-lg font-semibold flex items-center gap-2">
               {icon}
-              {title}
+              {translate(title)}
             </h3>
             {titleAccessory}
           </div>
-          {description && <p className="text-sm text-muted-foreground mt-1">{description}</p>}
+          {description && <p className="text-sm text-muted-foreground mt-1">{translate(description)}</p>}
         </div>
         {action && <div className="w-full shrink-0 sm:w-auto">{action}</div>}
       </div>

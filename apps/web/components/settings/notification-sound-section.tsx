@@ -15,6 +15,7 @@ import {
   type SoundPreferences,
 } from "@/lib/notifications/sound";
 import { useSettingsSaveContributor } from "./settings-save-provider";
+import { translate } from "@/lib/i18n/locale";
 
 export function NotificationSoundSection({
   onDirtyChange,
@@ -48,17 +49,16 @@ export function NotificationSoundSection({
     >
       <div className="flex items-center justify-between gap-4">
         <div>
-          <div className="text-base font-medium">Notification Sound</div>
+          <div className="text-base font-medium">{translate("Notification Sound")}</div>
           <p className="text-sm text-muted-foreground">
-            Play a sound on this device when a selected agent turn, question, or Office event
-            occurs.
+            {translate("Play a sound on this device when a selected agent turn, question, or Office event occurs.")}
           </p>
         </div>
         <Switch
           checked={prefs.enabled}
           data-settings-dirty={prefs.enabled !== saved.enabled}
           onCheckedChange={(enabled) => setPrefs({ ...prefs, enabled })}
-          aria-label="Enable notification sound"
+          aria-label={translate("Enable notification sound")}
           className="cursor-pointer"
         />
       </div>
@@ -74,7 +74,7 @@ export function NotificationSoundSection({
           >
             <SelectTrigger
               className="w-44 cursor-pointer"
-              aria-label="Notification sound"
+              aria-label={translate("Notification Sound")}
               data-settings-dirty={prefs.presetId !== saved.presetId}
             >
               <SelectValue />
@@ -82,7 +82,7 @@ export function NotificationSoundSection({
             <SelectContent>
               {SOUND_PRESETS.map((preset) => (
                 <SelectItem key={preset.id} value={preset.id} className="cursor-pointer">
-                  {preset.label}
+                  {translate(preset.label)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -94,13 +94,13 @@ export function NotificationSoundSection({
                   variant="outline"
                   size="icon"
                   className="cursor-pointer"
-                  aria-label="Preview sound"
+                  aria-label={translate("Preview sound")}
                   onClick={() => playSoundPreset(prefs.presetId)}
                 >
                   <IconVolume className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>Preview sound</TooltipContent>
+              <TooltipContent>{translate("Preview sound")}</TooltipContent>
             </Tooltip>
           </TooltipProvider>
         </div>

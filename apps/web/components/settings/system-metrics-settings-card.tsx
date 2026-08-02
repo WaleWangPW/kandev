@@ -10,6 +10,7 @@ import { fetchSystemMetricsSettings, updateSystemMetricsSettings } from "@/lib/a
 import type { SystemMetricId, SystemMetricsGlobalSettings } from "@/lib/types/system";
 import { useSettingsSaveContributor } from "./settings-save-provider";
 import { SettingsCard } from "./settings-card";
+import { translate } from "@/lib/i18n/locale";
 
 const METRIC_OPTIONS: Array<{ id: SystemMetricId; label: string }> = [
   { id: "cpu_percent", label: "CPU %" },
@@ -90,12 +91,13 @@ export function SystemMetricsSettingsCard({
   return (
     <SettingsCard isDirty={isDirty || Boolean(isShowInTopbarDirty) || Boolean(isSimplifiedDirty)}>
       <CardHeader>
-        <CardTitle className="text-base">Resource Metrics</CardTitle>
+        <CardTitle className="text-base">{translate("Resource Metrics")}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-5">
         <p className="max-w-3xl text-sm text-muted-foreground">
-          Useful when Kandev is self-hosted on a remote server and you want a lightweight view of
-          the machine resources from the global status bar or phone Status drawer.
+          {translate(
+            "Useful when Kandev is self-hosted on a remote server and you want a lightweight view of the machine resources from the global status bar or phone Status drawer.",
+          )}
         </p>
         <MetricsDisplayToggle
           checked={showInTopbar}
@@ -138,9 +140,9 @@ function SimplifiedMetricsToggle({
   return (
     <div className="flex items-center justify-between gap-4">
       <div className="space-y-1">
-        <Label htmlFor="simplified-system-metrics">Simplified metrics</Label>
+        <Label htmlFor="simplified-system-metrics">{translate("Simplified metrics")}</Label>
         <p className="text-xs text-muted-foreground">
-          Removes the Host marker and progress bars while retaining metric icons and values.
+          {translate("Removes the Host marker and progress bars while retaining metric icons and values.")}
         </p>
       </div>
       <Switch
@@ -165,9 +167,9 @@ function MetricsDisplayToggle({
   return (
     <div className="flex items-center justify-between gap-4">
       <div className="space-y-1">
-        <Label htmlFor="show-system-metrics">Show host metrics in status bar</Label>
+        <Label htmlFor="show-system-metrics">{translate("Show host metrics in status bar")}</Label>
         <p className="text-xs text-muted-foreground">
-          Shows Kandev host values only. Collection starts while a client displays them.
+          {translate("Shows Kandev host values only. Collection starts while a client displays them.")}
         </p>
       </div>
       <Switch
@@ -204,7 +206,7 @@ function MetricsSamplerControls({
         onToggleMetric={onToggleMetric}
       />
       <div className="space-y-2">
-        <Label htmlFor="metrics-interval">Frequency (seconds)</Label>
+        <Label htmlFor="metrics-interval">{translate("Frequency (seconds)")}</Label>
         <Input
           id="metrics-interval"
           type="number"
@@ -219,7 +221,7 @@ function MetricsSamplerControls({
         />
       </div>
       <div className="space-y-2">
-        <Label htmlFor="metrics-disk-path">Disk path</Label>
+        <Label htmlFor="metrics-disk-path">{translate("Disk path")}</Label>
         <Input
           id="metrics-disk-path"
           value={settings.backend_disk_path}
@@ -248,7 +250,7 @@ function MetricCheckboxes({
 }) {
   return (
     <div className="space-y-2">
-      <Label>Metrics</Label>
+      <Label>{translate("Metrics")}</Label>
       <div className="grid gap-2 sm:grid-cols-2">
         {METRIC_OPTIONS.map((metric) => (
           <label key={metric.id} className="flex items-center gap-2 text-sm">
@@ -260,7 +262,7 @@ function MetricCheckboxes({
               disabled={isSaving}
               onCheckedChange={(checked) => onToggleMetric(metric.id, checked === true)}
             />
-            <span>{metric.label}</span>
+            <span>{translate(metric.label)}</span>
           </label>
         ))}
       </div>
@@ -282,10 +284,11 @@ function ExecutionMetricsToggle({
   return (
     <div className="flex items-center justify-between gap-4">
       <div className="space-y-1">
-        <Label htmlFor="collect-execution-metrics">Collect execution environment metrics</Label>
+        <Label htmlFor="collect-execution-metrics">{translate("Collect execution environment metrics")}</Label>
         <p className="text-xs text-muted-foreground">
-          Makes agentctl values available to plugins and other consumers. The built-in status bar
-          remains host-only.
+          {translate(
+            "Makes agentctl values available to plugins and other consumers. The built-in status bar remains host-only.",
+          )}
         </p>
       </div>
       <Switch

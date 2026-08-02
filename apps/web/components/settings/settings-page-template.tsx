@@ -8,6 +8,7 @@ import {
   useSettingsSaveContributor,
   type SettingsSaveRevision,
 } from "@/components/settings/settings-save-provider";
+import { translate } from "@/lib/i18n/locale";
 
 type SettingsPageTemplateProps = {
   title: string;
@@ -57,8 +58,8 @@ export function SettingsPageTemplate({
     <div className="space-y-8">
       <div>
         <div>
-          <h2 className="text-2xl font-bold">{title}</h2>
-          {description && <p className="text-sm text-muted-foreground mt-1">{description}</p>}
+          <h2 className="text-2xl font-bold">{translate(title)}</h2>
+          {description && <p className="text-sm text-muted-foreground mt-1">{translate(description)}</p>}
         </div>
       </div>
 

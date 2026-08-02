@@ -32,6 +32,7 @@ import {
   resizeGroup,
   splitPanel,
 } from "./layout-editor-actions";
+import { translate } from "@/lib/i18n/locale";
 
 export type LayoutEditorActionAnchor = {
   left: number;
@@ -147,14 +148,14 @@ function AddPanelAction({ state }: { state: ActionState }) {
                   variant="secondary"
                   className="min-h-11 cursor-pointer shadow-md sm:min-h-8"
                   disabled={disabled}
-                  aria-label="Add panel"
+                  aria-label={translate("Add panel")}
                 >
-                  <IconPlus className="mr-1.5 h-4 w-4" /> Add panel
+                  <IconPlus className="mr-1.5 h-4 w-4" /> {translate("Add panel")}
                 </Button>
               </DropdownMenuTrigger>
             </span>
           </TooltipTrigger>
-          <TooltipContent>Add a missing tool tab beside the selected split.</TooltipContent>
+          <TooltipContent>{translate("Add a missing tool tab beside the selected split.")}</TooltipContent>
         </Tooltip>
         <DropdownMenuContent align="start">
           {missing.map((id) => (
@@ -166,7 +167,7 @@ function AddPanelAction({ state }: { state: ActionState }) {
                 state.perform(() => addReusablePanel(state.api!, id, state.selected?.group.id))
               }
             >
-              {PANEL_REGISTRY[id].title}
+              {translate(PANEL_REGISTRY[id].title)}
             </DropdownMenuItem>
           ))}
         </DropdownMenuContent>
@@ -180,8 +181,8 @@ function SplitMenu({ state }: { state: ActionState }) {
   return (
     <DropdownMenu>
       <MenuTrigger
-        label="Split tab"
-        help="Move this tab into a new split beside its current split."
+        label={translate("Split tab")}
+        help={translate("Move this tab into a new split beside its current split.")}
         disabled={disabled}
       >
         <IconLayoutColumns className="h-4 w-4" />
@@ -196,7 +197,7 @@ function SplitMenu({ state }: { state: ActionState }) {
               state.perform(() => splitPanel(state.api!, state.selectedPanelId!, direction))
             }
           >
-            <Icon className="mr-2 h-4 w-4" /> {label}
+            <Icon className="mr-2 h-4 w-4" /> {translate(label)}
           </DropdownMenuItem>
         ))}
       </DropdownMenuContent>
@@ -208,8 +209,8 @@ function MovePanelMenu({ state }: { state: ActionState }) {
   return (
     <DropdownMenu>
       <MenuTrigger
-        label="Move tab to split"
-        help="Move this tab into another existing split."
+        label={translate("Move tab to split")}
+        help={translate("Move this tab into another existing split.")}
         disabled={state.disabled || state.targetGroups.length === 0}
       >
         <IconArrowRight className="h-4 w-4" />
@@ -238,8 +239,8 @@ function ArrangeSplitMenu({ state }: { state: ActionState }) {
   return (
     <DropdownMenu>
       <MenuTrigger
-        label="Arrange split"
-        help="Resize, reposition, or merge the selected split."
+        label={translate("Arrange split")}
+        help={translate("Resize, reposition, or merge the selected split.")}
         disabled={state.disabled}
       >
         <IconLayoutRows className="h-4 w-4" />
@@ -251,7 +252,7 @@ function ArrangeSplitMenu({ state }: { state: ActionState }) {
           onSelect={() => resize("width", -40)}
         >
           <IconLayoutColumns className="mr-2 h-4 w-4" />
-          <IconMinus className="mr-2 h-3 w-3" /> Decrease width
+          <IconMinus className="mr-2 h-3 w-3" /> {translate("Decrease width")}
         </DropdownMenuItem>
         <DropdownMenuItem
           className="cursor-pointer"
@@ -259,7 +260,7 @@ function ArrangeSplitMenu({ state }: { state: ActionState }) {
           onSelect={() => resize("width", 40)}
         >
           <IconLayoutColumns className="mr-2 h-4 w-4" />
-          <IconPlus className="mr-2 h-3 w-3" /> Increase width
+          <IconPlus className="mr-2 h-3 w-3" /> {translate("Increase width")}
         </DropdownMenuItem>
         <DropdownMenuItem
           className="cursor-pointer"
@@ -267,7 +268,7 @@ function ArrangeSplitMenu({ state }: { state: ActionState }) {
           onSelect={() => resize("height", -40)}
         >
           <IconLayoutRows className="mr-2 h-4 w-4" />
-          <IconMinus className="mr-2 h-3 w-3" /> Decrease height
+          <IconMinus className="mr-2 h-3 w-3" /> {translate("Decrease height")}
         </DropdownMenuItem>
         <DropdownMenuItem
           className="cursor-pointer"
@@ -275,7 +276,7 @@ function ArrangeSplitMenu({ state }: { state: ActionState }) {
           onSelect={() => resize("height", 40)}
         >
           <IconLayoutRows className="mr-2 h-4 w-4" />
-          <IconPlus className="mr-2 h-3 w-3" /> Increase height
+          <IconPlus className="mr-2 h-3 w-3" /> {translate("Increase height")}
         </DropdownMenuItem>
         {state.targetGroups.length > 0 && <DropdownMenuSeparator />}
         {state.targetGroups.flatMap((target) => [
@@ -290,7 +291,7 @@ function ArrangeSplitMenu({ state }: { state: ActionState }) {
                 )
               }
             >
-              <Icon className="mr-2 h-4 w-4" /> {label} of {target.activePanel?.title ?? target.id}
+              <Icon className="mr-2 h-4 w-4" /> {translate(label)} {translate("of")} {translate(target.activePanel?.title ?? target.id)}
             </DropdownMenuItem>
           )),
           <DropdownMenuItem
@@ -301,7 +302,7 @@ function ArrangeSplitMenu({ state }: { state: ActionState }) {
               state.perform(() => mergeGroup(state.api!, state.selected!.group.id, target.id))
             }
           >
-            Merge with {target.activePanel?.title ?? target.id}
+            {translate("Merge with")} {translate(target.activePanel?.title ?? target.id)}
           </DropdownMenuItem>,
         ])}
       </DropdownMenuContent>
@@ -319,22 +320,22 @@ function SelectedPanelActions({ state }: { state: ActionState }) {
       style={{ left: state.anchor.left, top: state.anchor.top, width: state.anchor.width }}
       data-testid="layout-editor-context-actions"
       data-legacy-testid="layout-editor-toolbar"
-      aria-label={`Actions for ${state.selected.title ?? state.selected.id}`}
+      aria-label={`${translate("Actions for")} ${translate(state.selected.title ?? state.selected.id)}`}
     >
       <span className="hidden max-w-28 truncate px-2 text-xs font-medium sm:inline">
         {state.selected.title ?? state.selected.id}
       </span>
       <ActionTooltip
-        label="Move tab left"
-        help="Move this tab one position left within its split."
+        label={translate("Move tab left")}
+        help={translate("Move this tab one position left within its split.")}
         disabled={state.disabled || first}
         onClick={() => state.perform(() => reorderTab(state.api!, state.selectedPanelId!, -1))}
       >
         <IconArrowLeft className="h-4 w-4" />
       </ActionTooltip>
       <ActionTooltip
-        label="Move tab right"
-        help="Move this tab one position right within its split."
+        label={translate("Move tab right")}
+        help={translate("Move this tab one position right within its split.")}
         disabled={state.disabled || last}
         onClick={() => state.perform(() => reorderTab(state.api!, state.selectedPanelId!, 1))}
       >
@@ -344,8 +345,8 @@ function SelectedPanelActions({ state }: { state: ActionState }) {
       <MovePanelMenu state={state} />
       <ArrangeSplitMenu state={state} />
       <ActionTooltip
-        label="Remove panel"
-        help="Remove this tab from the saved layout."
+        label={translate("Remove panel")}
+        help={translate("Remove this tab from the saved layout.")}
         disabled={state.disabled || state.selectedPanelId === "chat"}
         onClick={() => state.perform(() => removeReusablePanel(state.api!, state.selectedPanelId!))}
       >
