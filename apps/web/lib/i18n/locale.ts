@@ -135,6 +135,19 @@ const ZH_CN: Record<string, string> = {
   Title: "标题",
   Asc: "升序",
   Desc: "降序",
+  Appearance: "外观",
+  Layouts: "布局",
+  Notifications: "通知",
+  Editors: "编辑器",
+  "Keyboard Shortcuts": "快捷键",
+  "Task Actions": "任务操作",
+  "Theme, metrics, and changes panel preferences": "主题、指标和变更面板偏好设置",
+  "Task workbench layout profiles and defaults": "任务工作台布局方案与默认值",
+  "Shell, terminal fonts, and link behavior": "Shell、终端字体与链接行为",
+  "Providers and notification events": "通知服务与触发事件",
+  "Editor integrations and defaults": "编辑器集成与默认设置",
+  "Chat input and command shortcuts": "对话输入和命令快捷键",
+  "MCP task defaults, archive safeguards, and transcript preferences": "MCP 任务默认项、归档保护与会话记录偏好",
 };
 
 function isUiLocale(value: string | null): value is UiLocale {

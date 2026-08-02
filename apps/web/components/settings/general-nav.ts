@@ -8,6 +8,7 @@ import {
   IconTerminal2,
 } from "@tabler/icons-react";
 import type { Icon as TablerIcon } from "@tabler/icons-react";
+import { translate } from "@/lib/i18n/locale";
 
 export type GeneralNavItem = {
   href: string;
@@ -19,44 +20,44 @@ export type GeneralNavItem = {
 export const GENERAL_NAV_ITEMS: GeneralNavItem[] = [
   {
     href: "/settings/general/appearance",
-    label: "Appearance",
-    description: "Theme, metrics, and changes panel preferences",
+    label: translate("Appearance"),
+    description: translate("Theme, metrics, and changes panel preferences"),
     icon: IconPalette,
   },
   {
     href: "/settings/general/layouts",
-    label: "Layouts",
-    description: "Task workbench layout profiles and defaults",
+    label: translate("Layouts"),
+    description: translate("Task workbench layout profiles and defaults"),
     icon: IconLayoutDashboard,
   },
   {
     href: "/settings/general/terminal",
-    label: "Terminal",
-    description: "Shell, terminal fonts, and link behavior",
+    label: translate("Terminal"),
+    description: translate("Shell, terminal fonts, and link behavior"),
     icon: IconTerminal2,
   },
   {
     href: "/settings/general/notifications",
-    label: "Notifications",
-    description: "Providers and notification events",
+    label: translate("Notifications"),
+    description: translate("Providers and notification events"),
     icon: IconBell,
   },
   {
     href: "/settings/general/editors",
-    label: "Editors",
-    description: "Editor integrations and defaults",
+    label: translate("Editors"),
+    description: translate("Editor integrations and defaults"),
     icon: IconCode,
   },
   {
     href: "/settings/general/keyboard-shortcuts",
-    label: "Keyboard Shortcuts",
-    description: "Chat input and command shortcuts",
+    label: translate("Keyboard Shortcuts"),
+    description: translate("Chat input and command shortcuts"),
     icon: IconCommand,
   },
   {
     href: "/settings/general/task-actions",
-    label: "Task Actions",
-    description: "MCP task defaults, archive safeguards, and transcript preferences",
+    label: translate("Task Actions"),
+    description: translate("MCP task defaults, archive safeguards, and transcript preferences"),
     icon: IconArchive,
   },
 ];
