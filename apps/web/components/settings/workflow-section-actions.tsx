@@ -3,6 +3,7 @@
 import { IconDownload, IconPlus, IconUpload } from "@tabler/icons-react";
 import { Button } from "@kandev/ui/button";
 import { WorkflowSyncButton } from "@/components/settings/workflow-sync-section";
+import { translate } from "@/lib/i18n/locale";
 
 type WorkflowSectionActionsProps = {
   onExport: () => void;
@@ -32,7 +33,7 @@ export function WorkflowSectionActions({
         className="cursor-pointer"
       >
         <IconDownload className="h-4 w-4 mr-2" />
-        Export All
+        {translate("Export All")}
       </Button>
       <Button
         type="button"
@@ -42,7 +43,7 @@ export function WorkflowSectionActions({
         className="cursor-pointer"
       >
         <IconUpload className="h-4 w-4 mr-2" />
-        Import
+        {translate("Import")}
       </Button>
       <Button
         type="button"
@@ -52,7 +53,7 @@ export function WorkflowSectionActions({
         data-testid="add-workflow-button"
       >
         <IconPlus className="h-4 w-4 mr-2" />
-        Add Workflow
+        {translate("Add Workflow")}
       </Button>
     </div>
   );

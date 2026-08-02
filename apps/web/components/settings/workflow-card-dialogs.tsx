@@ -10,6 +10,7 @@ import {
 } from "@kandev/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@kandev/ui/select";
 import type { Workflow, WorkflowStep } from "@/lib/types/http";
+import { translate } from "@/lib/i18n/locale";
 
 type WorkflowDeleteDialogProps = {
   open: boolean;
@@ -31,9 +32,9 @@ type WorkflowDeleteDialogProps = {
 function workflowDeleteDescription(taskCount: number | null, hasUnsavedChanges: boolean): string {
   const hasTasks = taskCount !== null && taskCount > 0;
   const base = hasTasks
-    ? `This workflow has ${taskCount} task${taskCount === 1 ? "" : "s"}. Choose where to migrate them, or delete the workflow and archive the tasks.`
-    : "This will permanently delete the workflow and all its steps.";
-  return `${base}${hasUnsavedChanges ? " Unsaved workflow changes will be discarded." : ""}`;
+    ? `此工作流包含 ${taskCount} 个任务。请选择迁移目标，或删除工作流并归档这些任务。`
+    : translate("This will permanently delete the workflow and all its steps.");
+  return `${base}${hasUnsavedChanges ? ` ${translate("Unsaved workflow changes will be discarded.")}` : ""}`;
 }
 
 export function WorkflowDeleteDialog({
@@ -57,7 +58,7 @@ export function WorkflowDeleteDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Delete workflow</DialogTitle>
+          <DialogTitle>{translate("Delete workflow")}</DialogTitle>
           <DialogDescription>
             {workflowDeleteDescription(workflowTaskCount, hasUnsavedChanges)}
           </DialogDescription>
@@ -65,10 +66,10 @@ export function WorkflowDeleteDialog({
         {hasTasks && otherWorkflows.length > 0 && (
           <div className="space-y-3 py-2">
             <div className="space-y-2">
-              <Label>Target Workflow</Label>
+            <Label>{translate("Target Workflow")}</Label>
               <Select value={targetWorkflowId} onValueChange={setTargetWorkflowId}>
                 <SelectTrigger>
-                  <SelectValue placeholder="Select workflow" />
+                  <SelectValue placeholder={translate("Select workflow")} />
                 </SelectTrigger>
                 <SelectContent>
                   {otherWorkflows.map((w) => (
@@ -81,10 +82,10 @@ export function WorkflowDeleteDialog({
             </div>
             {targetWorkflowSteps.length > 0 && (
               <div className="space-y-2">
-                <Label>Target Step</Label>
+                <Label>{translate("Target Step")}</Label>
                 <Select value={targetStepId} onValueChange={setTargetStepId}>
                   <SelectTrigger>
-                    <SelectValue placeholder="Select step" />
+                  <SelectValue placeholder={translate("Select step")} />
                   </SelectTrigger>
                   <SelectContent>
                     {targetWorkflowSteps.map((s) => (
@@ -105,7 +106,7 @@ export function WorkflowDeleteDialog({
             onClick={() => onOpenChange(false)}
             className="cursor-pointer"
           >
-            Cancel
+            {translate("Cancel")}
           </Button>
           {hasTasks && otherWorkflows.length > 0 && (
             <Button
@@ -114,7 +115,7 @@ export function WorkflowDeleteDialog({
               disabled={!targetWorkflowId || !targetStepId || migrateLoading || deleteLoading}
               className="cursor-pointer"
             >
-              {migrateLoading ? "Migrating..." : "Migrate & Delete"}
+              {migrateLoading ? translate("Migrating...") : translate("Migrate & Delete")}
             </Button>
           )}
           <Button
@@ -124,7 +125,7 @@ export function WorkflowDeleteDialog({
             disabled={deleteLoading || migrateLoading}
             className="cursor-pointer"
           >
-            {hasTasks ? "Delete & Archive Tasks" : "Delete Workflow"}
+            {translate(hasTasks ? "Delete & Archive Tasks" : "Delete Workflow")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -152,12 +153,12 @@ function stepDeleteDescription(
   stepTaskCount: number | null,
   hasMigrationTarget: boolean,
 ) {
-  if (!stepTaskCount) return `This will permanently delete the ${stepName} workflow step.`;
-  const taskLabel = `${stepTaskCount} task${stepTaskCount === 1 ? "" : "s"}`;
+  if (!stepTaskCount) return `这将永久删除“${stepName}”工作流步骤。`;
+  const taskLabel = `${stepTaskCount} 个任务`;
   if (hasMigrationTarget) {
-    return `${stepName} has ${taskLabel}. Choose where to migrate them, or delete the step and its tasks.`;
+    return `${stepName}包含${taskLabel}。请选择迁移目标，或删除步骤及其任务。`;
   }
-  return `Deleting ${stepName} will also affect its ${taskLabel}.`;
+  return `删除${stepName}也会影响其${taskLabel}。`;
 }
 
 export function StepDeleteDialog({
@@ -180,18 +181,18 @@ export function StepDeleteDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Delete step</DialogTitle>
+          <DialogTitle>{translate("Delete step")}</DialogTitle>
           <DialogDescription>
             {description}
-            {hasUnsavedChanges ? " Unsaved step changes will be discarded." : ""}
+            {hasUnsavedChanges ? ` ${translate("Unsaved step changes will be discarded.")}` : ""}
           </DialogDescription>
         </DialogHeader>
         {stepsForMigration.length > 0 && (
           <div className="space-y-2 py-2">
-            <Label>Target Step</Label>
+            <Label>{translate("Target Step")}</Label>
             <Select value={targetStep} onValueChange={setTargetStep} disabled={loading || pending}>
               <SelectTrigger>
-                <SelectValue placeholder="Select step" />
+                <SelectValue placeholder={translate("Select step")} />
               </SelectTrigger>
               <SelectContent>
                 {stepsForMigration.map((s) => (
@@ -205,7 +206,7 @@ export function StepDeleteDialog({
         )}
         {pending && !loading && (
           <p className="text-sm text-muted-foreground" role="status">
-            Waiting for the failed change to be retried.
+            {translate("Waiting for the failed change to be retried.")}
           </p>
         )}
         <DialogFooter>
@@ -215,7 +216,7 @@ export function StepDeleteDialog({
             onClick={() => onOpenChange(false)}
             className="cursor-pointer"
           >
-            Cancel
+            {translate("Cancel")}
           </Button>
           {stepsForMigration.length > 0 && (
             <Button
@@ -224,7 +225,7 @@ export function StepDeleteDialog({
               disabled={!targetStep || loading || pending}
               className="cursor-pointer"
             >
-              {loading ? "Migrating..." : "Migrate & Delete Step"}
+              {loading ? translate("Migrating...") : translate("Migrate & Delete Step")}
             </Button>
           )}
           <Button
@@ -234,7 +235,7 @@ export function StepDeleteDialog({
             disabled={loading || pending}
             className="cursor-pointer"
           >
-            {hasTasks ? "Delete Step & Tasks" : "Delete Step"}
+            {translate(hasTasks ? "Delete Step & Tasks" : "Delete Step")}
           </Button>
         </DialogFooter>
       </DialogContent>

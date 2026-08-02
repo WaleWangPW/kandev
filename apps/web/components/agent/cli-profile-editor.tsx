@@ -18,6 +18,7 @@ import {
 } from "@/app/actions/agents";
 import type { Agent, AgentProfile, AvailableAgent, CLIFlag } from "@/lib/types/http";
 import { seedDefaultCLIFlags } from "@/lib/cli-flags";
+import { translate } from "@/lib/i18n/locale";
 import {
   buildDefaultPermissions,
   PERMISSION_APPLY_AGENTCTL_AUTO_APPROVE,
@@ -380,15 +381,17 @@ function AdvancedToggles({
         onClick={onToggle}
         className="text-xs text-muted-foreground hover:text-foreground cursor-pointer"
       >
-        {open ? "Hide" : "Show"} advanced options
+        {translate(open ? "Hide advanced options" : "Show advanced options")}
       </button>
       {open && (
         <div className="mt-3 space-y-3">
           {allowCliPassthrough && (
             <ToggleRow
               id="cli-passthrough"
-              label="CLI passthrough"
-              description="Forward stdin/stdout straight to the CLI subprocess. Disables ACP."
+              label={translate("CLI passthrough")}
+              description={translate(
+                "Forward stdin/stdout straight to the CLI subprocess. Disables ACP.",
+              )}
               checked={cliPassthrough}
               onChange={onCliPassthroughChange}
             />
@@ -404,8 +407,10 @@ function AdvancedToggles({
           {showAllowIndexing && (
             <ToggleRow
               id="allow-indexing"
-              label="Allow indexing"
-              description="Permit the CLI to upload code for cloud indexing (auggie / similar)."
+              label={translate("Allow indexing")}
+              description={translate(
+                "Permit the CLI to upload code for cloud indexing (auggie / similar).",
+              )}
               checked={allowIndexing}
               onChange={onAllowIndexingChange}
             />
@@ -463,11 +468,13 @@ function AgentctlAutoApproveRow({
     <div className="flex items-start justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2">
       <div className="space-y-0.5">
         <Label htmlFor={id} className="text-sm text-destructive">
-          {setting?.label ?? "Auto-approve all permissions"}
+          {translate(setting?.label ?? "Auto-approve all permissions")}
         </Label>
         <p className="text-xs text-muted-foreground">
-          {setting?.description ??
-            "Kandev allows every agent permission request without prompting you."}
+          {translate(
+            setting?.description ??
+              "Kandev allows every agent permission request without prompting you.",
+          )}
         </p>
       </div>
       <Switch

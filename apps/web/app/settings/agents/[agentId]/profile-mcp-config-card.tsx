@@ -9,6 +9,7 @@ import { useSettingsSaveContributor } from "@/components/settings/settings-save-
 import { SettingsCard } from "@/components/settings/settings-card";
 import { useProfileMcpConfig } from "./use-profile-mcp-config";
 import type { AgentProfileMcpConfig } from "@/lib/types/http";
+import { translate } from "@/lib/i18n/locale";
 
 type ProfileMcpConfigCardProps = {
   profileId: string;
@@ -153,7 +154,7 @@ function PassthroughMcpInjectionHint({
   if (!cliPassthrough || !mcpInjection) return null;
   return (
     <p className="text-xs text-muted-foreground">
-      In CLI passthrough mode, kandev injects these MCP servers via {mcpInjection}.
+      {translate("In CLI passthrough mode, kandev injects these MCP servers via")} {mcpInjection}.
     </p>
   );
 }
@@ -201,7 +202,7 @@ function McpServersEditor({
 
   return (
     <div className="space-y-2">
-      <Label htmlFor={`mcp-servers-${profileId}`}>MCP servers (JSON)</Label>
+      <Label htmlFor={`mcp-servers-${profileId}`}>{translate("MCP servers (JSON)")}</Label>
       <Textarea
         id={`mcp-servers-${profileId}`}
         className="min-h-[200px] font-mono text-xs"
@@ -218,11 +219,12 @@ function McpServersEditor({
         data-testid={`mcp-servers-${profileId}`}
       />
       <p className="text-xs text-muted-foreground">
-        MCP definitions are stored in the database and resolved per executor at runtime. This does
-        not override your local agent config.
+        {translate(
+          "MCP definitions are stored in the database and resolved per executor at runtime. This does not override your local agent config.",
+        )}
       </p>
       <PassthroughMcpInjectionHint cliPassthrough={cliPassthrough} mcpInjection={mcpInjection} />
-      <p className="text-xs font-medium text-muted-foreground">Built-in</p>
+      <p className="text-xs font-medium text-muted-foreground">{translate("Built-in")}</p>
       <div className="flex flex-wrap gap-2 mb-2">
         <Tooltip>
           <TooltipTrigger asChild>
@@ -231,12 +233,12 @@ function McpServersEditor({
             </span>
           </TooltipTrigger>
           <TooltipContent side="bottom" className="max-w-[320px] text-xs">
-            <p className="font-medium mb-1">Automatically available</p>
+            <p className="font-medium mb-1">{translate("Automatically available")}</p>
             <p>{KANDEV_TOOLS_DESCRIPTION}</p>
           </TooltipContent>
         </Tooltip>
       </div>
-      <p className="text-xs font-medium text-muted-foreground">Popular servers</p>
+      <p className="text-xs font-medium text-muted-foreground">{translate("Popular servers")}</p>
       <div className="flex flex-wrap gap-2">
         <PopularServerButton
           label="playwright"

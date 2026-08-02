@@ -7,6 +7,7 @@ import { RadioGroup, RadioGroupItem } from "@kandev/ui/radio-group";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@kandev/ui/dialog";
 import { Textarea } from "@kandev/ui/textarea";
 import { cn } from "@/lib/utils";
+import { translate } from "@/lib/i18n/locale";
 import type { WorkflowTemplate } from "@/lib/types/http";
 
 type ImportWorkflowsDialogProps = {
@@ -34,11 +35,11 @@ export function ImportWorkflowsDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Import Workflows</DialogTitle>
+          <DialogTitle>{translate("Import Workflows")}</DialogTitle>
         </DialogHeader>
         <div className="space-y-4">
           <div className="space-y-2">
-            <Label>Upload YAML file</Label>
+            <Label>{translate("Upload YAML file")}</Label>
             <input
               ref={fileInputRef}
               type="file"
@@ -48,7 +49,7 @@ export function ImportWorkflowsDialog({
             />
           </div>
           <div className="space-y-2">
-            <Label>Or paste YAML</Label>
+            <Label>{translate("Or paste YAML")}</Label>
             <Textarea
               placeholder={
                 "version: 1\ntype: kandev_workflow\nworkflows:\n  - name: My Workflow\n    steps: [...]"
@@ -61,14 +62,14 @@ export function ImportWorkflowsDialog({
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} className="cursor-pointer">
-            Cancel
+            {translate("Cancel")}
           </Button>
           <Button
             onClick={onImport}
             disabled={!importYaml.trim() || importLoading}
             className="cursor-pointer"
           >
-            {importLoading ? "Importing..." : "Import"}
+            {importLoading ? translate("Importing...") : translate("Import")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -93,9 +94,9 @@ function TemplateRadioItem({
     >
       <RadioGroupItem value={template.id} id={template.id} className="mt-0.5" />
       <div className="flex flex-col gap-1.5 min-w-0">
-        <span className="font-medium">{template.name}</span>
+        <span className="font-medium">{translate(template.name)}</span>
         {template.description && (
-          <span className="text-sm text-muted-foreground">{template.description}</span>
+          <span className="text-sm text-muted-foreground">{translate(template.description)}</span>
         )}
         {template.default_steps && template.default_steps.length > 0 && (
           <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
@@ -104,7 +105,7 @@ function TemplateRadioItem({
                 {i > 0 && <span className="text-muted-foreground/40 text-xs">&rarr;</span>}
                 <div className="flex items-center gap-1 text-xs text-muted-foreground">
                   <div className={cn("w-2 h-2 rounded-full", step.color ?? "bg-slate-500")} />
-                  {step.name}
+                  {translate(step.name)}
                 </div>
               </div>
             ))}
@@ -150,14 +151,14 @@ export function CreateWorkflowDialog({
         data-testid="create-workflow-dialog"
       >
         <DialogHeader>
-          <DialogTitle>Add Workflow</DialogTitle>
+          <DialogTitle>{translate("Add Workflow")}</DialogTitle>
         </DialogHeader>
         <div className="space-y-6 overflow-y-auto">
           <div className="space-y-2">
-            <Label htmlFor="workflowName">Name</Label>
+            <Label htmlFor="workflowName">{translate("Name")}</Label>
             <Input
               id="workflowName"
-              placeholder="My Project Workflow"
+              placeholder={translate("My Project Workflow")}
               value={workflowName}
               onChange={(e) => onWorkflowNameChange(e.target.value)}
               data-testid="workflow-name-input"
@@ -165,7 +166,7 @@ export function CreateWorkflowDialog({
           </div>
           {workflowTemplates.length > 0 && (
             <div className="space-y-2">
-              <Label>Template</Label>
+              <Label>{translate("Template")}</Label>
               <RadioGroup
                 value={selectedTemplateId ?? "custom"}
                 onValueChange={(v) => onSelectedTemplateChange(v === "custom" ? null : v)}
@@ -189,9 +190,9 @@ export function CreateWorkflowDialog({
                   >
                     <RadioGroupItem value="custom" id="custom" className="mt-0.5" />
                     <div className="flex flex-col gap-1.5">
-                      <span className="font-medium">Custom</span>
+                      <span className="font-medium">{translate("Custom")}</span>
                       <span className="text-sm text-muted-foreground">
-                        Create your own agentic workflow from scratch.
+                        {translate("Create your own agentic workflow from scratch.")}
                       </span>
                     </div>
                   </label>
@@ -207,7 +208,7 @@ export function CreateWorkflowDialog({
             disabled={createLoading}
             className="cursor-pointer"
           >
-            Cancel
+            {translate("Cancel")}
           </Button>
           <Button
             onClick={onCreate}
@@ -216,7 +217,7 @@ export function CreateWorkflowDialog({
             data-testid="confirm-create-workflow"
             data-dialog-default-action
           >
-            {createLoading ? "Adding..." : "Add Workflow"}
+            {createLoading ? translate("Adding...") : translate("Add Workflow")}
           </Button>
         </DialogFooter>
       </DialogContent>

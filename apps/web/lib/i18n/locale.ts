@@ -962,6 +962,7 @@ const EXTENDED_ZH_CN: Record<string, string> = {
   "Existing configuration found": "已找到现有配置",
   "Export Workflow": "导出工作流",
   "Export Workflows": "导出工作流",
+  Export: "导出",
   "External Go cache": "外部 Go 缓存",
   "Failed to refresh: {error}": "刷新失败：{error}",
   "Filter repositories...": "筛选仓库…",
@@ -1036,7 +1037,6 @@ const EXTENDED_ZH_CN: Record<string, string> = {
   "Or paste YAML": "或粘贴 YAML",
   "Orphan task workspaces": "孤立任务工作区",
   "Outgoing (Database → Filesystem)": "导出（数据库 → 文件系统）",
-  "Paste these into your agent's global MCP configuration.": "将以下内容粘贴到智能体的全局 MCP 配置中。",
   "Paste your secret value...": "粘贴机密值…",
   Path: "路径",
   "Pending restart": "等待重启",
@@ -1131,7 +1131,6 @@ const EXTENDED_ZH_CN: Record<string, string> = {
   "Unable to start update: {approveError}": "无法启动更新：{approveError}",
   Unbound: "未绑定",
   "Unread Messages": "未读消息",
-  "Updated to {targetVersion ?? \"the latest version\"}.": "已更新到 {targetVersion ?? \"最新版本\"}。",
   Uptime: "运行时间",
   "Use and trim a Kandev-owned cache for new host-local Go executions.": "为新的主机本地 Go 执行使用并整理 Kandev 管理的缓存。",
   User: "用户",
@@ -1153,6 +1152,7 @@ const EXTENDED_ZH_CN: Record<string, string> = {
   "Workspace Name": "工作区名称",
   "Workspace not found": "未找到工作区",
   "Workspace settings": "工作区设置",
+  Key: "键",
   "Workspace Settings": "工作区设置",
   "Workspaces": "工作区",
   "Worktree Branch Template": "工作树分支模板",
@@ -1513,6 +1513,240 @@ const EXTENDED_ZH_CN: Record<string, string> = {
   "Type to search task contents…": "输入以搜索任务内容…",
   "Use workspace default": "使用工作区默认值",
   "Workspace": "工作区",
+  "Discover installed agents, install new ones, and manage their profiles.":
+    "发现已安装的智能体，安装新的智能体并管理其方案。",
+  "Agents detected on this machine are ready to configure.":
+    "已检测到此机器上的智能体，可以开始配置。",
+  Rescan: "重新扫描",
+  "No installed agents were detected. Install one below, then click Rescan.":
+    "未检测到已安装的智能体。请先在下方安装，然后点击“重新扫描”。",
+  "Click Install to run the agent's install script on the kandev host. Progress streams live; you can start multiple installs in parallel.":
+    "点击“安装”即可在 Kandev 主机上运行智能体安装脚本。进度会实时显示，也可以并行启动多个安装任务。",
+  "Progress streams live; you can start multiple installs in parallel.":
+    "进度会实时显示，也可以并行启动多个安装任务。",
+  Copied: "已复制",
+  "Copy install command": "复制安装命令",
+  "Detected at": "检测位置：",
+  "Installation not detected": "未检测到安装位置",
+  "Create a new profile for this agent.": "为此智能体新建方案。",
+  "Configure profiles and defaults for this agent.": "配置此智能体的方案和默认设置。",
+  "Delete Agent": "删除智能体",
+  "This will permanently remove the agent and all its profiles. This action cannot be undone.":
+    "这将永久移除该智能体及其全部方案，且无法撤销。",
+  "Queued…": "已排队…",
+  "Installing…": "安装中…",
+  "Show terminal directly instead of chat interface": "直接显示终端，而不是对话界面",
+  "Tokens prepended to the agent launch command, so it runs under a sandbox launcher (e.g. greywall --). The value is shell-tokenised. Leave empty to run the agent directly. Applies to ACP sessions only — it has no effect when the profile uses TUI passthrough.":
+    "将这些令牌添加到智能体启动命令前，使其通过隔离启动器运行（例如 greywall --）。该值会按 Shell 令牌解析。留空则直接运行智能体。仅适用于 ACP 会话；方案使用 TUI 直通时无效。",
+  "No CLI flags configured. Add one below.": "尚未配置 CLI 参数。请在下方添加。",
+  "Flags passed to the agent CLI on launch. Only enabled entries are applied.":
+    "启动时传递给智能体 CLI 的参数。只有启用的条目会生效。",
+  "Value (optional)": "值（可选）",
+  "Injected into the execution environment. Use Secret mode for tokens and API keys; literal values are stored in the profile JSON.":
+    "注入执行环境。令牌和 API 密钥请使用“机密信息”模式；字面值会存储在方案 JSON 中。",
+  "No environment variables configured. Add one below.": "尚未配置环境变量。请在下方添加。",
+  Mode: "模式",
+  Flag: "参数",
+  Add: "添加",
+  "Built-in": "内置",
+  "MCP definitions are stored in the database and resolved per executor at runtime. This does not override your local agent config.":
+    "MCP 定义会存储在数据库中，并在运行时按执行器解析。这不会覆盖本地智能体配置。",
+  "Allow this profile to use MCP servers during sessions.": "允许此方案在会话期间使用 MCP 服务器。",
+  "MCP config will be applied after the profile is saved.": "保存方案后将应用 MCP 配置。",
+  "Save this profile to configure MCP servers.": "请先保存此方案，再配置 MCP 服务器。",
+  "In CLI passthrough mode, kandev injects these MCP servers via":
+    "在 CLI 直通模式下，Kandev 会通过以下方式注入这些 MCP 服务器：",
+  "OpenCode profile settings": "OpenCode 方案设置",
+  "The CLI command that will be executed based on the current settings.":
+    "将根据当前设置执行的 CLI 命令。",
+  "will be replaced with your task description or follow-up message.":
+    "将替换为你的任务说明或后续消息。",
+  "Authentication required. Run the agent CLI in your terminal to authenticate, then refresh.":
+    "需要身份验证。请在终端运行智能体 CLI 完成验证，然后刷新。",
+  "Failed to refresh: ": "刷新失败：",
+  "Request failed": "请求失败",
+  "Failed to save profile": "保存方案失败",
+  "Profile name is required": "方案名称为必填项",
+  "Please enter a profile name before saving.": "保存前请输入方案名称。",
+  "Failed to delete profile": "删除方案失败",
+  "Failed to save MCP config": "保存 MCP 配置失败",
+  "MCP servers config must be a JSON object": "MCP 服务器配置必须是 JSON 对象",
+  "mcpServers must be a JSON object": "mcpServers 必须是 JSON 对象",
+  "Invalid JSON": "JSON 无效",
+  "Auggie CLI-powered autonomous coding agent.": "由 Auggie CLI 驱动的自主编码智能体。",
+  "Google Gemini CLI-powered autonomous coding agent using ACP protocol.":
+    "使用 ACP 协议、由 Google Gemini CLI 驱动的自主编码智能体。",
+  "GitHub Copilot coding agent using the ACP protocol over stdin/stdout.":
+    "通过标准输入/输出使用 ACP 协议的 GitHub Copilot 编码智能体。",
+  "Sourcegraph Amp coding agent using the ACP protocol via the community bridge.":
+    "通过社区桥接器使用 ACP 协议的 Sourcegraph Amp 编码智能体。",
+  "Alibaba Qwen Code coding agent using the ACP protocol over stdin/stdout.":
+    "通过标准输入/输出使用 ACP 协议的阿里云通义 Qwen Code 编码智能体。",
+  "iFlow coding agent using ACP via the experimental --experimental-acp flag.":
+    "通过实验性 --experimental-acp 参数使用 ACP 的 iFlow 编码智能体。",
+  "Factory.ai Droid coding agent via `droid exec --output-format acp`.":
+    "通过 `droid exec --output-format acp` 使用的 Factory.ai Droid 编码智能体。",
+  "Kilocode coding agent using the ACP protocol over stdin/stdout.":
+    "通过标准输入/输出使用 ACP 协议的 Kilocode 编码智能体。",
+  "Pi Coding Agent using the ACP protocol via the pi-acp adapter.":
+    "通过 pi-acp 适配器使用 ACP 协议的 Pi 编码智能体。",
+  "Cursor CLI coding agent (cursor-agent) using the ACP protocol. Requires a Cursor Pro subscription.":
+    "使用 ACP 协议的 Cursor CLI 编码智能体（cursor-agent）。需要 Cursor Pro 订阅。",
+  "AWS Kiro coding agent using the ACP protocol via kiro-cli-chat.":
+    "通过 kiro-cli-chat 使用 ACP 协议的 AWS Kiro 编码智能体。",
+  "Qoder coding agent using the ACP protocol via qodercli --acp.":
+    "通过 qodercli --acp 使用 ACP 协议的 Qoder 编码智能体。",
+  "ByteDance Trae IDE coding agent using the ACP protocol via traecli acp serve.":
+    "通过 traecli acp serve 使用 ACP 协议的字节跳动 Trae IDE 编码智能体。",
+  "Oh My Pi (omp) coding agent using the ACP protocol via the `omp acp` subcommand.":
+    "通过 `omp acp` 子命令使用 ACP 协议的 Oh My Pi（omp）编码智能体。",
+  "Cognition Devin coding agent using the ACP protocol via `devin acp`.":
+    "通过 `devin acp` 使用 ACP 协议的 Cognition Devin 编码智能体。",
+  "xAI Grok coding agent using the ACP protocol over stdin/stdout.":
+    "通过标准输入/输出使用 ACP 协议的 xAI Grok 编码智能体。",
+  "Nous Research Hermes coding agent using the ACP protocol via hermes acp.":
+    "通过 hermes acp 使用 ACP 协议的 Nous Research Hermes 编码智能体。",
+  "CLI Passthrough": "CLI 直通",
+  "Forward stdin/stdout straight to the CLI subprocess. Disables ACP.":
+    "将标准输入/输出直接转发给 CLI 子进程，会停用 ACP。",
+  "Auto-approve all permissions": "自动批准所有权限",
+  "Kandev allows every agent permission request without prompting you.":
+    "Kandev 会自动允许所有智能体权限请求，不再提示你。",
+  "Kandev allows every agent permission request without prompting you. Dangerous — use only in trusted workspaces.":
+    "Kandev 会自动允许所有智能体权限请求，不再提示你。危险操作——仅在受信任的工作区使用。",
+  "Enable workspace indexing without confirmation": "启用工作区索引，无需确认",
+  "Permit the CLI to upload code for cloud indexing (auggie / similar).":
+    "允许 CLI 上传代码用于云端索引（Auggie 或类似工具）。",
+  "Hide advanced options": "隐藏高级选项",
+  "Show advanced options": "显示高级选项",
+  Disable: "停用",
+  Enable: "启用",
+  configured: "已配置",
+  "profile settings": "方案设置",
+  "Failed to load command preview": "加载命令预览失败",
+  "flag": "参数",
+  "env var": "环境变量",
+  "enabled": "已启用",
+  "of": "/",
+  Color: "颜色",
+  Delete: "删除",
+  "Auto-archive": "自动归档",
+  after: "在",
+  hours: "小时后",
+  "Start step": "开始步骤",
+  "Disable plan mode": "停用计划模式",
+  "Step Prompt": "步骤提示词",
+  Templates: "模板",
+  "Export All": "全部导出",
+  Import: "导入",
+  "Delete Workflow": "删除工作流",
+  "Delete workflow": "删除工作流",
+  "This workflow has": "此工作流包含",
+  "Choose where to migrate them, or delete the workflow and archive the tasks.":
+    "请选择迁移目标，或删除工作流并归档这些任务。",
+  "This will permanently delete the workflow and all its steps.": "这将永久删除工作流及其全部步骤。",
+  "Unsaved workflow changes will be discarded.": "未保存的工作流更改将被丢弃。",
+  "Migrate & Delete": "迁移并删除",
+  "Migrate & Delete Step": "迁移并删除步骤",
+  "Migrate...": "正在迁移…",
+  "Migrating...": "正在迁移…",
+  "Delete & Archive Tasks": "删除并归档任务",
+  "Delete Step & Tasks": "删除步骤及任务",
+  "Delete Step": "删除步骤",
+  "Target Workflow": "目标工作流",
+  "Target Step": "目标步骤",
+  "Waiting for the failed change to be retried.": "等待重试失败的更改。",
+  "Save workflows before ordering them": "请先保存工作流，再调整顺序",
+  "Failed to load workflow steps": "加载工作流步骤失败",
+  "Failed to delete workflow": "删除工作流失败",
+  "Failed to export workflows": "导出工作流失败",
+  "Failed to import workflows": "导入工作流失败",
+  "Import complete": "导入完成",
+  "Created:": "已创建：",
+  "Skipped (already exist):": "已跳过（已存在）：",
+  "Invalid YAML": "YAML 无效",
+  "Adding...": "正在添加…",
+  "Name": "名称",
+  "Create your own agentic workflow from scratch.": "从零开始创建自己的智能体工作流。",
+  "Classic board with automated agent work. Tasks start in In Progress where the agent runs automatically, then move to Review when done.":
+    "经典看板：智能体自动执行任务。任务从“进行中”开始，智能体自动运行，完成后移至“审核”。",
+  "Two-phase workflow: the agent first creates a plan for your review, then implements it. Ideal for tasks that benefit from upfront design.":
+    "两阶段工作流：智能体先创建计划供你审核，再执行实现。适合需要先进行设计的任务。",
+  "Focus on architecture and design. The agent creates technical designs for your review before any implementation begins.":
+    "专注架构与设计。智能体先创建技术设计供你审核，然后才开始实现。",
+  "Full development lifecycle: spec with user review, implementation with TDD, automated code review, QA verification, draft PR, and CI fixup. Ideal for features that need quality gates between phases.":
+    "完整开发生命周期：规格说明与用户审核、TDD 实现、自动代码审查、QA 验证、草稿 PR 和 CI 修复。适合需要在各阶段设置质量门禁的功能。",
+  "Track pull requests through review. PRs wait in queue, get reviewed by the agent, then marked as done.":
+    "跟踪拉取请求的审核流程。PR 先在队列中等待，由智能体审核后标记为完成。",
+  "Plan & Build": "计划与构建",
+  Architecture: "架构",
+  "Feature Dev": "功能开发",
+  "PR Review": "PR 审核",
+  Ideas: "想法",
+  Planning: "规划",
+  Approved: "已批准",
+  Spec: "规格说明",
+  Work: "开发",
+  QA: "质量验证",
+  PR: "PR",
+  "CI Fixup": "CI 修复",
+  Waiting: "等待",
+  Implementation: "实现",
+  "Unsaved step changes will be discarded.": "未保存的步骤更改将被丢弃。",
+  "Create Workflow": "创建工作流",
+  "Override the agent profile for this step. A different profile creates a new session with fresh context when entering this step.":
+    "覆盖此步骤的智能体方案。切换方案后进入此步骤时会创建带有全新上下文的新会话。",
+  "Automatically archive tasks after they have been in this step for a set number of hours. Useful for the last step of a workflow (e.g., Done) to keep the board clean.":
+    "任务在此步骤停留指定小时数后自动归档。适用于工作流的最后一步（例如“已完成”），可保持看板整洁。",
+  "New tasks start in this step. Only one step per workflow can be the start step.":
+    "新任务从此步骤开始。每个工作流只能有一个开始步骤。",
+  "Automatically start the agent when a task enters this step.":
+    "任务进入此步骤时自动启动智能体。",
+  "Agent proposes a plan instead of making changes directly.":
+    "智能体先提出计划，而不是直接进行更改。",
+  "Not needed — switching agent profiles already creates a new session with fresh context.":
+    "无需启用——切换智能体方案时已经会创建带有全新上下文的新会话。",
+  "Restart the agent with a fresh conversation context when entering this step. Useful for review steps that need an unbiased perspective.":
+    "进入此步骤时以全新的对话上下文重启智能体。适用于需要保持独立视角的审核步骤。",
+  "Allow dragging tasks into this step on the board.": "允许在看板上将任务拖入此步骤。",
+  "Show tasks in this step when opening the command panel (Cmd+K). Useful for hiding backlog or done steps from quick access.":
+    "打开命令面板（Cmd+K）时显示此步骤中的任务。可用于从快速访问中隐藏待办或已完成步骤。",
+  "Runs when leaving this step (before entering the next step).":
+    "离开此步骤时运行（进入下一步骤之前）。",
+  "Keep plan mode on for every turn in this step, then turn it off only when the task moves to another step.":
+    "此步骤中的每一轮都保持计划模式，仅在任务移动到其他步骤时关闭。",
+  "Custom instructions for the agent on this step. Use {{task_prompt}} to include the task description.":
+    "为智能体设置此步骤的自定义指令。使用 {{task_prompt}} 可包含任务说明。",
+  "On Turn Start": "轮次开始时",
+  "Runs when a user sends a message. Use for review cycles (e.g., move back to In Progress on feedback).":
+    "用户发送消息时运行。可用于审核循环（例如收到反馈后移回“进行中”）。",
+  "On Turn Complete": "轮次完成时",
+  "Runs after the agent finishes a turn. Use to auto-advance tasks through the pipeline.":
+    "智能体完成一轮后运行。可用于让任务自动沿流水线推进。",
+  "When Child Tasks Complete": "子任务完成时",
+  "Use this on a parent task step. When every active direct child task is COMPLETED, FAILED, or CANCELLED, Kandev runs this transition once. Archived and ephemeral child tasks are ignored. Grandchildren do not count here, and nothing runs if the parent has no child tasks.":
+    "将此项用于父任务步骤。当所有活跃的直接子任务都变为“已完成”“失败”或“已取消”时，Kandev 执行一次此流转。已归档和临时子任务会被忽略；孙任务不计入；父任务没有子任务时不会执行。",
+  "Turn off plan mode after the agent finishes a turn, even when the task remains in this step.":
+    "智能体完成一轮后关闭计划模式，即使任务仍停留在此步骤。",
+  "Only auto-advance once the agent calls step_complete_kandev. Otherwise turn-end is treated as completion.":
+    "仅当智能体调用 step_complete_kandev 后才自动推进；否则轮次结束会被视为完成。",
+  "Disable plan mode on complete": "完成时停用计划模式",
+  "How child task completion transitions work": "子任务完成后的流转规则",
+  "Wait for agent completion signal": "等待智能体完成信号",
+  Gray: "灰色",
+  Red: "红色",
+  Orange: "橙色",
+  Yellow: "黄色",
+  Green: "绿色",
+  Cyan: "青色",
+  Blue: "蓝色",
+  Indigo: "靛蓝色",
+  Purple: "紫色",
+  "More information": "更多信息",
+  auto: "自动",
+  back: "返回",
+  goto: "跳转",
+  Cycle: "循环",
 };
 
 function isUiLocale(value: string | null): value is UiLocale {

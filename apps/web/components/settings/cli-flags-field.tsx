@@ -9,6 +9,7 @@ import { Label } from "@kandev/ui/label";
 import { Switch } from "@kandev/ui/switch";
 import type { CLIFlag, PermissionSetting } from "@/lib/types/http";
 import { SettingsCard } from "@/components/settings/settings-card";
+import { translate } from "@/lib/i18n/locale";
 
 /**
  * Editor-side representation of a single custom CLI flag. The persisted
@@ -222,8 +223,8 @@ function CuratedFlagsSection({
             data-testid={`cli-flag-curated-${setting.key}`}
           >
             <div className="flex-1 min-w-0 space-y-0.5">
-              <Label className={labelCls}>{setting.label}</Label>
-              <p className="text-xs text-muted-foreground">{setting.description}</p>
+              <Label className={labelCls}>{translate(setting.label)}</Label>
+              <p className="text-xs text-muted-foreground">{translate(setting.description)}</p>
               <code className="text-[10px] text-muted-foreground/80">{setting.flag}</code>
             </div>
             <Switch
@@ -231,7 +232,7 @@ function CuratedFlagsSection({
               checked={enabled}
               onCheckedChange={(checked) => onToggle(setting, checked)}
               data-testid={`cli-flag-curated-enabled-${setting.key}`}
-              aria-label={`${enabled ? "Disable" : "Enable"} ${setting.label}`}
+              aria-label={`${translate(enabled ? "Disable" : "Enable")} ${translate(setting.label)}`}
             />
           </div>
         );
@@ -310,7 +311,7 @@ function CLIFlagRow({
         checked={row.enabled}
         onCheckedChange={(checked) => update({ enabled: checked })}
         data-testid={`cli-flag-enabled-${index}`}
-        aria-label={`${row.enabled ? "Disable" : "Enable"} ${row.flag}`}
+        aria-label={`${translate(row.enabled ? "Disable" : "Enable")} ${row.flag}`}
       />
       <Button
         type="button"
@@ -319,7 +320,7 @@ function CLIFlagRow({
         onClick={() => onRemove(index)}
         className="h-8 w-8 shrink-0 cursor-pointer"
         data-testid={`cli-flag-remove-${index}`}
-        aria-label={`Remove ${row.flag || "flag"}`}
+        aria-label={`${translate("Remove")} ${row.flag || translate("flag")}`}
       >
         <IconTrash className="h-3.5 w-3.5 text-muted-foreground" />
       </Button>
@@ -350,7 +351,7 @@ function CLIFlagsAddForm({ onAdd }: { onAdd: (next: CLIFlag) => void }) {
     <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
       <div className="flex-[2] space-y-1">
         <Label className="text-xs" htmlFor={flagId}>
-          Flag
+          {translate("Flag")}
         </Label>
         <Input
           id={flagId}
@@ -364,7 +365,7 @@ function CLIFlagsAddForm({ onAdd }: { onAdd: (next: CLIFlag) => void }) {
       </div>
       <div className="flex-[3] space-y-1">
         <Label className="text-xs" htmlFor={valueId}>
-          Value (optional)
+          {translate("Value (optional)")}
         </Label>
         <Input
           id={valueId}
@@ -386,7 +387,7 @@ function CLIFlagsAddForm({ onAdd }: { onAdd: (next: CLIFlag) => void }) {
         data-testid="cli-flag-add-button"
       >
         <IconPlus className="h-3.5 w-3.5 mr-1" />
-        Add
+        {translate("Add")}
       </Button>
     </div>
   );
@@ -437,14 +438,14 @@ export function CustomCLIFlagsCard({
       <CardHeader>
         <div className="flex items-center justify-between gap-3">
           <div>
-            <CardTitle>Agent CLI flags</CardTitle>
+            <CardTitle>{translate("Agent CLI flags")}</CardTitle>
             <CardDescription>
-              Flags passed to the agent CLI on launch. Only enabled entries are applied.
+              {translate("Flags passed to the agent CLI on launch. Only enabled entries are applied.")}
             </CardDescription>
           </div>
           {customFlags.length > 0 && (
             <span className="text-[10px] text-muted-foreground" data-testid="cli-flags-count">
-              {enabledCount} of {customFlags.length} enabled
+              {enabledCount}/{customFlags.length} {translate("enabled")}
             </span>
           )}
         </div>

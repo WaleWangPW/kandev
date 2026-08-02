@@ -3,6 +3,7 @@
 import { Input } from "@kandev/ui/input";
 import { Label } from "@kandev/ui/label";
 import type { ProfileFormData } from "@/components/settings/profile-form-fields";
+import { translate } from "@/lib/i18n/locale";
 
 export function CommandPrefixField({
   profile,
@@ -22,7 +23,7 @@ export function CommandPrefixField({
       }
       data-settings-dirty-level="container"
     >
-      <Label htmlFor="profile-command-prefix">Command prefix</Label>
+      <Label htmlFor="profile-command-prefix">{translate("Command prefix")}</Label>
       <Input
         id="profile-command-prefix"
         data-testid="command-prefix-input"
@@ -31,10 +32,9 @@ export function CommandPrefixField({
         placeholder="e.g. greywall --"
       />
       <p className="text-xs text-muted-foreground">
-        Tokens prepended to the agent launch command, so it runs under a sandbox launcher (e.g.{" "}
-        <code>greywall --</code>). The value is shell-tokenised. Leave empty to run the agent
-        directly. Applies to ACP sessions only — it has no effect when the profile uses TUI
-        passthrough.
+        将这些令牌添加到智能体启动命令前，使其通过隔离启动器运行（例如{" "}
+        <code>greywall --</code>）。该值会按 Shell 令牌解析。留空则直接运行智能体。仅适用于
+        ACP 会话；方案使用 TUI 直通时无效。
       </p>
     </div>
   );

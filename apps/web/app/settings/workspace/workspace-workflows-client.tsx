@@ -48,6 +48,7 @@ import {
 } from "@/app/settings/workspace/workspace-workflows-dialogs";
 import { useWorkflowCreation } from "@/app/settings/workspace/use-workflow-creation";
 import { WorkspaceNotFoundCard } from "@/app/settings/workspace/workspace-not-found-card";
+import { translate } from "@/lib/i18n/locale";
 
 type WorkspaceWorkflowsClientProps = {
   workspace: Workspace | null;
@@ -410,7 +411,7 @@ function WorkflowDialogs({ page }: { page: ReturnType<typeof useWorkspaceWorkflo
       <WorkflowExportDialog
         open={page.isExportDialogOpen}
         onOpenChange={page.setIsExportDialogOpen}
-        title="Export Workflows"
+        title={translate("Export Workflows")}
         content={page.exportYaml}
       />
       <ImportWorkflowsDialog
@@ -454,17 +455,23 @@ export function WorkspaceWorkflowsClient({
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h2 className="text-2xl font-bold">{workspace.name}</h2>
-          <p className="text-sm text-muted-foreground mt-1">Manage workflows for this workspace.</p>
+          <p className="text-sm text-muted-foreground mt-1">
+            {translate("Manage workflows for this workspace.")}
+          </p>
         </div>
         <Button asChild variant="outline" size="sm">
-          <Link href={`/settings/workspace/${workspace.id}`}>Workspace settings</Link>
+          <Link href={`/settings/workspace/${workspace.id}`}>
+            {translate("Workspace settings")}
+          </Link>
         </Button>
       </div>
       <Separator />
       <SettingsSection
         icon={<IconArrowsShuffle className="h-5 w-5" />}
         title="Workflows"
-        description="Create autonomous pipelines with automated transitions or manual workflows where you move tasks yourself"
+        description={translate(
+          "Create autonomous pipelines with automated transitions or manual workflows where you move tasks yourself",
+        )}
         action={
           <WorkflowSectionActions
             onExport={page.handleExportAll}

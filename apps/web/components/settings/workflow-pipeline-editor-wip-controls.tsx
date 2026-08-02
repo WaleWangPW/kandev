@@ -6,6 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import type { WorkflowStep } from "@/lib/types/http";
 import { HelpTip } from "./workflow-pipeline-editor-helpers";
 import { isWorkflowStepValueDirty } from "./workflow-dirty-state";
+import { translate } from "@/lib/i18n/locale";
 
 type StepWipControlsProps = {
   step: WorkflowStep;
@@ -37,9 +38,13 @@ export function StepWipControls({
       <div className="space-y-1.5">
         <div className="flex items-center gap-1.5">
           <Label htmlFor={`${step.id}-wip-limit`} className="text-xs font-medium">
-            WIP limit
+            {translate("WIP limit")}
           </Label>
-          <HelpTip text="Maximum admitted (active) tasks in this step. Overflow stays visible in a queue. Use 0 for unlimited." />
+          <HelpTip
+            text={translate(
+              "Maximum admitted (active) tasks in this step. Overflow stays visible in a queue. Use 0 for unlimited.",
+            )}
+          />
         </div>
         <Input
           id={`${step.id}-wip-limit`}
@@ -64,9 +69,13 @@ export function StepWipControls({
       <div className="space-y-1.5">
         <div className="flex items-center gap-1.5">
           <Label htmlFor={pullFromSelectID} className="text-xs font-medium">
-            Pull from
+            {translate("Pull from")}
           </Label>
-          <HelpTip text="Optional feeder step to pull queued work from when this step has capacity." />
+          <HelpTip
+            text={translate(
+              "Optional feeder step to pull queued work from when this step has capacity.",
+            )}
+          />
         </div>
         <Select
           value={pullFromValue}
@@ -86,11 +95,11 @@ export function StepWipControls({
               (item) => item.pull_from_step_id ?? "",
             )}
           >
-            <SelectValue placeholder="No feeder step" />
+            <SelectValue placeholder={translate("No feeder step")} />
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="none" className="cursor-pointer">
-              No feeder step
+              {translate("No feeder step")}
             </SelectItem>
             {otherSteps.map((candidate) => (
               <SelectItem key={candidate.id} value={candidate.id} className="cursor-pointer">
@@ -101,8 +110,9 @@ export function StepWipControls({
         </Select>
       </div>
       <p className="text-xs text-muted-foreground sm:col-span-2">
-        WIP limits active work, not visibility. Overflow remains on the board until capacity opens;
-        if a selected feeder is also full, new task creation is rejected.
+        {translate(
+          "WIP limits active work, not visibility. Overflow remains on the board until capacity opens; if a selected feeder is also full, new task creation is rejected.",
+        )}
       </p>
     </div>
   );

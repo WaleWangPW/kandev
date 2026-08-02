@@ -9,6 +9,7 @@ import { Label } from "@kandev/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@kandev/ui/select";
 import type { ProfileEnvVar } from "@/lib/types/http";
 import { SettingsCard } from "@/components/settings/settings-card";
+import { translate } from "@/lib/i18n/locale";
 
 export type EnvVarRow = {
   key: string;
@@ -118,8 +119,8 @@ function EnvVarRowComponent({
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="value">Value</SelectItem>
-          <SelectItem value="secret">Secret</SelectItem>
+        <SelectItem value="value">{translate("Value")}</SelectItem>
+        <SelectItem value="secret">{translate("Secret")}</SelectItem>
         </SelectContent>
       </Select>
       <ValueOrSecretInput
@@ -136,7 +137,7 @@ function EnvVarRowComponent({
         onClick={() => onRemove(index)}
         className="h-8 w-8 shrink-0 cursor-pointer"
         data-testid={`env-var-remove-${index}`}
-        aria-label={`Remove ${row.key || "env var"}`}
+        aria-label={`${translate("Remove")} ${row.key || translate("env var")}`}
       >
         <IconTrash className="h-3.5 w-3.5 text-muted-foreground" />
       </Button>
@@ -224,7 +225,7 @@ function EnvVarAddForm({
     <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
       <div className="flex-[2] space-y-1">
         <Label className="text-xs" htmlFor={keyId}>
-          Key
+          {translate("Key")}
         </Label>
         <Input
           id={keyId}
@@ -238,7 +239,7 @@ function EnvVarAddForm({
       </div>
       <div className="space-y-1">
         <Label className="text-xs" htmlFor={modeId}>
-          Mode
+          {translate("Mode")}
         </Label>
         <Select
           value={draft.mode}
@@ -250,14 +251,14 @@ function EnvVarAddForm({
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="value">Value</SelectItem>
-            <SelectItem value="secret">Secret</SelectItem>
+            <SelectItem value="value">{translate("Value")}</SelectItem>
+            <SelectItem value="secret">{translate("Secret")}</SelectItem>
           </SelectContent>
         </Select>
       </div>
       <div className="flex-[3] space-y-1">
         <Label className="text-xs" htmlFor={valueId}>
-          {draft.mode === "value" ? "Value" : "Secret"}
+          {translate(draft.mode === "value" ? "Value" : "Secret")}
         </Label>
         <DraftValueInput
           draft={draft}
@@ -277,7 +278,7 @@ function EnvVarAddForm({
         data-testid="env-var-add-button"
       >
         <IconPlus className="h-3.5 w-3.5 mr-1" />
-        Add
+        {translate("Add")}
       </Button>
     </div>
   );
@@ -304,7 +305,7 @@ function EnvVarsFieldBody({
     <div className="space-y-3" data-testid="env-vars-field">
       {rows.length === 0 ? (
         <p className="text-xs italic text-muted-foreground" data-testid="env-vars-empty">
-          No environment variables configured. Add one below.
+          {translate("No environment variables configured. Add one below.")}
         </p>
       ) : (
         <ul className="space-y-2" data-testid="env-vars-list">
@@ -353,15 +354,16 @@ export function EnvVarsCard(props: EnvVarsFieldProps) {
       <CardHeader>
         <div className="flex items-center justify-between gap-3">
           <div>
-            <CardTitle>Environment Variables</CardTitle>
+            <CardTitle>{translate("Environment Variables")}</CardTitle>
             <CardDescription>
-              Injected into the execution environment. Use Secret mode for tokens and API keys;
-              literal values are stored in the profile JSON.
+              {translate(
+                "Injected into the execution environment. Use Secret mode for tokens and API keys; literal values are stored in the profile JSON.",
+              )}
             </CardDescription>
           </div>
           {props.rows.length > 0 && (
             <span className="text-[10px] text-muted-foreground" data-testid="env-vars-count">
-              {props.rows.length} configured
+              {props.rows.length} {translate("configured")}
             </span>
           )}
         </div>

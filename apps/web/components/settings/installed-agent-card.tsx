@@ -11,6 +11,7 @@ import { AgentLogo } from "@/components/agent-logo";
 import { AgentLoginDialog } from "@/components/settings/agent-login-dialog";
 import { AgentRuntimeUpdateControl } from "@/components/settings/agent-runtime-update-control";
 import { HostShellDialog } from "@/components/settings/host-shell-dialog";
+import { translate } from "@/lib/i18n/locale";
 import type { AgentUpdateJob, AgentUpdatePreview, InstallJob } from "@/lib/api";
 import type { Agent, AgentDiscovery, RuntimeUpdate } from "@/lib/types/http";
 
@@ -64,12 +65,14 @@ function InstalledAgentIdentity({
                 <span
                   data-testid={`probing-icon-${agent.name}`}
                   className="flex items-center text-muted-foreground cursor-help"
-                  aria-label="Checking authentication"
+                  aria-label={translate("Checking authentication")}
                 >
                   <IconLoader2 className="h-3.5 w-3.5 animate-spin" />
                 </span>
               </TooltipTrigger>
-              <TooltipContent>Checking agent capabilities and authentication...</TooltipContent>
+              <TooltipContent>
+                {translate("Checking agent capabilities and authentication...")}
+              </TooltipContent>
             </Tooltip>
           )}
           {authRequired && (
@@ -80,15 +83,15 @@ function InstalledAgentIdentity({
                   onClick={onAuthClick}
                   data-testid={`auth-icon-${agent.name}`}
                   className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-amber-500 cursor-pointer hover:bg-amber-500/10"
-                  aria-label="Authentication required"
+                  aria-label={translate("Authentication required")}
                 >
                   <IconLock className="h-3.5 w-3.5" />
                 </button>
               </TooltipTrigger>
               <TooltipContent>
                 {loginAvailable
-                  ? "Authentication required - click to open login terminal"
-                  : "Authentication required - click to open a shell and sign in"}
+                  ? translate("Authentication required - click to open login terminal")
+                  : translate("Authentication required - click to open a shell and sign in")}
               </TooltipContent>
             </Tooltip>
           )}
@@ -98,7 +101,7 @@ function InstalledAgentIdentity({
         className="text-xs text-muted-foreground line-clamp-2 min-h-[2rem]"
         title={agent.matched_path ?? undefined}
       >
-        {agent.matched_path ? `Detected at ${agent.matched_path}` : ""}
+        {agent.matched_path ? `${translate("Detected at")} ${agent.matched_path}` : ""}
       </p>
     </div>
   );
@@ -164,7 +167,7 @@ export function InstalledAgentCard({
               }
             >
               <IconSettings className="mr-2 h-4 w-4" />
-              {hasAgentRecord ? "Create new profile" : "Setup Profile"}
+              {translate(hasAgentRecord ? "Create new profile" : "Setup Profile")}
             </Link>
           </Button>
           {runtimeUpdate?.supported && onPreview && onUpdate && (

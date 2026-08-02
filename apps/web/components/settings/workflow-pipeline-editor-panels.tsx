@@ -32,6 +32,7 @@ import {
 } from "./workflow-pipeline-editor-step-actions";
 import { StepWipControls } from "./workflow-pipeline-editor-wip-controls";
 import { isWorkflowStepDirty, isWorkflowStepValueDirty } from "./workflow-dirty-state";
+import { translate } from "@/lib/i18n/locale";
 
 // --- StepAgentProfileSelect ---
 
@@ -68,11 +69,11 @@ function StepAgentProfileSelect({
           )}
         >
           <IconRobot className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-          <SelectValue placeholder="No profile override" />
+          <SelectValue placeholder={translate("No profile override")} />
         </SelectTrigger>
         <SelectContent>
           <SelectItem value="none" className="cursor-pointer">
-            No profile override
+            {translate("No profile override")}
           </SelectItem>
           {healthyProfiles.map((p) => (
             <SelectItem key={p.id} value={p.id} className="cursor-pointer">
@@ -81,7 +82,11 @@ function StepAgentProfileSelect({
           ))}
         </SelectContent>
       </Select>
-      <HelpTip text="Override the agent profile for this step. A different profile creates a new session with fresh context when entering this step." />
+      <HelpTip
+        text={translate(
+          "Override the agent profile for this step. A different profile creates a new session with fresh context when entering this step.",
+        )}
+      />
     </div>
   );
 }
@@ -120,7 +125,7 @@ function StepConfigHeader({
             onLocalNameChange(e.target.value);
             debouncedUpdateName(e.target.value);
           }}
-          placeholder="Step name"
+          placeholder={translate("Step name")}
           disabled={readOnly}
           className="h-8 w-full sm:max-w-[240px]"
           data-settings-dirty={!savedStep || localName !== savedStep.name}
@@ -137,14 +142,14 @@ function StepConfigHeader({
             className="h-8 w-full sm:w-[120px]"
             data-settings-dirty={isWorkflowStepValueDirty(step, savedStep, (item) => item.color)}
           >
-            <SelectValue placeholder="Color" />
+            <SelectValue placeholder={translate("Color")} />
           </SelectTrigger>
           <SelectContent position="popper" side="bottom" align="start">
             {STEP_COLORS.map((color) => (
               <SelectItem key={color.value} value={color.value}>
                 <div className="flex items-center gap-2">
                   <div className={cn("w-3 h-3 rounded-full", color.value)} />
-                  {color.label}
+                  {translate(color.label)}
                 </div>
               </SelectItem>
             ))}
@@ -166,7 +171,7 @@ function StepConfigHeader({
         className="h-8 self-end cursor-pointer text-destructive hover:text-destructive sm:self-auto"
       >
         <IconTrash className="h-3.5 w-3.5 mr-1" />
-        Delete
+        {translate("Delete")}
       </Button>
     </div>
   );
@@ -200,12 +205,16 @@ function StepAutoArchiveRow({ step, savedStep, onUpdate, readOnly }: StepAutoArc
         data-settings-dirty={isDirty}
       />
       <Label htmlFor={`${step.id}-auto-archive`} className="text-sm">
-        Auto-archive
+        {translate("Auto-archive")}
       </Label>
-      <HelpTip text="Automatically archive tasks after they have been in this step for a set number of hours. Useful for the last step of a workflow (e.g., Done) to keep the board clean." />
+      <HelpTip
+        text={translate(
+          "Automatically archive tasks after they have been in this step for a set number of hours. Useful for the last step of a workflow (e.g., Done) to keep the board clean.",
+        )}
+      />
       {(step.auto_archive_after_hours ?? 0) > 0 && (
         <>
-          <span className="text-sm text-muted-foreground">after</span>
+          <span className="text-sm text-muted-foreground">{translate("after")}</span>
           <Input
             id={`${step.id}-auto-archive-hours`}
             type="number"
@@ -220,7 +229,7 @@ function StepAutoArchiveRow({ step, savedStep, onUpdate, readOnly }: StepAutoArc
             disabled={readOnly}
             data-settings-dirty={isDirty}
           />
-          <span className="text-sm text-muted-foreground">hours</span>
+          <span className="text-sm text-muted-foreground">{translate("hours")}</span>
         </>
       )}
     </div>
@@ -292,8 +301,10 @@ function StepBehaviorSection({
           checked={step.is_start_step === true}
           onCheckedChange={(c) => !readOnly && onUpdate({ is_start_step: c })}
           disabled={readOnly}
-          label="Start step"
-          helpText="New tasks start in this step. Only one step per workflow can be the start step."
+          label={translate("Start step")}
+          helpText={translate(
+            "New tasks start in this step. Only one step per workflow can be the start step.",
+          )}
           isDirty={isWorkflowStepValueDirty(step, savedStep, (item) => item.is_start_step ?? false)}
         />
         <StepCheckboxRow
@@ -301,8 +312,8 @@ function StepBehaviorSection({
           checked={hasOnEnterAction(step, "auto_start_agent")}
           onCheckedChange={() => !readOnly && toggleOnEnterAction("auto_start_agent")}
           disabled={readOnly}
-          label="Auto-start agent"
-          helpText="Automatically start the agent when a task enters this step."
+          label={translate("Auto-start agent")}
+          helpText={translate("Automatically start the agent when a task enters this step.")}
           isDirty={isWorkflowStepValueDirty(step, savedStep, (item) =>
             hasOnEnterAction(item, "auto_start_agent"),
           )}
@@ -312,8 +323,8 @@ function StepBehaviorSection({
           checked={hasOnEnterAction(step, "enable_plan_mode")}
           onCheckedChange={() => !readOnly && toggleOnEnterAction("enable_plan_mode")}
           disabled={readOnly}
-          label="Plan mode"
-          helpText="Agent proposes a plan instead of making changes directly."
+          label={translate("Plan mode")}
+          helpText={translate("Agent proposes a plan instead of making changes directly.")}
           isDirty={isWorkflowStepValueDirty(step, savedStep, (item) =>
             hasOnEnterAction(item, "enable_plan_mode"),
           )}
@@ -323,11 +334,15 @@ function StepBehaviorSection({
           checked={hasOnEnterAction(step, "reset_agent_context")}
           onCheckedChange={() => !readOnly && toggleOnEnterAction("reset_agent_context")}
           disabled={readOnly || !!step.agent_profile_id}
-          label="Reset agent context"
+          label={translate("Reset agent context")}
           helpText={
             step.agent_profile_id
-              ? "Not needed — switching agent profiles already creates a new session with fresh context."
-              : "Restart the agent with a fresh conversation context when entering this step. Useful for review steps that need an unbiased perspective."
+              ? translate(
+                  "Not needed — switching agent profiles already creates a new session with fresh context.",
+                )
+              : translate(
+                  "Restart the agent with a fresh conversation context when entering this step. Useful for review steps that need an unbiased perspective.",
+                )
           }
           isDirty={isWorkflowStepValueDirty(step, savedStep, (item) =>
             hasOnEnterAction(item, "reset_agent_context"),
@@ -338,8 +353,8 @@ function StepBehaviorSection({
           checked={step.allow_manual_move !== false}
           onCheckedChange={(c) => !readOnly && onUpdate({ allow_manual_move: c })}
           disabled={readOnly}
-          label="Allow manual move"
-          helpText="Allow dragging tasks into this step on the board."
+          label={translate("Allow manual move")}
+          helpText={translate("Allow dragging tasks into this step on the board.")}
           isDirty={isWorkflowStepValueDirty(
             step,
             savedStep,
@@ -351,8 +366,10 @@ function StepBehaviorSection({
           checked={step.show_in_command_panel !== false}
           onCheckedChange={(c) => !readOnly && onUpdate({ show_in_command_panel: c })}
           disabled={readOnly}
-          label="Show in command panel"
-          helpText="Show tasks in this step when opening the command panel (Cmd+K). Useful for hiding backlog or done steps from quick access."
+          label={translate("Show in command panel")}
+          helpText={translate(
+            "Show tasks in this step when opening the command panel (Cmd+K). Useful for hiding backlog or done steps from quick access.",
+          )}
           isDirty={isWorkflowStepValueDirty(
             step,
             savedStep,
@@ -411,7 +428,7 @@ function StepTransitionsSection({
     <div className="space-y-3">
       <div className="flex items-center gap-1.5">
         <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-          Transitions
+          {translate("Transitions")}
         </Label>
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
@@ -445,8 +462,8 @@ function StepTransitionsSection({
       {planModeEnabled && (
         <div className="space-y-2">
           <div className="flex items-center gap-1.5">
-            <Label className="text-xs font-medium">On Exit</Label>
-            <HelpTip text="Runs when leaving this step (before entering the next step)." />
+            <Label className="text-xs font-medium">{translate("On Exit")}</Label>
+            <HelpTip text={translate("Runs when leaving this step (before entering the next step)." )} />
           </div>
           <div className="flex items-center gap-2">
             <Checkbox
@@ -462,9 +479,13 @@ function StepTransitionsSection({
               )}
             />
             <Label htmlFor={`${step.id}-exit-disable-plan`} className="text-sm">
-              Disable plan mode
+              {translate("Disable plan mode")}
             </Label>
-            <HelpTip text="Keep plan mode on for every turn in this step, then turn it off only when the task moves to another step." />
+            <HelpTip
+              text={translate(
+                "Keep plan mode on for every turn in this step, then turn it off only when the task moves to another step.",
+              )}
+            />
           </div>
         </div>
       )}
@@ -499,13 +520,19 @@ function StepPromptSection({
           htmlFor={`${step.id}-prompt`}
           className="text-xs font-medium text-muted-foreground uppercase tracking-wider"
         >
-          Step Prompt
+          {translate("Step Prompt")}
         </Label>
-        <HelpTip text="Custom instructions for the agent on this step. Use {{task_prompt}} to include the task description." />
+        <HelpTip
+          text={translate(
+            "Custom instructions for the agent on this step. Use {{task_prompt}} to include the task description.",
+          )}
+        />
       </div>
       {!readOnly && (
         <div className="flex items-center gap-1.5 flex-wrap">
-          <span className="text-[11px] text-muted-foreground/60">Templates:</span>
+          <span className="text-[11px] text-muted-foreground/60">
+            {translate("Templates")}:
+          </span>
           {PROMPT_TEMPLATES.map((template) => (
             <button
               key={template.label}

@@ -36,6 +36,7 @@ import { HostShellDialog } from "@/components/settings/host-shell-dialog";
 import { InstallAgentCard } from "@/components/settings/install-agent-card";
 import { InstalledAgentCard } from "@/components/settings/installed-agent-card";
 import { toAgentProfileOption } from "@/lib/state/slices/settings/types";
+import { translate } from "@/lib/i18n/locale";
 import type {
   AgentDiscovery,
   Agent,
@@ -82,7 +83,7 @@ function CopyButton({
       variant="ghost"
       size="sm"
       className="h-7 w-7 p-0 cursor-pointer shrink-0"
-      aria-label={isCopied ? "Copied" : "Copy install command"}
+      aria-label={translate(isCopied ? "Copied" : "Copy install command")}
       onClick={() => onCopy(text)}
     >
       {isCopied ? (
@@ -142,7 +143,7 @@ function ToolInstallCard({
           {tool.available && (
             <span className="flex items-center gap-1 text-xs text-green-600 dark:text-green-400">
               <IconCheck className="h-3.5 w-3.5" />
-              Installed
+              {translate("Installed")}
             </span>
           )}
         </div>
@@ -224,9 +225,9 @@ function InstalledAgentsHeader({
   return (
     <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
       <div>
-        <h3 className="text-lg font-semibold">Installed Agents</h3>
+        <h3 className="text-lg font-semibold">{translate("Installed Agents")}</h3>
         <p className="text-sm text-muted-foreground">
-          Agents detected on this machine are ready to configure.
+          {translate("Agents detected on this machine are ready to configure.")}
         </p>
       </div>
       <div className="flex w-full flex-wrap gap-2 sm:w-auto">
@@ -238,11 +239,11 @@ function InstalledAgentsHeader({
           data-testid="open-host-shell"
         >
           <IconTerminal2 className="h-4 w-4 mr-2" />
-          Terminal
+          {translate("Terminal")}
         </Button>
         <Button variant="outline" size="sm" onClick={onOpenTuiDialog} className="cursor-pointer">
           <IconPlus className="h-4 w-4 mr-2" />
-          Add TUI Agent
+          {translate("Add TUI Agent")}
         </Button>
         <Button
           variant="outline"
@@ -256,7 +257,7 @@ function InstalledAgentsHeader({
           ) : (
             <IconRefresh className="h-4 w-4 mr-2" />
           )}
-          Rescan
+          {translate("Rescan")}
         </Button>
       </div>
     </div>
@@ -303,11 +304,11 @@ function InstalledAgentsSection({
           <CardContent className="py-8 text-center">
             <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
               {discoveryLoading ? (
-                <span>Scanning for installed agents...</span>
+                <span>{translate("Scanning for installed agents...")}</span>
               ) : (
                 <>
                   <IconAlertTriangle className="h-4 w-4" />
-                  No installed agents were detected. Install one below, then click Rescan.
+                  {translate("No installed agents were detected. Install one below, then click Rescan.")}
                 </>
               )}
             </div>
@@ -358,10 +359,11 @@ function SuggestInstallSection({
     <div className="space-y-4">
       <Separator />
       <div>
-        <h3 className="text-lg font-semibold">Available to Install</h3>
+        <h3 className="text-lg font-semibold">{translate("Available to Install")}</h3>
         <p className="text-sm text-muted-foreground">
-          Click Install to run the agent&apos;s install script on the kandev host. Progress streams
-          live; you can start multiple installs in parallel.
+          {translate(
+            "Click Install to run the agent's install script on the kandev host. Progress streams live; you can start multiple installs in parallel.",
+          )}
         </p>
       </div>
 
@@ -397,8 +399,10 @@ function AgentProfilesSection({ savedAgents }: AgentProfilesSectionProps) {
     <div className="space-y-4">
       <Separator />
       <div>
-        <h3 className="text-lg font-semibold">Agent Profiles</h3>
-        <p className="text-sm text-muted-foreground">Manage existing profiles by agent.</p>
+        <h3 className="text-lg font-semibold">{translate("Agent Profiles")}</h3>
+        <p className="text-sm text-muted-foreground">
+          {translate("Manage existing profiles by agent.")}
+        </p>
       </div>
 
       <div className="space-y-2">
@@ -600,9 +604,9 @@ export default function AgentsSettingsPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h2 className="text-2xl font-bold">Agents</h2>
+        <h2 className="text-2xl font-bold">{translate("Agents")}</h2>
         <p className="text-sm text-muted-foreground mt-1">
-          Discover installed agents, install new ones, and manage their profiles.
+          {translate("Discover installed agents, install new ones, and manage their profiles.")}
         </p>
       </div>
 

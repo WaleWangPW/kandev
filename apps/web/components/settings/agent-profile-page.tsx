@@ -50,6 +50,7 @@ import { ProfileMcpConfigCard } from "@/app/settings/agents/[agentId]/profile-mc
 import { CommandPreviewCard } from "@/app/settings/agents/[agentId]/profiles/[profileId]/command-preview-card";
 import type { AgentProfileMcpConfig } from "@/lib/types/http";
 import { useAgentProfileSettings } from "@/app/settings/agents/[agentId]/profiles/[profileId]/use-agent-profile-settings";
+import { translate } from "@/lib/i18n/locale";
 
 type ProfileEditorProps = {
   agent: Agent;
@@ -80,7 +81,9 @@ function ProfileEditorHeader({
           <AgentLogo agentName={agentName} size={28} className="shrink-0" />
           {agentDisplayName} • {savedProfileName}
         </h2>
-        <p className="text-sm text-muted-foreground mt-1">{agentDisplayName} profile settings</p>
+        <p className="text-sm text-muted-foreground mt-1">
+          {agentDisplayName} {translate("profile settings")}
+        </p>
       </div>
     </div>
   );
@@ -94,16 +97,18 @@ function DeleteProfileCard({ onDelete }: DeleteProfileCardProps) {
   return (
     <Card className="border-destructive">
       <CardHeader>
-        <CardTitle className="text-destructive">Delete profile</CardTitle>
+        <CardTitle className="text-destructive">{translate("Delete profile")}</CardTitle>
       </CardHeader>
       <CardContent className="flex items-center justify-between">
         <div>
-          <p className="text-sm font-medium">Remove this profile</p>
-          <p className="text-xs text-muted-foreground">This action cannot be undone.</p>
+          <p className="text-sm font-medium">{translate("Remove this profile")}</p>
+          <p className="text-xs text-muted-foreground">
+            {translate("This action cannot be undone.")}
+          </p>
         </div>
         <Button variant="destructive" onClick={onDelete}>
           <IconTrash className="h-4 w-4 mr-2" />
-          Delete
+          {translate("Delete")}
         </Button>
       </CardContent>
     </Card>

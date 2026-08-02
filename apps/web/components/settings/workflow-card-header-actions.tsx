@@ -5,6 +5,7 @@ import { Button } from "@kandev/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@kandev/ui/tooltip";
 import { useToast } from "@/components/toast-provider";
 import { handleExportWorkflow } from "./workflow-card-actions";
+import { translate } from "@/lib/i18n/locale";
 
 type WorkflowCardHeaderActionsProps = {
   workflowId: string;
@@ -36,7 +37,7 @@ export function WorkflowCardHeaderActions({
         <TooltipTrigger asChild>
           <span
             tabIndex={exportDisabled ? 0 : undefined}
-            aria-label={exportDisabled ? "Save the workflow before exporting." : undefined}
+            aria-label={exportDisabled ? translate("Save the workflow before exporting.") : undefined}
           >
             <Button
               type="button"
@@ -48,11 +49,13 @@ export function WorkflowCardHeaderActions({
               disabled={exportDisabled}
             >
               <IconDownload className="h-4 w-4 mr-2" />
-              Export
+              {translate("Export")}
             </Button>
           </span>
         </TooltipTrigger>
-        {exportDisabled && <TooltipContent>Save the workflow before exporting.</TooltipContent>}
+        {exportDisabled && (
+          <TooltipContent>{translate("Save the workflow before exporting.")}</TooltipContent>
+        )}
       </Tooltip>
       <Tooltip>
         <TooltipTrigger asChild>
@@ -74,11 +77,11 @@ export function WorkflowCardHeaderActions({
               data-testid="delete-workflow-button"
             >
               <IconTrash className="h-4 w-4 mr-2" />
-              Delete Workflow
+              {translate("Delete Workflow")}
             </Button>
           </span>
         </TooltipTrigger>
-        {readOnly && <TooltipContent>{SYNCED_READ_ONLY_REASON}</TooltipContent>}
+        {readOnly && <TooltipContent>{translate(SYNCED_READ_ONLY_REASON)}</TooltipContent>}
       </Tooltip>
     </div>
   );

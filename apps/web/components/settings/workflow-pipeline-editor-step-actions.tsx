@@ -20,6 +20,7 @@ import {
   hasDisablePlanMode,
 } from "./workflow-pipeline-editor-helpers";
 import { isWorkflowStepValueDirty } from "./workflow-dirty-state";
+import { translate } from "@/lib/i18n/locale";
 
 // --- useStepActions hook ---
 
@@ -123,8 +124,12 @@ export function TurnStartSelect({
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-1.5">
-        <Label className="text-xs font-medium">On Turn Start</Label>
-        <HelpTip text="Runs when a user sends a message. Use for review cycles (e.g., move back to In Progress on feedback)." />
+        <Label className="text-xs font-medium">{translate("On Turn Start")}</Label>
+        <HelpTip
+          text={translate(
+            "Runs when a user sends a message. Use for review cycles (e.g., move back to In Progress on feedback).",
+          )}
+        />
       </div>
       <Select
         value={transitionType}
@@ -142,13 +147,13 @@ export function TurnStartSelect({
             getOnTurnStartTransitionType,
           )}
         >
-          <SelectValue placeholder="Select action" />
+          <SelectValue placeholder={translate("Select action")} />
         </SelectTrigger>
         <SelectContent position="popper" side="bottom" align="start">
-          <SelectItem value="none">Do nothing</SelectItem>
-          <SelectItem value="move_to_next">Move to next step</SelectItem>
-          <SelectItem value="move_to_previous">Move to previous step</SelectItem>
-          <SelectItem value="move_to_step">Move to specific step</SelectItem>
+          <SelectItem value="none">{translate("Do nothing")}</SelectItem>
+          <SelectItem value="move_to_next">{translate("Move to next step")}</SelectItem>
+          <SelectItem value="move_to_previous">{translate("Move to previous step")}</SelectItem>
+          <SelectItem value="move_to_step">{translate("Move to specific step")}</SelectItem>
         </SelectContent>
       </Select>
       {transitionType === "move_to_step" && (
@@ -177,7 +182,7 @@ export function TurnStartSelect({
                   ?.step_id ?? "",
             )}
           >
-            <SelectValue placeholder="Select step" />
+            <SelectValue placeholder={translate("Select step")} />
           </SelectTrigger>
           <SelectContent position="popper" side="bottom" align="start">
             {otherSteps.map((s) => (
@@ -266,8 +271,12 @@ export function TurnCompleteSelect({
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-1.5">
-        <Label className="text-xs font-medium">On Turn Complete</Label>
-        <HelpTip text="Runs after the agent finishes a turn. Use to auto-advance tasks through the pipeline." />
+        <Label className="text-xs font-medium">{translate("On Turn Complete")}</Label>
+        <HelpTip
+          text={translate(
+            "Runs after the agent finishes a turn. Use to auto-advance tasks through the pipeline.",
+          )}
+        />
       </div>
       <Select
         value={transitionType}
@@ -281,13 +290,13 @@ export function TurnCompleteSelect({
           className="w-full h-8"
           data-settings-dirty={isWorkflowStepValueDirty(step, savedStep, getTransitionType)}
         >
-          <SelectValue placeholder="Select action" />
+          <SelectValue placeholder={translate("Select action")} />
         </SelectTrigger>
         <SelectContent position="popper" side="bottom" align="start">
-          <SelectItem value="none">Do nothing (wait for user)</SelectItem>
-          <SelectItem value="move_to_next">Move to next step</SelectItem>
-          <SelectItem value="move_to_previous">Move to previous step</SelectItem>
-          <SelectItem value="move_to_step">Move to specific step</SelectItem>
+          <SelectItem value="none">{translate("Do nothing (wait for user)")}</SelectItem>
+          <SelectItem value="move_to_next">{translate("Move to next step")}</SelectItem>
+          <SelectItem value="move_to_previous">{translate("Move to previous step")}</SelectItem>
+          <SelectItem value="move_to_step">{translate("Move to specific step")}</SelectItem>
         </SelectContent>
       </Select>
       {transitionType === "move_to_step" && (
@@ -312,9 +321,13 @@ export function TurnCompleteSelect({
             data-settings-dirty={isWorkflowStepValueDirty(step, savedStep, hasDisablePlanMode)}
           />
           <Label htmlFor={`${step.id}-disable-plan`} className="text-sm">
-            Disable plan mode on complete
+            {translate("Disable plan mode on complete")}
           </Label>
-          <HelpTip text="Turn off plan mode after the agent finishes a turn, even when the task remains in this step." />
+          <HelpTip
+            text={translate(
+              "Turn off plan mode after the agent finishes a turn, even when the task remains in this step.",
+            )}
+          />
         </div>
       )}
       {transitionType !== "none" && (
@@ -352,11 +365,13 @@ export function ChildrenCompletedSelect({
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-1.5">
-        <Label className="text-xs font-medium">When Child Tasks Complete</Label>
+        <Label className="text-xs font-medium">{translate("When Child Tasks Complete")}</Label>
         <HelpTip
           testId={`${step.id}-children-completed-help`}
-          ariaLabel="How child task completion transitions work"
-          text="Use this on a parent task step. When every active direct child task is COMPLETED, FAILED, or CANCELLED, Kandev runs this transition once. Archived and ephemeral child tasks are ignored. Grandchildren do not count here, and nothing runs if the parent has no child tasks."
+          ariaLabel={translate("How child task completion transitions work")}
+          text={translate(
+            "Use this on a parent task step. When every active direct child task is COMPLETED, FAILED, or CANCELLED, Kandev runs this transition once. Archived and ephemeral child tasks are ignored. Grandchildren do not count here, and nothing runs if the parent has no child tasks.",
+          )}
         />
       </div>
       <Select
@@ -379,14 +394,14 @@ export function ChildrenCompletedSelect({
             getChildrenCompletedTransitionType,
           )}
         >
-          <SelectValue placeholder="Select action" />
+          <SelectValue placeholder={translate("Select action")} />
         </SelectTrigger>
         <SelectContent position="popper" side="bottom" align="start">
-          <SelectItem value="none">Do nothing</SelectItem>
-          <SelectItem value="move_to_next">Move to next step</SelectItem>
-          <SelectItem value="move_to_previous">Move to previous step</SelectItem>
+          <SelectItem value="none">{translate("Do nothing")}</SelectItem>
+          <SelectItem value="move_to_next">{translate("Move to next step")}</SelectItem>
+          <SelectItem value="move_to_previous">{translate("Move to previous step")}</SelectItem>
           <SelectItem value="move_to_step" disabled={!defaultTargetStepId}>
-            Move to specific step
+            {translate("Move to specific step")}
           </SelectItem>
         </SelectContent>
       </Select>
@@ -416,7 +431,7 @@ export function ChildrenCompletedSelect({
                   ?.config?.step_id ?? "",
             )}
           >
-            <SelectValue placeholder="Select step" />
+            <SelectValue placeholder={translate("Select step")} />
           </SelectTrigger>
           <SelectContent position="popper" side="bottom" align="start">
             {otherSteps.map((s) => (
@@ -470,9 +485,13 @@ export function ExplicitCompletionToggle({
         )}
       />
       <Label htmlFor={`${step.id}-require-signal`} className="text-sm">
-        Wait for agent completion signal
+        {translate("Wait for agent completion signal")}
       </Label>
-      <HelpTip text="Only auto-advance once the agent calls step_complete_kandev. Otherwise turn-end is treated as completion." />
+      <HelpTip
+        text={translate(
+          "Only auto-advance once the agent calls step_complete_kandev. Otherwise turn-end is treated as completion.",
+        )}
+      />
     </div>
   );
 }

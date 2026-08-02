@@ -33,6 +33,7 @@ import { cn } from "@/lib/utils";
 import { StepConfigPanel } from "./workflow-pipeline-editor-panels";
 import { isWorkflowStepDirty } from "./workflow-dirty-state";
 import { WorkflowCycleDiagnostic } from "./workflow-cycle-diagnostic";
+import { translate } from "@/lib/i18n/locale";
 
 type WorkflowPipelineEditorProps = {
   steps: WorkflowStep[];
@@ -115,7 +116,7 @@ function PipelineNode({
                 <IconRosetteNumber1 className="h-3.5 w-3.5" />
               </div>
             </TooltipTrigger>
-            <TooltipContent>Start step</TooltipContent>
+            <TooltipContent>{translate("Start step")}</TooltipContent>
           </Tooltip>
         </TooltipProvider>
       )}
@@ -140,7 +141,7 @@ function PipelineNode({
         <StepCapabilityIcons
           events={step.events}
           agentProfileId={step.agent_profile_id}
-          fallback={<span className="text-xs text-muted-foreground/50">manual</span>}
+          fallback={<span className="text-xs text-muted-foreground/50">{translate("manual")}</span>}
         />
         {isReplayCycleAffected && (
           <span
@@ -148,7 +149,7 @@ function PipelineNode({
             aria-label={`${step.name} is part of a replay cycle`}
           >
             <IconAlertTriangle className="size-3 shrink-0" aria-hidden="true" />
-            Cycle
+            {translate("Cycle")}
           </span>
         )}
       </div>

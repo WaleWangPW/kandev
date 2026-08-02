@@ -7,6 +7,7 @@ import { Button } from "@kandev/ui/button";
 import { Skeleton } from "@kandev/ui/skeleton";
 import { previewAgentCommandAction, type CommandPreviewResponse } from "@/app/actions/agents";
 import type { CLIFlag, ProfileEnvVar } from "@/lib/types/http";
+import { translate } from "@/lib/i18n/locale";
 
 type CommandPreviewCardProps = {
   agentName: string;
@@ -66,7 +67,9 @@ function CommandPreviewError({ error }: { error: string }) {
 function CommandPreviewEmpty() {
   return (
     <div className="rounded-md border border-muted p-4">
-      <p className="text-sm text-muted-foreground">No command preview available.</p>
+      <p className="text-sm text-muted-foreground">
+        {translate("No command preview available.")}
+      </p>
     </div>
   );
 }
@@ -111,7 +114,7 @@ function CommandPreviewContent({ preview, cliPassthrough, envPrefix }: CommandPr
           size="sm"
           className="absolute right-2 top-2"
           onClick={handleCopy}
-          title="Copy to clipboard"
+          title={translate("Copy to clipboard")}
         >
           {copied ? (
             <IconCheck className="h-4 w-4 text-green-500" />
@@ -123,8 +126,8 @@ function CommandPreviewContent({ preview, cliPassthrough, envPrefix }: CommandPr
 
       {!cliPassthrough && (
         <p className="text-xs text-muted-foreground">
-          <code className="rounded bg-muted px-1 py-0.5">{"{prompt}"}</code> will be replaced with
-          your task description or follow-up message.
+          <code className="rounded bg-muted px-1 py-0.5">{"{prompt}"}</code>{" "}
+          {translate("will be replaced with your task description or follow-up message.")}
         </p>
       )}
     </>
@@ -175,7 +178,7 @@ export function CommandPreviewCard({
         setError(null);
       } catch (err) {
         if (requestId !== latestRequestId.current) return;
-        setError(err instanceof Error ? err.message : "Failed to load command preview");
+        setError(err instanceof Error ? err.message : translate("Failed to load command preview"));
         setPreview(null);
       } finally {
         if (requestId === latestRequestId.current) setLoading(false);
@@ -191,12 +194,12 @@ export function CommandPreviewCard({
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <IconTerminal2 className="h-5 w-5" />
-          <span>Command Preview</span>
+          <span>{translate("Command Preview")}</span>
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <p className="text-xs text-muted-foreground">
-          The CLI command that will be executed based on the current settings.
+          {translate("The CLI command that will be executed based on the current settings.")}
         </p>
 
         {loading && <CommandPreviewLoading />}
