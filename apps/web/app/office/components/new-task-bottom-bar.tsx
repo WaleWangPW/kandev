@@ -13,6 +13,7 @@ import { Button } from "@kandev/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@kandev/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@kandev/ui/tooltip";
 import { useAppStore } from "@/components/state-provider";
+import { translate, useI18n } from "@/lib/i18n/locale";
 import type { IssueDraft } from "./new-task-draft";
 
 type StatusOption = { value: string; label: string; className: string };
@@ -45,12 +46,12 @@ type Props = {
 
 function useStatusOptions(): StatusOption[] {
   const meta = useAppStore((s) => s.office.meta);
-  if (!meta) return FALLBACK_STATUS_OPTIONS;
+  if (!meta) return FALLBACK_STATUS_OPTIONS.map((option) => ({ ...option, label: translate(option.label) }));
   // Only show creation-relevant statuses (backlog, todo, in_progress)
   const creationStatuses = ["backlog", "todo", "in_progress"];
   return meta.statuses
     .filter((s) => creationStatuses.includes(s.id))
-    .map((s) => ({ value: s.id, label: s.label, className: s.color }));
+    .map((s) => ({ value: s.id, label: translate(s.label), className: s.color }));
 }
 
 function StatusChip({ draft, onUpdate }: Props) {
@@ -83,13 +84,13 @@ function StatusChip({ draft, onUpdate }: Props) {
 
 function usePriorityOptions(): PriorityOption[] {
   const meta = useAppStore((s) => s.office.meta);
-  if (!meta) return FALLBACK_PRIORITY_OPTIONS;
+  if (!meta) return FALLBACK_PRIORITY_OPTIONS.map((option) => ({ ...option, label: translate(option.label) }));
   // Exclude "none" from the creation picker
   return meta.priorities
     .filter((p) => p.id !== "none")
     .map((p) => ({
       value: p.id,
-      label: p.label,
+      label: translate(p.label),
       icon: PRIORITY_ICONS[p.id] ?? IconMinus,
       className: p.color,
     }));
@@ -128,13 +129,14 @@ function PriorityChip({ draft, onUpdate }: Props) {
 }
 
 export function NewTaskBottomBar({ draft, onUpdate }: Props) {
+  const { t } = useI18n();
   return (
     <div className="flex items-center gap-2 pt-2 border-t border-border">
       <StatusChip draft={draft} onUpdate={onUpdate} />
       <PriorityChip draft={draft} onUpdate={onUpdate} />
       <Button variant="outline" size="sm" className="cursor-pointer h-7 text-xs">
         <IconUpload className="h-3.5 w-3.5 mr-1" />
-        Upload
+        {t("Upload")}
       </Button>
       <Tooltip>
         <TooltipTrigger asChild>
@@ -142,7 +144,7 @@ export function NewTaskBottomBar({ draft, onUpdate }: Props) {
             <IconDotsVertical className="h-4 w-4" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>More options</TooltipContent>
+        <TooltipContent>{t("More options")}</TooltipContent>
       </Tooltip>
     </div>
   );

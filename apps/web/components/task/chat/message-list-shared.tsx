@@ -16,6 +16,7 @@ import {
   lastAgentErrorStamp,
   readLastAgentError,
 } from "@/lib/session-last-agent-error";
+import { useI18n } from "@/lib/i18n/locale";
 
 export type MessageListProps = {
   items: RenderItem[];
@@ -333,16 +334,17 @@ export function LastAgentErrorNotice({
  * (see hooks/use-processed-messages.ts's findUnreadDividerItemId).
  */
 export function UnreadDivider() {
+  const { t } = useI18n();
   return (
     <div
       data-testid="unread-divider"
       role="separator"
-      aria-label="New messages"
+      aria-label={t("New messages")}
       className="relative my-3 flex items-center"
     >
       <div className="h-px flex-1 bg-destructive" />
       <span className="ml-2 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-destructive">
-        New
+        {t("New")}
       </span>
     </div>
   );
@@ -370,11 +372,12 @@ export function MessageListStatus({
    */
   onLoadMore?: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <>
       {isLoadingMore && hasMore && (
         <div className="text-center text-xs text-muted-foreground py-2">
-          Loading older messages...
+          {t("Loading older messages...")}
         </div>
       )}
       {hasMore && !isLoadingMore && onLoadMore && (
@@ -387,7 +390,7 @@ export function MessageListStatus({
             data-testid="load-older-messages"
             onClick={onLoadMore}
           >
-            Load older messages
+            {t("Load older messages")}
           </Button>
         </div>
       )}
@@ -397,12 +400,12 @@ export function MessageListStatus({
           data-testid="conversation-loading-state"
         >
           <GridSpinner className="text-primary mr-2" />
-          <span>Loading conversation...</span>
+          <span>{t("Loading conversation...")}</span>
         </div>
       )}
       {!messagesLoading && !isInitialLoading && messagesCount === 0 && (
         <div className="flex items-center justify-center py-8 text-muted-foreground">
-          <span>No messages yet. Start the conversation!</span>
+          <span>{t("No messages yet. Start the conversation!")}</span>
         </div>
       )}
     </>

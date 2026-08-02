@@ -24,6 +24,7 @@ import { useUtilityAgentGenerator } from "@/hooks/use-utility-agent-generator";
 import { useIsUtilityConfigured } from "@/hooks/use-is-utility-configured";
 import { usePromptResultDelivery } from "@/hooks/use-prompt-result-delivery";
 import { PromptResultRecovery } from "@/components/prompt-result-recovery";
+import { useI18n } from "@/lib/i18n/locale";
 
 // Re-export ImageAttachment type for consumers
 export type { ImageAttachment } from "./image-attachment-preview";
@@ -145,6 +146,7 @@ function FailedSessionBanner({
   resumeLabel?: string;
   resumingLabel?: string;
 }) {
+  const { t } = useI18n();
   const [isResuming, setIsResuming] = useState(false);
   const [isStartingFresh, setIsStartingFresh] = useState(false);
 
@@ -183,7 +185,7 @@ function FailedSessionBanner({
         <div className="flex items-center justify-between gap-3 px-4 py-3">
           <div className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
             <IconAlertTriangle className="h-4 w-4 text-orange-500 shrink-0" />
-            <span className="truncate">{message}</span>
+            <span className="truncate">{t(message)}</span>
             {detail && <span className="shrink-0 text-xs text-muted-foreground">({detail})</span>}
           </div>
           <div className="flex items-center gap-2">
@@ -200,11 +202,11 @@ function FailedSessionBanner({
                       disabled={isResuming || !profileExists}
                     >
                       <IconPlayerPlay className="h-3.5 w-3.5" />
-                      {isResuming ? resumingLabel : resumeLabel}
+                      {t(isResuming ? resumingLabel : resumeLabel)}
                     </Button>
                   </span>
                 </TooltipTrigger>
-                {!profileExists && <TooltipContent>Agent profile no longer exists</TooltipContent>}
+                {!profileExists && <TooltipContent>{t("Agent profile no longer exists")}</TooltipContent>}
               </Tooltip>
             )}
             <Button
@@ -216,7 +218,7 @@ function FailedSessionBanner({
               data-testid="recovery-fresh-button"
             >
               <IconRefresh className="h-3.5 w-3.5" />
-              {isStartingFresh ? "Starting..." : "Start fresh session"}
+              {t(isStartingFresh ? "Starting..." : "Start fresh session")}
             </Button>
           </div>
         </div>

@@ -637,7 +637,7 @@ describe("MessageListStatus", () => {
     );
 
     expect(screen.queryByTestId("conversation-loading-state")).not.toBeNull();
-    expect(screen.queryByText("Loading conversation...")).not.toBeNull();
+    expect(screen.queryByText("正在加载会话…")).not.toBeNull();
   });
 });
 
@@ -647,6 +647,6 @@ describe("UnreadDivider", () => {
 
     const divider = screen.getByTestId("unread-divider");
     expect(divider.getAttribute("role")).toBe("separator");
-    expect(screen.getByText("New")).not.toBeNull();
+    expect(screen.getByText("新消息")).not.toBeNull();
   });
 });

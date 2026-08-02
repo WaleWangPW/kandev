@@ -49,6 +49,25 @@ const ZH_CN: Record<string, string> = {
   "Over WIP limit": "超过进行中任务上限",
   "All tasks": "全部任务",
   "Search tasks": "搜索任务",
+  "Agent profile no longer exists": "智能体配置已不存在",
+  "This agent has stopped.": "此智能体已停止。",
+  Resume: "继续",
+  "Resuming...": "正在继续…",
+  "Starting...": "正在启动…",
+  "Start fresh session": "新开会话",
+  "Loading older messages...": "正在加载较早消息…",
+  "Load older messages": "加载较早消息",
+  "Loading conversation...": "正在加载会话…",
+  "No messages yet. Start the conversation!": "暂时没有消息，开始对话吧！",
+  New: "新消息",
+  "New messages": "新消息",
+  "Show details": "显示详情",
+  "Resume session": "继续会话",
+  "stopped with an error": "因错误而停止",
+  "The agent stopped with an error. Resume to retry the same conversation, or start a fresh session.":
+    "智能体因错误停止。可继续以重试当前会话，或新开会话。",
+  Upload: "上传",
+  "More options": "更多选项",
 };
 
 function isUiLocale(value: string | null): value is UiLocale {
