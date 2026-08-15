@@ -1013,6 +1013,53 @@ func TestCreateExecutionResolvesProfileOnceForEnvAndAutoApprove(t *testing.T) {
 	}
 }
 
+func TestCreateExecutionProfileSecretFailureStartsNoRuntime(t *testing.T) {
+	profileResolver := &countingProfileResolver{info: &AgentProfileInfo{
+		ProfileID: "profile-1", AgentID: "auggie",
+		EnvVars: []settingsmodels.ProfileEnvVar{
+			{Key: "PLAIN", Value: "must-not-be-used"},
+			{Key: "SECRET", SecretID: "missing-secret-reference"},
+		},
+	}}
+	mgr, backend := newEnvironmentExecutionTestManagerWithProfileResolver(t, &mockWorkspaceInfoProvider{}, profileResolver)
+
+	_, err := mgr.createExecution(context.Background(), "task-1", &WorkspaceInfo{
+		SessionID: "session-1", AgentID: "auggie", AgentProfileID: "profile-1",
+		WorkspacePath: "/workspace/task-1",
+	})
+	if !errors.Is(err, ErrProfileSecret) {
+		t.Fatalf("createExecution error = %v, want %v", err, ErrProfileSecret)
+	}
+	if strings.Contains(err.Error(), "missing-secret-reference") || strings.Contains(err.Error(), "must-not-be-used") {
+		t.Fatalf("secret failure error leaked profile data: %v", err)
+	}
+	if got := backend.createCount.Load(); got != 0 {
+		t.Fatalf("CreateInstance calls = %d, want 0", got)
+	}
+}
+
+func TestCreateExecutionRecoveryBlocksProfileDriftBeforeRuntime(t *testing.T) {
+	profileResolver := &countingProfileResolver{info: &AgentProfileInfo{
+		ProfileID: "profile-1", AgentID: "auggie",
+		Fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}}
+	mgr, backend := newEnvironmentExecutionTestManagerWithProfileResolver(t, &mockWorkspaceInfoProvider{}, profileResolver)
+
+	_, err := mgr.createExecution(context.Background(), "task-1", &WorkspaceInfo{
+		SessionID: "session-1", AgentID: "auggie", AgentProfileID: "profile-1",
+		WorkspacePath: "/workspace/task-1",
+		Metadata: map[string]interface{}{
+			metadataKeyExpectedProfileFingerprint: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+	})
+	if !errors.Is(err, ErrProfileDrift) || err.Error() != "BLOCKED_PROFILE_DRIFT" {
+		t.Fatalf("createExecution error = %v, want sanitized %v", err, ErrProfileDrift)
+	}
+	if got := backend.createCount.Load(); got != 0 {
+		t.Fatalf("CreateInstance calls = %d, want 0", got)
+	}
+}
+
 func TestCreateExecutionRecoversRepositoryEnvironmentAndSSHApprovals(t *testing.T) {
 	profileResolver := &countingProfileResolver{info: &AgentProfileInfo{
 		ProfileID: "agent-profile", AgentID: "auggie", EnvVars: []settingsmodels.ProfileEnvVar{{Key: "PROFILE_ONLY", Value: "profile-value"}},

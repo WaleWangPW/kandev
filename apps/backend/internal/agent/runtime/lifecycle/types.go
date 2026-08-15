@@ -655,11 +655,15 @@ type LaunchRequest struct {
 	// ExecutionProfileID selects the complete CLI runtime profile. Empty keeps
 	// backward-compatible behavior by using AgentProfileID.
 	ExecutionProfileID string
-	StartAgent         bool                // Transfer launch activity through initial startup/prompt
-	WorkspacePath      string              // Host path to workspace (original repository path)
-	TaskDescription    string              // Task description to send via ACP prompt
-	Attachments        []MessageAttachment // Attachments (images/files) for the initial prompt
-	Env                map[string]string   // Additional env vars
+	// ExpectedProfileFingerprint binds a prepared session to the exact
+	// execution profile launch configuration. Empty is the compatibility path
+	// for sessions created before profile binding existed.
+	ExpectedProfileFingerprint string
+	StartAgent                 bool                // Transfer launch activity through initial startup/prompt
+	WorkspacePath              string              // Host path to workspace (original repository path)
+	TaskDescription            string              // Task description to send via ACP prompt
+	Attachments                []MessageAttachment // Attachments (images/files) for the initial prompt
+	Env                        map[string]string   // Additional env vars
 	// ApprovedSecretEnvKeys contains repository binding keys that SSH may
 	// forward in addition to its managed credential allowlist.
 	ApprovedSecretEnvKeys []string
@@ -804,6 +808,7 @@ type AgentProfileInfo struct {
 	ProfileName   string
 	AgentID       string
 	AgentName     string // e.g., "auggie", "claude", "codex"
+	Fingerprint   string // secret-free digest of every launch-relevant profile field
 	Model         string // applied through ACP model selection at session start
 	Mode          string // applied via ACP session/set_mode at session start (empty = use agent default)
 	ConfigOptions map[string]string

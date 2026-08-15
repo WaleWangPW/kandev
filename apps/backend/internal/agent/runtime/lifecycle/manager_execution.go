@@ -666,7 +666,10 @@ func (m *Manager) prepareExecutionCreateRequest(
 	}
 
 	executionProfileID := workspaceExecutionProfileID(info)
-	profileInfo := m.resolveWorkspaceExecutionProfile(ctx, executionProfileID)
+	profileInfo, err := m.resolveWorkspaceExecutionProfile(ctx, info, executionProfileID)
+	if err != nil {
+		return nil, err
+	}
 	envPreparation, err := m.prepareExecutionEnvironment(
 		ctx, taskID, info, executionID, executionProfileID, agentConfig, profileInfo,
 	)
@@ -718,18 +721,38 @@ func (m *Manager) prepareExecutionCreateRequest(
 	}, nil
 }
 
-func (m *Manager) resolveWorkspaceExecutionProfile(ctx context.Context, profileID string) *AgentProfileInfo {
+func (m *Manager) resolveWorkspaceExecutionProfile(
+	ctx context.Context, info *WorkspaceInfo, profileID string,
+) (*AgentProfileInfo, error) {
+	expected, err := expectedProfileFingerprintFromMetadata(info.Metadata)
+	if err != nil {
+		return nil, err
+	}
 	if profileID == "" || m.profileResolver == nil {
-		return nil
+		if expected != "" {
+			return nil, ErrProfileDrift
+		}
+		return nil, nil
 	}
 	profileInfo, err := m.profileResolver.ResolveProfile(ctx, profileID)
 	if err != nil {
-		m.logger.Warn("failed to resolve profile for workspace execution",
-			zap.String("execution_profile_id", profileID),
-			zap.Error(err))
-		return nil
+		if expected == "" {
+			m.logger.Warn("failed to resolve legacy profile for workspace execution",
+				zap.String("execution_profile_id", profileID), zap.Error(err))
+			return nil, nil
+		}
+		return nil, ErrProfileDrift
 	}
-	return profileInfo
+	if profileInfo == nil {
+		if expected == "" {
+			return nil, nil
+		}
+		return nil, ErrProfileDrift
+	}
+	if err := validateProfileFingerprint(expected, profileInfo); err != nil {
+		return nil, err
+	}
+	return profileInfo, nil
 }
 
 func (m *Manager) prepareExecutionEnvironment(
@@ -799,7 +822,8 @@ func (m *Manager) initializeCreatedExecution(
 	// The effective runtime snapshot (including repository secrets) is already
 	// captured by ToAgentExecution and must not be mislabeled as profile data.
 	if preparation.profileInfo != nil && len(preparation.profileInfo.EnvVars) > 0 {
-		m.cacheResolvedProfileEnv(execution, m.resolveAgentProfileEnvVars(ctx, preparation.profileInfo.EnvVars))
+		m.cacheResolvedProfileEnv(execution,
+			resolvedProfileEnvFromFinal(preparation.profileInfo.EnvVars, preparation.request.Env))
 	}
 
 	if info.ACPSessionID != "" {

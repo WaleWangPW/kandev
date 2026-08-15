@@ -138,7 +138,7 @@ func (m *Manager) GetPassthroughBuffer(ctx context.Context, sessionID string) (s
 
 // buildPassthroughEnv builds the environment map for a passthrough session,
 // including Kandev metadata and required credentials from the agent runtime config.
-func (m *Manager) buildPassthroughEnv(ctx context.Context, execution *AgentExecution, requiredEnv []string) map[string]string {
+func (m *Manager) buildPassthroughEnv(ctx context.Context, execution *AgentExecution, requiredEnv []string) (map[string]string, error) {
 	env := execution.RuntimeEnvironment()
 	if env == nil {
 		env = make(map[string]string)
@@ -147,7 +147,13 @@ func (m *Manager) buildPassthroughEnv(ctx context.Context, execution *AgentExecu
 	env["KANDEV_SESSION_ID"] = execution.SessionID
 	env["KANDEV_AGENT_PROFILE_ID"] = execution.officeProfileID()
 	env["KANDEV_EXECUTION_PROFILE_ID"] = execution.AgentProfileID
-	m.mergeAgentProfileEnv(ctx, execution.AgentProfileID, env)
+	expected, err := expectedProfileFingerprintFromMetadata(execution.MetadataSnapshot())
+	if err != nil {
+		return nil, err
+	}
+	if err := m.mergeExpectedAgentProfileEnv(ctx, execution.AgentProfileID, env, expected); err != nil {
+		return nil, err
+	}
 	if m.credsMgr != nil {
 		for _, credKey := range requiredEnv {
 			if value, err := m.credsMgr.GetCredentialValue(ctx, credKey); err == nil && value != "" {
@@ -160,7 +166,7 @@ func (m *Manager) buildPassthroughEnv(ctx context.Context, execution *AgentExecu
 	for key, value := range getPassthroughMCPEnv(execution) {
 		env[key] = value
 	}
-	return env
+	return env, nil
 }
 
 // startPassthroughShell starts the shell session for a passthrough execution.
@@ -205,7 +211,23 @@ func (m *Manager) resolvePassthroughAgent(ctx context.Context, execution *AgentE
 
 	var profileInfo *AgentProfileInfo
 	if m.profileResolver != nil && execution.AgentProfileID != "" {
-		profileInfo, _ = m.profileResolver.ResolveProfile(ctx, execution.AgentProfileID)
+		profileInfo, err = m.profileResolver.ResolveProfile(ctx, execution.AgentProfileID)
+		if err != nil || profileInfo == nil {
+			expected, bindingErr := expectedProfileFingerprintFromMetadata(execution.MetadataSnapshot())
+			if bindingErr != nil || expected != "" {
+				return nil, ErrProfileDrift
+			}
+			profileInfo = nil
+		}
+		if profileInfo != nil {
+			expected, bindingErr := expectedProfileFingerprintFromMetadata(execution.MetadataSnapshot())
+			if bindingErr != nil {
+				return nil, bindingErr
+			}
+			if err := validateProfileFingerprint(expected, profileInfo); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	return &resolvedPassthrough{
@@ -716,6 +738,10 @@ func (m *Manager) startInteractiveProcess(ctx context.Context, execution *AgentE
 	// This matches ResumePassthroughSession and restartPassthroughProcess.
 	startReq := buildInteractiveStartRequest(execution.SessionID, execution, pt, env, cmd, stripEnv, true)
 
+	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
+		m.updateExecutionError(execution.ID, ErrProfileDrift.Error())
+		return nil, err
+	}
 	processInfo, err := interactiveRunner.Start(ctx, startReq)
 	if err != nil {
 		m.updateExecutionError(execution.ID, "failed to start passthrough session: "+err.Error())
@@ -727,6 +753,16 @@ func (m *Manager) startInteractiveProcess(ctx context.Context, execution *AgentE
 // startPassthroughSession starts an agent in passthrough mode (direct terminal interaction).
 // Instead of using ACP protocol, the agent's stdin/stdout is passed through directly.
 func (m *Manager) startPassthroughSession(ctx context.Context, execution *AgentExecution, profileInfo *AgentProfileInfo) error {
+	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
+		return err
+	}
+	expected, err := expectedProfileFingerprintFromMetadata(execution.MetadataSnapshot())
+	if err != nil {
+		return err
+	}
+	if err := validateProfileFingerprint(expected, profileInfo); err != nil {
+		return err
+	}
 	_, pt, rt, cmd, err := m.passthroughAgentCommand(ctx, execution, profileInfo)
 	if err != nil {
 		return err
@@ -736,7 +772,10 @@ func (m *Manager) startPassthroughSession(ctx context.Context, execution *AgentE
 		zap.String("session_id", execution.SessionID),
 		zap.Strings("full_command", redactPassthroughArgs(cmd.Args())))
 
-	env := m.buildPassthroughEnv(ctx, execution, rt.RequiredEnv)
+	env, err := m.buildPassthroughEnv(ctx, execution, rt.RequiredEnv)
+	if err != nil {
+		return err
+	}
 
 	processInfo, err := m.startInteractiveProcess(ctx, execution, pt, env, cmd, rt.StripEnv)
 	if err != nil {
@@ -856,6 +895,9 @@ func (m *Manager) restartPassthroughProcess(ctx context.Context, execution *Agen
 		zap.String("execution_id", execution.ID),
 		zap.String("session_id", execution.SessionID),
 		zap.String("old_process_id", execution.PassthroughProcessID))
+	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
+		return err
+	}
 
 	// 1. Stop the current PTY process.
 	// Clear PassthroughProcessID before stopping so that handlePassthroughStatus
@@ -883,9 +925,16 @@ func (m *Manager) restartPassthroughProcess(ctx context.Context, execution *Agen
 	}
 
 	// 3. Start new PTY process with ImmediateStart (terminal is already connected)
-	env := m.buildPassthroughEnv(ctx, execution, rt.RequiredEnv)
+	env, err := m.buildPassthroughEnv(ctx, execution, rt.RequiredEnv)
+	if err != nil {
+		return err
+	}
 	startReq := buildInteractiveStartRequest(execution.SessionID, execution, pt, env, cmd, rt.StripEnv, true)
 
+	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
+		m.updateExecutionError(execution.ID, ErrProfileDrift.Error())
+		return err
+	}
 	processInfo, err := interactiveRunner.Start(ctx, startReq)
 	if err != nil {
 		m.updateExecutionError(execution.ID, "failed to restart passthrough session: "+err.Error())
@@ -924,6 +973,9 @@ func (m *Manager) ResumePassthroughSession(ctx context.Context, sessionID string
 	if !exists {
 		return fmt.Errorf("%w: %s", ErrNoExecutionForSession, sessionID)
 	}
+	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
+		return err
+	}
 
 	resolved, err := m.resolvePassthroughAgent(ctx, execution)
 	if err != nil {
@@ -952,7 +1004,10 @@ func (m *Manager) ResumePassthroughSession(ctx context.Context, sessionID string
 		zap.Bool("use_resume", useResume),
 		zap.Strings("command", redactPassthroughArgs(cmd.Args())))
 
-	env := m.buildPassthroughEnv(ctx, execution, resolved.rt.RequiredEnv)
+	env, err := m.buildPassthroughEnv(ctx, execution, resolved.rt.RequiredEnv)
+	if err != nil {
+		return err
+	}
 
 	// Always use immediate start on resume — the terminal WebSocket is already connected,
 	// so we don't need to wait for a resize to get exact dimensions. The first resize
@@ -961,6 +1016,10 @@ func (m *Manager) ResumePassthroughSession(ctx context.Context, sessionID string
 	// to a process it doesn't know about yet.
 	startReq := buildInteractiveStartRequest(sessionID, execution, resolved.pt, env, cmd, resolved.rt.StripEnv, true)
 
+	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
+		m.updateExecutionError(execution.ID, ErrProfileDrift.Error())
+		return err
+	}
 	processInfo, err := interactiveRunner.Start(ctx, startReq)
 	if err != nil {
 		return fmt.Errorf("failed to start passthrough session: %w", err)
@@ -1240,15 +1299,27 @@ func (m *Manager) attemptResumeFallback(execution *AgentExecution, runner *proce
 	}
 
 	ctx := context.Background()
+	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
+		m.notifyFallbackInfrastructureFailure(runner, sessionID, "validate profile binding", err)
+		return
+	}
 	pt, rt, cmd, err := m.freshPassthroughCommand(ctx, execution)
 	if err != nil {
 		m.notifyFallbackInfrastructureFailure(runner, sessionID, "build fresh command", err)
 		return
 	}
 
-	env := m.buildPassthroughEnv(ctx, execution, rt.RequiredEnv)
+	env, err := m.buildPassthroughEnv(ctx, execution, rt.RequiredEnv)
+	if err != nil {
+		m.notifyFallbackInfrastructureFailure(runner, sessionID, "resolve profile environment", err)
+		return
+	}
 	startReq := buildInteractiveStartRequest(sessionID, execution, pt, env, cmd, rt.StripEnv, true)
 
+	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
+		m.notifyFallbackInfrastructureFailure(runner, sessionID, "validate final profile binding", err)
+		return
+	}
 	processInfo, err := runner.Start(ctx, startReq)
 	if err != nil {
 		m.notifyFallbackInfrastructureFailure(runner, sessionID, "start fresh process", err)

@@ -3978,6 +3978,7 @@ func TestStartCreatedSession_WorkflowOverridePromotesPreparedWhenTaskHasNoPrimar
 	agentMgr := &mockAgentManager{
 		resolveProfileInfo: &executor.AgentProfileInfo{
 			ProfileID:     "profile-b",
+			Fingerprint:   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 			Mode:          "agent",
 			ConfigOptions: profileOptions,
 		},
@@ -4027,10 +4028,61 @@ func TestStartCreatedSession_WorkflowOverridePromotesPreparedWhenTaskHasNoPrimar
 	if updated.AgentProfileSnapshot["mode"] != "agent" {
 		t.Fatalf("profile snapshot mode = %#v", updated.AgentProfileSnapshot["mode"])
 	}
+	if updated.AgentProfileSnapshot["fingerprint"] != "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+		t.Fatalf("profile snapshot fingerprint = %#v", updated.AgentProfileSnapshot["fingerprint"])
+	}
 	profileOptions["reasoning_effort"] = "low"
 	configOptions, ok := updated.AgentProfileSnapshot["config_options"].(map[string]interface{})
 	if !ok || configOptions["reasoning_effort"] != "high" {
 		t.Fatalf("profile snapshot config options = %#v", updated.AgentProfileSnapshot["config_options"])
+	}
+}
+
+func TestStartCreatedSession_WorkflowOverrideResolveFailureLeavesPreparedBindingUntouched(t *testing.T) {
+	ctx := context.Background()
+	repo := setupTestRepo(t)
+	seedTaskAndSession(t, repo, "task1", "session1", models.TaskSessionStateCreated)
+
+	dbTask, err := repo.GetTask(ctx, "task1")
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	dbTask.WorkflowStepID = "step1"
+	if err := repo.UpdateTask(ctx, dbTask); err != nil {
+		t.Fatalf("update task: %v", err)
+	}
+	prepared, err := repo.GetTaskSession(ctx, "session1")
+	if err != nil {
+		t.Fatalf("get prepared session: %v", err)
+	}
+	prepared.AgentProfileID = "profile-a"
+	prepared.AgentProfileSnapshot = map[string]interface{}{
+		"id":          "profile-a",
+		"fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	if err := repo.UpdateTaskSession(ctx, prepared); err != nil {
+		t.Fatalf("persist prepared binding: %v", err)
+	}
+
+	stepGetter := newMockStepGetter()
+	stepGetter.steps["step1"] = &wfmodels.WorkflowStep{
+		ID: "step1", WorkflowID: "wf1", AgentProfileID: "profile-b",
+	}
+	taskRepo := newMockTaskRepo()
+	taskRepo.tasks["task1"] = &v1.Task{ID: "task1", Title: "Task", State: v1.TaskStateInProgress}
+	agentMgr := &mockAgentManager{resolveProfileErr: errors.New("sensitive profile storage detail")}
+	svc := createTestServiceWithScheduler(repo, stepGetter, taskRepo, agentMgr)
+
+	_, err = svc.StartCreatedSession(ctx, "task1", "session1", "profile-a", "desc", true, false, true, nil, nil)
+	if !errors.Is(err, lifecycle.ErrProfileDrift) || err.Error() != "BLOCKED_PROFILE_DRIFT" {
+		t.Fatalf("StartCreatedSession error = %v, want sanitized profile drift", err)
+	}
+	current, err := repo.GetTaskSession(ctx, "session1")
+	if err != nil {
+		t.Fatalf("reload prepared session: %v", err)
+	}
+	if current.AgentProfileID != "profile-a" || current.AgentProfileSnapshot["fingerprint"] != "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("failed override changed prepared binding: profile=%q snapshot=%#v", current.AgentProfileID, current.AgentProfileSnapshot)
 	}
 }
 
@@ -4066,7 +4118,13 @@ func TestStartCreatedSession_EmptyProfileFallsBackToWorkflowDefault(t *testing.T
 
 	taskRepo := newMockTaskRepo()
 	taskRepo.tasks["task1"] = &v1.Task{ID: "task1", Title: "Test Task", State: v1.TaskStateInProgress}
-	agentMgr := &mockAgentManager{repoForExecutionLookup: repo}
+	agentMgr := &mockAgentManager{
+		repoForExecutionLookup: repo,
+		resolveProfileInfo: &executor.AgentProfileInfo{
+			ProfileID:   "wf-default-profile",
+			Fingerprint: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		},
+	}
 	svc := createTestServiceWithScheduler(repo, stepGetter, taskRepo, agentMgr)
 	svc.messageCreator = &mockMessageCreator{}
 

@@ -9,11 +9,13 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/kandev/kandev/internal/agent/runtime/activity"
 	agentctl "github.com/kandev/kandev/internal/agent/runtime/agentctl"
+	settingsmodels "github.com/kandev/kandev/internal/agent/settings/models"
 	"github.com/kandev/kandev/internal/task/models"
 )
 
@@ -22,7 +24,30 @@ import (
 // simulating transient DB hiccups, network failures, or deleted profiles.
 type mockAgentProfileResolver struct {
 	cliPassthrough bool
+	fingerprint    string
+	envVars        []settingsmodels.ProfileEnvVar
 	err            error
+}
+
+type mutableFingerprintResolver struct {
+	mu          sync.RWMutex
+	fingerprint string
+}
+
+func (r *mutableFingerprintResolver) setFingerprint(fingerprint string) {
+	r.mu.Lock()
+	r.fingerprint = fingerprint
+	r.mu.Unlock()
+}
+
+func (r *mutableFingerprintResolver) ResolveProfile(_ context.Context, profileID string) (*AgentProfileInfo, error) {
+	r.mu.RLock()
+	fingerprint := r.fingerprint
+	r.mu.RUnlock()
+	return &AgentProfileInfo{
+		ProfileID: profileID, AgentID: "mock-agent", AgentName: "mock-agent",
+		Fingerprint: fingerprint,
+	}, nil
 }
 
 type blockingAgentProfileResolver struct {
@@ -73,8 +98,90 @@ func (m *mockAgentProfileResolver) ResolveProfile(_ context.Context, profileID s
 		AgentID:        "mock-agent",
 		AgentName:      "mock-agent",
 		Model:          "mock-fast",
+		Fingerprint:    m.fingerprint,
+		EnvVars:        m.envVars,
 		CLIPassthrough: m.cliPassthrough,
 	}, nil
+}
+
+func TestStartAgentProcessBlocksProfileDriftBeforeProcessPath(t *testing.T) {
+	mgr := newTestManager(t)
+	mgr.profileResolver = &mockAgentProfileResolver{
+		fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}
+	execution := &AgentExecution{
+		ID: "exec-drift", AgentProfileID: "profile-1",
+		metadata: map[string]interface{}{
+			metadataKeyExpectedProfileFingerprint: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+	}
+	if err := mgr.executionStore.Add(execution); err != nil {
+		t.Fatalf("seed execution: %v", err)
+	}
+	err := mgr.StartAgentProcess(context.Background(), execution.ID)
+	if !errors.Is(err, ErrProfileDrift) || err.Error() != "BLOCKED_PROFILE_DRIFT" {
+		t.Fatalf("StartAgentProcess error = %v, want sanitized %v", err, ErrProfileDrift)
+	}
+}
+
+func TestStartAgentProcessProfileDriftDuringAgentctlWaitStartsZeroProcesses(t *testing.T) {
+	const expected = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	healthEntered := make(chan struct{})
+	releaseHealth := make(chan struct{})
+	var healthOnce sync.Once
+	var configureCalls, startCalls int
+	var callsMu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			healthOnce.Do(func() { close(healthEntered) })
+			<-releaseHealth
+			w.WriteHeader(http.StatusOK)
+		case "/api/v1/agent/configure":
+			callsMu.Lock()
+			configureCalls++
+			callsMu.Unlock()
+			_, _ = w.Write([]byte(`{"success":true}`))
+		case "/api/v1/start":
+			callsMu.Lock()
+			startCalls++
+			callsMu.Unlock()
+			_, _ = w.Write([]byte(`{"success":true,"command":"mock-agent"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	resolver := &mutableFingerprintResolver{fingerprint: expected}
+	mgr := newTestManager(t)
+	mgr.profileResolver = resolver
+	execution := &AgentExecution{
+		ID: "exec-wait-drift", SessionID: "session-wait-drift",
+		AgentProfileID: "profile-1", AgentCommand: "mock-agent",
+		metadata: map[string]interface{}{metadataKeyExpectedProfileFingerprint: expected},
+		agentctl: newTestAgentctlClient(t, server.URL, mgr.logger),
+	}
+	if err := mgr.executionStore.Add(execution); err != nil {
+		t.Fatalf("seed execution: %v", err)
+	}
+
+	result := make(chan error, 1)
+	go func() { result <- mgr.StartAgentProcess(context.Background(), execution.ID) }()
+	<-healthEntered
+	resolver.setFingerprint("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	close(releaseHealth)
+	if err := <-result; !errors.Is(err, ErrProfileDrift) || err.Error() != "BLOCKED_PROFILE_DRIFT" {
+		t.Fatalf("StartAgentProcess error = %v, want sanitized drift", err)
+	}
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	if startCalls != 0 {
+		t.Fatalf("agentctl start calls = %d, want zero after wait-time drift", startCalls)
+	}
+	if configureCalls != 0 {
+		t.Fatalf("agentctl configure calls = %d, want zero after wait-time drift", configureCalls)
+	}
 }
 
 func TestStartAgentProcess_NotFound(t *testing.T) {

@@ -484,6 +484,25 @@ func TestManager_RestartAgentProcess_InvalidBuiltReplacementLeavesCurrentProcess
 
 }
 
+func TestRestartAgentProcessBlocksProfileDriftBeforeStop(t *testing.T) {
+	mgr := newTestManager(t)
+	mgr.profileResolver = &restartProfileResolver{profile: &AgentProfileInfo{
+		ProfileID:   "profile-1",
+		Fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}}
+	execution := &AgentExecution{
+		ID: "exec-drift-restart", AgentProfileID: "profile-1", Status: v1.AgentStatusRunning,
+		metadata: map[string]interface{}{
+			metadataKeyExpectedProfileFingerprint: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+	}
+	require.NoError(t, mgr.executionStore.Add(execution))
+	err := mgr.RestartAgentProcess(context.Background(), execution.ID)
+	require.ErrorIs(t, err, ErrProfileDrift)
+	require.Equal(t, "BLOCKED_PROFILE_DRIFT", err.Error())
+	require.Equal(t, v1.AgentStatusRunning, execution.Status)
+}
+
 func TestPromptAgentWithDispatchCallbackTracksExecutionActivityUntilCompletion(t *testing.T) {
 	mgr := newTestManager(t)
 	coordinator := activity.NewCoordinator(activity.Options{})

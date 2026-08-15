@@ -73,6 +73,55 @@ func setupLiveResumeTestFixture(repo *mockRepository) {
 	}
 }
 
+func TestResumeSessionBlocksProfileDriftBeforeCleanupOrLaunch(t *testing.T) {
+	repo := newMockRepository()
+	setupLiveResumeTestFixture(repo)
+	repo.sessions["sess-1"].State = models.TaskSessionStateFailed
+	repo.sessions["sess-1"].AgentProfileSnapshot = map[string]interface{}{
+		"fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	agentMgr := &mockAgentManager{resolveAgentProfileFunc: func(context.Context, string) (*AgentProfileInfo, error) {
+		return &AgentProfileInfo{
+			ProfileID:   "profile-1",
+			Fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		}, nil
+	}}
+	exec := newTestExecutor(t, agentMgr, repo)
+
+	_, err := exec.ResumeSession(context.Background(), repo.sessions["sess-1"], true)
+	if !errors.Is(err, lifecycle.ErrProfileDrift) || err.Error() != "BLOCKED_PROFILE_DRIFT" {
+		t.Fatalf("ResumeSession error = %v, want sanitized %v", err, lifecycle.ErrProfileDrift)
+	}
+	if agentMgr.cleanupStaleExecutionCallCount != 0 || agentMgr.launchAgentCallCount != 0 {
+		t.Fatalf("drift reached cleanup/launch: cleanup=%d launch=%d",
+			agentMgr.cleanupStaleExecutionCallCount, agentMgr.launchAgentCallCount)
+	}
+	if repo.sessions["sess-1"].State != models.TaskSessionStateFailed {
+		t.Fatalf("drift mutated session state: %s", repo.sessions["sess-1"].State)
+	}
+}
+
+func TestResumeSessionForwardsPreparedProfileFingerprint(t *testing.T) {
+	repo := newMockRepository()
+	setupLiveResumeTestFixture(repo)
+	repo.sessions["sess-1"].AgentProfileSnapshot = map[string]interface{}{
+		"fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	var got string
+	agentMgr := &mockAgentManager{launchAgentFunc: func(_ context.Context, req *LaunchAgentRequest) (*LaunchAgentResponse, error) {
+		got = req.ExpectedProfileFingerprint
+		return &LaunchAgentResponse{AgentExecutionID: "exec-1", Status: v1.AgentStatusStarting}, nil
+	}}
+	exec := newTestExecutor(t, agentMgr, repo)
+
+	if _, err := exec.ResumeSession(context.Background(), repo.sessions["sess-1"], true); err != nil {
+		t.Fatalf("ResumeSession: %v", err)
+	}
+	if got != "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("resume expected fingerprint = %q", got)
+	}
+}
+
 type resumeCredentialStateIssuer struct {
 	repo          *mockRepository
 	observedState models.TaskSessionState

@@ -528,7 +528,7 @@ func (m *mockAgentManager) RowLiveness(row *models.ExecutorRunning) models.Proce
 	}
 	return models.ProcessLivenessUnknown
 }
-func (m *mockAgentManager) ResolveAgentProfile(_ context.Context, _ string) (*executor.AgentProfileInfo, error) {
+func (m *mockAgentManager) ResolveAgentProfile(_ context.Context, profileID string) (*executor.AgentProfileInfo, error) {
 	if m.resolveProfileErr != nil {
 		return nil, m.resolveProfileErr
 	}
@@ -536,6 +536,10 @@ func (m *mockAgentManager) ResolveAgentProfile(_ context.Context, _ string) (*ex
 		return m.resolveProfileInfo, nil
 	}
 	return &executor.AgentProfileInfo{
+		ProfileID:      profileID,
+		AgentID:        "test-agent-id",
+		AgentName:      "test-agent",
+		Fingerprint:    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		SupportsMCP:    true,
 		CLIPassthrough: m.isPassthrough,
 	}, nil

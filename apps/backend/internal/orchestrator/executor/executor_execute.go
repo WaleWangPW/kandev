@@ -771,7 +771,10 @@ func (e *Executor) PrepareSession(ctx context.Context, task *v1.Task, agentProfi
 	}
 
 	// Resolve agent profile to get model and other settings for snapshot
-	agentProfileSnapshot, isPassthrough := e.resolveAgentProfileSnapshot(ctx, agentProfileID)
+	agentProfileSnapshot, isPassthrough, err := e.resolveAgentProfileSnapshot(ctx, agentProfileID)
+	if err != nil {
+		return "", err
+	}
 
 	// Determine whether this is the task's first session and whether it should
 	// become primary. The immutable origin marker follows creation order, not
@@ -874,16 +877,17 @@ func (e *Executor) PrepareSession(ctx context.Context, task *v1.Task, agentProfi
 }
 
 // resolveAgentProfileSnapshot resolves an agent profile ID to a snapshot map and passthrough flag.
-func (e *Executor) resolveAgentProfileSnapshot(ctx context.Context, agentProfileID string) (map[string]interface{}, bool) {
+func (e *Executor) resolveAgentProfileSnapshot(ctx context.Context, agentProfileID string) (map[string]interface{}, bool, error) {
 	profileInfo, err := e.agentManager.ResolveAgentProfile(ctx, agentProfileID)
 	if err != nil || profileInfo == nil {
-		return map[string]interface{}{
-			"id":    agentProfileID,
-			"model": "",
-		}, false
+		return nil, false, lifecycle.ErrProfileDrift
+	}
+	if !lifecycle.IsValidProfileFingerprint(profileInfo.Fingerprint) {
+		return nil, false, lifecycle.ErrProfileDrift
 	}
 	return map[string]interface{}{
 		"id":                           profileInfo.ProfileID,
+		"fingerprint":                  profileInfo.Fingerprint,
 		"name":                         profileInfo.ProfileName,
 		"agent_id":                     profileInfo.AgentID,
 		"agent_name":                   profileInfo.AgentName,
@@ -893,7 +897,37 @@ func (e *Executor) resolveAgentProfileSnapshot(ctx context.Context, agentProfile
 		"auto_approve":                 profileInfo.AutoApprove,
 		"dangerously_skip_permissions": profileInfo.DangerouslySkipPermissions,
 		"cli_passthrough":              profileInfo.CLIPassthrough,
-	}, profileInfo.CLIPassthrough
+	}, profileInfo.CLIPassthrough, nil
+}
+
+func profileFingerprintFromSnapshot(snapshot map[string]interface{}) (string, error) {
+	if snapshot == nil {
+		return "", nil
+	}
+	value, exists := snapshot["fingerprint"]
+	if !exists {
+		return "", nil
+	}
+	fingerprint, ok := value.(string)
+	if !ok || !lifecycle.IsValidProfileFingerprint(fingerprint) {
+		return "", lifecycle.ErrProfileDrift
+	}
+	return fingerprint, nil
+}
+
+func (e *Executor) validatePreparedProfileFingerprint(
+	ctx context.Context, session *models.TaskSession, executionProfileID string,
+) (string, error) {
+	expected, err := profileFingerprintFromSnapshot(session.AgentProfileSnapshot)
+	if err != nil || expected == "" {
+		return expected, err
+	}
+	current, err := e.agentManager.ResolveAgentProfile(ctx, executionProfileID)
+	if err != nil || current == nil || current.Fingerprint != expected ||
+		!lifecycle.IsValidProfileFingerprint(current.Fingerprint) {
+		return "", lifecycle.ErrProfileDrift
+	}
+	return expected, nil
 }
 
 // LaunchPreparedSession launches the workspace (and optionally the agent) for a pre-created session.
@@ -933,6 +967,10 @@ func (e *Executor) LaunchPreparedSession(ctx context.Context, task *v1.Task, ses
 
 	if session.TaskID != task.ID {
 		return nil, fmt.Errorf("session does not belong to task")
+	}
+	expectedProfileFingerprint, err := e.validatePreparedProfileFingerprint(ctx, session, agentProfileID)
+	if err != nil {
+		return nil, err
 	}
 	if opts.McpMode == "" {
 		opts.McpMode, err = e.resolveTaskSessionMCPMode(ctx, task.ID, session, opts.StartAgent)
@@ -1030,6 +1068,7 @@ func (e *Executor) LaunchPreparedSession(ctx context.Context, task *v1.Task, ses
 		session.ExecutorID = execCfg.ExecutorID
 	}
 	req.OfficeAgentProfileID = opts.OfficeAgentProfileID
+	req.ExpectedProfileFingerprint = expectedProfileFingerprint
 	if req.OfficeAgentProfileID == "" && session.AgentProfileID != "" {
 		req.OfficeAgentProfileID = session.AgentProfileID
 	}

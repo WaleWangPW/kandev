@@ -69,7 +69,7 @@ func (r *StoreProfileResolver) ResolveProfile(ctx context.Context, profileID str
 	// Resolve agent capabilities from the registry.
 	model, nativeSessionResume := r.resolveAgentCapabilities(agent.Name, profile.Model)
 
-	return &AgentProfileInfo{
+	info := &AgentProfileInfo{
 		ProfileID:                  profile.ID,
 		ProfileName:                profile.Name,
 		AgentID:                    agent.ID,
@@ -88,7 +88,13 @@ func (r *StoreProfileResolver) ResolveProfile(ctx context.Context, profileID str
 		CLIPassthrough:             profile.CLIPassthrough,
 		NativeSessionResume:        nativeSessionResume,
 		SupportsMCP:                agent.SupportsMCP,
-	}, nil
+	}
+	fingerprint, err := profileFingerprint(info)
+	if err != nil {
+		return nil, ErrProfileDrift
+	}
+	info.Fingerprint = fingerprint
+	return info, nil
 }
 
 func (r *StoreProfileResolver) migrateCursorProfile(

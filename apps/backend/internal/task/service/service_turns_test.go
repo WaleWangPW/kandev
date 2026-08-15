@@ -934,8 +934,12 @@ func TestGetWorkspaceInfoForSession_NoExecutorRunning(t *testing.T) {
 	now := time.Now().UTC()
 
 	session := &models.TaskSession{
-		ID:        "session-1",
-		TaskID:    "task-123",
+		ID:             "session-1",
+		TaskID:         "task-123",
+		AgentProfileID: "profile-1",
+		AgentProfileSnapshot: map[string]interface{}{
+			"fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
 		State:     models.TaskSessionStateCompleted,
 		StartedAt: now,
 		UpdatedAt: now,
@@ -957,6 +961,9 @@ func TestGetWorkspaceInfoForSession_NoExecutorRunning(t *testing.T) {
 	}
 	if info.ExecutorType != "" {
 		t.Errorf("expected empty ExecutorType, got %q", info.ExecutorType)
+	}
+	if got := info.Metadata[lifecycle.MetadataKeyExpectedProfileFingerprint]; got != "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("profile fingerprint metadata = %#v, want prepared session binding", got)
 	}
 }
 

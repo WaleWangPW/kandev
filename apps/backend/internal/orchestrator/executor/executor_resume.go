@@ -535,6 +535,13 @@ func (e *Executor) ResumeSession(ctx context.Context, session *models.TaskSessio
 		return nil, err
 	}
 	defer unlock()
+	executionProfileID := session.ExecutionProfileID
+	if executionProfileID == "" {
+		executionProfileID = session.AgentProfileID
+	}
+	if _, err := e.validatePreparedProfileFingerprint(ctx, session, executionProfileID); err != nil {
+		return nil, err
+	}
 
 	resumeInitialState := session.State
 	previousCredentialSnapshot := captureResumeCredentialSnapshot(session)
@@ -879,19 +886,24 @@ func (e *Executor) buildResumeRequestAtCredentialBoundary(
 	if executionProfileID == "" {
 		executionProfileID = session.AgentProfileID
 	}
+	expectedProfileFingerprint, err := profileFingerprintFromSnapshot(session.AgentProfileSnapshot)
+	if err != nil {
+		return nil, "", executorConfig{}, nil, nil, err
+	}
 	req := &LaunchAgentRequest{
-		TaskID:               task.ID,
-		WorkspaceID:          task.WorkspaceID,
-		SessionID:            session.ID,
-		TaskTitle:            task.Title,
-		AgentProfileID:       executionProfileID,
-		OfficeAgentProfileID: session.AgentProfileID,
-		StartAgent:           startAgent,
-		TaskDescription:      task.Description,
-		Priority:             task.Priority,
-		IsEphemeral:          task.IsEphemeral,
-		IsPassthrough:        session.IsPassthrough,
-		TaskEnvironmentID:    session.TaskEnvironmentID,
+		TaskID:                     task.ID,
+		WorkspaceID:                task.WorkspaceID,
+		SessionID:                  session.ID,
+		TaskTitle:                  task.Title,
+		AgentProfileID:             executionProfileID,
+		OfficeAgentProfileID:       session.AgentProfileID,
+		ExpectedProfileFingerprint: expectedProfileFingerprint,
+		StartAgent:                 startAgent,
+		TaskDescription:            task.Description,
+		Priority:                   task.Priority,
+		IsEphemeral:                task.IsEphemeral,
+		IsPassthrough:              session.IsPassthrough,
+		TaskEnvironmentID:          session.TaskEnvironmentID,
 	}
 
 	metadata := map[string]interface{}{}

@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -462,7 +463,10 @@ func TestPassthroughOpenCodeInjectsConfigEnv(t *testing.T) {
 		t.Fatalf("opencode config not written: %v", err)
 	}
 	// OPENCODE_CONFIG must be merged into the passthrough environment.
-	env := mgr.buildPassthroughEnv(context.Background(), execution, nil)
+	env, err := mgr.buildPassthroughEnv(context.Background(), execution, nil)
+	if err != nil {
+		t.Fatalf("buildPassthroughEnv returned error: %v", err)
+	}
 	if env["OPENCODE_CONFIG"] != files[0] {
 		t.Fatalf("OPENCODE_CONFIG = %q, want %q", env["OPENCODE_CONFIG"], files[0])
 	}
@@ -1100,12 +1104,15 @@ func TestBuildPassthroughEnv_MergesProfileEnvVars(t *testing.T) {
 		},
 	}
 
-	env := mgr.buildPassthroughEnv(context.Background(), &AgentExecution{
+	env, err := mgr.buildPassthroughEnv(context.Background(), &AgentExecution{
 		TaskID:               "task-1",
 		SessionID:            "session-1",
 		AgentProfileID:       "profile-1",
 		OfficeAgentProfileID: "office-cto",
 	}, nil)
+	if err != nil {
+		t.Fatalf("buildPassthroughEnv returned error: %v", err)
+	}
 
 	if env["PLAIN"] != "plain-value" {
 		t.Fatalf("profile env var missing: %+v", env)
@@ -1118,6 +1125,58 @@ func TestBuildPassthroughEnv_MergesProfileEnvVars(t *testing.T) {
 	}
 	if env["KANDEV_EXECUTION_PROFILE_ID"] != "profile-1" {
 		t.Fatalf("execution profile missing: %+v", env)
+	}
+}
+
+func TestPassthroughStartAndRestartBlockProfileDriftBeforeMutation(t *testing.T) {
+	mgr := newTestManager(t)
+	mgr.profileResolver = &fixedFingerprintResolver{info: &AgentProfileInfo{
+		ProfileID: "profile-1", CLIPassthrough: true,
+		Fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}}
+	newExecution := func() *AgentExecution {
+		return &AgentExecution{
+			ID: "exec-drift", SessionID: "session-drift", AgentProfileID: "profile-1",
+			PassthroughProcessID: "process-must-remain",
+			metadata: map[string]interface{}{
+				metadataKeyExpectedProfileFingerprint: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			},
+		}
+	}
+
+	execution := newExecution()
+	if err := mgr.startPassthroughSession(context.Background(), execution, nil); !errors.Is(err, ErrProfileDrift) {
+		t.Fatalf("startPassthroughSession error = %v, want %v", err, ErrProfileDrift)
+	}
+	if execution.PassthroughProcessID != "process-must-remain" {
+		t.Fatalf("start drift mutated process id: %q", execution.PassthroughProcessID)
+	}
+
+	execution = newExecution()
+	if err := mgr.restartPassthroughProcess(context.Background(), execution); !errors.Is(err, ErrProfileDrift) {
+		t.Fatalf("restartPassthroughProcess error = %v, want %v", err, ErrProfileDrift)
+	}
+	if execution.PassthroughProcessID != "process-must-remain" {
+		t.Fatalf("restart drift stopped process: %q", execution.PassthroughProcessID)
+	}
+}
+
+func TestPassthroughStartRejectsStaleResolvedProfile(t *testing.T) {
+	expected := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	mgr := newTestManager(t)
+	mgr.profileResolver = &fixedFingerprintResolver{info: &AgentProfileInfo{
+		ProfileID: "profile-1", CLIPassthrough: true, Fingerprint: expected,
+	}}
+	execution := &AgentExecution{
+		ID: "exec-stale-profile", SessionID: "session-1", AgentProfileID: "profile-1",
+		metadata: map[string]interface{}{metadataKeyExpectedProfileFingerprint: expected},
+	}
+	stale := &AgentProfileInfo{
+		ProfileID: "profile-1", CLIPassthrough: true,
+		Fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}
+	if err := mgr.startPassthroughSession(context.Background(), execution, stale); !errors.Is(err, ErrProfileDrift) {
+		t.Fatalf("startPassthroughSession error = %v, want %v", err, ErrProfileDrift)
 	}
 }
 
@@ -1136,7 +1195,10 @@ func TestBuildPassthroughEnvIncludesEffectiveRuntimeEnv(t *testing.T) {
 		"PATH":                                "/tmp/kandev-shim:/usr/bin",
 	})
 
-	env := mgr.buildPassthroughEnv(context.Background(), execution, nil)
+	env, err := mgr.buildPassthroughEnv(context.Background(), execution, nil)
+	if err != nil {
+		t.Fatalf("buildPassthroughEnv returned error: %v", err)
+	}
 	for key, want := range map[string]string{
 		"KANDEV_GITHUB_CREDENTIAL_BROKER_URL": "http://127.0.0.1:9876",
 		"GIT_CONFIG_COUNT":                    "1",

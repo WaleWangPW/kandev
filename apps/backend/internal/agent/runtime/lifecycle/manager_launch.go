@@ -44,6 +44,9 @@ var errTaskCleanupActive = errors.New("task cleanup is active")
 func (m *Manager) resolveAgentProfile(ctx context.Context, req *LaunchRequest) (string, *AgentProfileInfo, error) {
 	profileID := executionProfileID(req)
 	if m.profileResolver == nil {
+		if req != nil && req.ExpectedProfileFingerprint != "" {
+			return "", nil, ErrProfileDrift
+		}
 		// Fallback: treat AgentProfileID as agent type directly (for backward compat)
 		m.logger.Warn("no profile resolver configured, using profile ID as agent type",
 			zap.String("agent_type", profileID))
@@ -51,7 +54,16 @@ func (m *Manager) resolveAgentProfile(ctx context.Context, req *LaunchRequest) (
 	}
 	profileInfo, err := m.profileResolver.ResolveProfile(ctx, profileID)
 	if err != nil {
+		if req != nil && req.ExpectedProfileFingerprint != "" {
+			return "", nil, ErrProfileDrift
+		}
 		return "", nil, fmt.Errorf("failed to resolve agent profile: %w", err)
+	}
+	if profileInfo == nil {
+		return "", nil, ErrProfileDrift
+	}
+	if err := validateProfileFingerprint(req.ExpectedProfileFingerprint, profileInfo); err != nil {
+		return "", nil, err
 	}
 	// Legacy model-only routes still use overlays until their persisted config
 	// is migrated. A concrete execution profile is authoritative and must not
@@ -570,6 +582,9 @@ func (m *Manager) launchPrepareRequest(req *LaunchRequest, profileInfo *AgentPro
 	}
 	if req.SessionID != "" {
 		reqWithWorktree.Metadata["session_id"] = req.SessionID
+	}
+	if req.ExpectedProfileFingerprint != "" {
+		reqWithWorktree.Metadata[metadataKeyExpectedProfileFingerprint] = req.ExpectedProfileFingerprint
 	}
 
 	if err := mergeRouteOverrideEnv(&reqWithWorktree); err != nil {
@@ -1281,7 +1296,7 @@ func (m *Manager) launchInternal(ctx context.Context, req *LaunchRequest) (*Agen
 		return nil, err
 	}
 	if profileInfo != nil && len(profileInfo.EnvVars) > 0 {
-		m.cacheResolvedProfileEnv(execution, m.resolveAgentProfileEnvVars(ctx, profileInfo.EnvVars))
+		m.cacheResolvedProfileEnv(execution, resolvedProfileEnvFromFinal(profileInfo.EnvVars, execReq.Env))
 	}
 	if !reqWithWorktree.IsPassthrough {
 		if err := m.materializeRuntimeProjectMCP(ctx, execution, agentConfig); err != nil {
@@ -1745,7 +1760,14 @@ func getAttachmentsFromMetadata(execution *AgentExecution) []MessageAttachment {
 // Returns the effective boot command (full command with adapter args, or base command).
 func (m *Manager) configureAndStartAgent(ctx context.Context, execution *AgentExecution, approvalPolicy string) (string, error) {
 	env := runtimeEnvFromMetadata(execution.MetadataSnapshot())
-	m.mergeAgentProfileEnvForExecution(ctx, execution, env)
+	if err := m.mergeAgentProfileEnvForExecution(ctx, execution, env); err != nil {
+		if errors.Is(err, ErrProfileDrift) {
+			m.updateExecutionError(execution.ID, ErrProfileDrift.Error())
+		} else {
+			m.updateExecutionError(execution.ID, ErrProfileSecret.Error())
+		}
+		return "", err
+	}
 	if err := spillLargeWakePayloadEnv(env, execution.WorkspacePath, m.logger.Zap()); err != nil {
 		m.updateExecutionError(execution.ID, "failed to prepare agent env: "+err.Error())
 		return "", fmt.Errorf("failed to prepare agent env: %w", err)
@@ -1753,6 +1775,14 @@ func (m *Manager) configureAndStartAgent(ctx context.Context, execution *AgentEx
 
 	if err := execution.agentctl.ConfigureAgent(ctx, execution.AgentCommand, execution.AgentArgs, env, approvalPolicy, execution.ContinueCommand, execution.ContinueArgs); err != nil {
 		return "", fmt.Errorf("failed to configure agent: %w", err)
+	}
+	// ConfigureAgent may block on a remote agentctl after the earlier launch
+	// checks. Re-resolve at the last possible point so profile drift during
+	// readiness, remote preflight, environment resolution, or configuration
+	// cannot cross the actual subprocess start boundary.
+	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
+		m.updateExecutionError(execution.ID, ErrProfileDrift.Error())
+		return "", err
 	}
 
 	fullCommand, err := execution.agentctl.Start(ctx)

@@ -628,6 +628,13 @@ func (e *Executor) prepareModelSwitch(ctx context.Context, taskID, sessionID str
 	if session.TaskID != taskID {
 		return nil, nil, "", nil, fmt.Errorf("session %s does not belong to task %s", sessionID, taskID)
 	}
+	executionProfileID := session.ExecutionProfileID
+	if executionProfileID == "" {
+		executionProfileID = session.AgentProfileID
+	}
+	if _, err := e.validatePreparedProfileFingerprint(ctx, session, executionProfileID); err != nil {
+		return nil, nil, "", nil, err
+	}
 	executionID, err := e.agentManager.GetExecutionIDForSession(ctx, sessionID)
 	if err != nil || executionID == "" {
 		return nil, nil, "", nil, ErrExecutionNotFound
@@ -700,20 +707,30 @@ func (e *Executor) launchModelSwitchAgent(ctx context.Context, taskID, sessionID
 // buildSwitchModelRequest constructs a LaunchAgentRequest for a model switch, applying
 // repository and worktree config from the existing session.
 func (e *Executor) buildSwitchModelRequest(ctx context.Context, task *models.Task, session *models.TaskSession, sessionID, newModel, prompt, acpSessionID string, execConfig executorConfig, running *models.ExecutorRunning) (*LaunchAgentRequest, error) {
+	executionProfileID := session.ExecutionProfileID
+	if executionProfileID == "" {
+		executionProfileID = session.AgentProfileID
+	}
+	expectedProfileFingerprint, err := profileFingerprintFromSnapshot(session.AgentProfileSnapshot)
+	if err != nil {
+		return nil, err
+	}
 	req := &LaunchAgentRequest{
-		TaskID:            task.ID,
-		WorkspaceID:       task.WorkspaceID,
-		SessionID:         sessionID,
-		TaskTitle:         task.Title,
-		AgentProfileID:    session.AgentProfileID,
-		TaskDescription:   prompt,
-		ModelOverride:     newModel,
-		ACPSessionID:      acpSessionID,
-		ExecutorType:      execConfig.ExecutorType,
-		Metadata:          execConfig.Metadata,
-		IsEphemeral:       task.IsEphemeral,
-		IsPassthrough:     session.IsPassthrough,
-		TaskEnvironmentID: session.TaskEnvironmentID,
+		TaskID:                     task.ID,
+		WorkspaceID:                task.WorkspaceID,
+		SessionID:                  sessionID,
+		TaskTitle:                  task.Title,
+		AgentProfileID:             executionProfileID,
+		OfficeAgentProfileID:       session.AgentProfileID,
+		ExpectedProfileFingerprint: expectedProfileFingerprint,
+		TaskDescription:            prompt,
+		ModelOverride:              newModel,
+		ACPSessionID:               acpSessionID,
+		ExecutorType:               execConfig.ExecutorType,
+		Metadata:                   execConfig.Metadata,
+		IsEphemeral:                task.IsEphemeral,
+		IsPassthrough:              session.IsPassthrough,
+		TaskEnvironmentID:          session.TaskEnvironmentID,
 	}
 
 	mcpMode, err := e.resolveTaskSessionMCPMode(ctx, task.ID, session, true)

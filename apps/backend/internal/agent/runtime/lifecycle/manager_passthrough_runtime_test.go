@@ -67,7 +67,8 @@ func TestBuildPassthroughEnvInjectsRequiredCredentialsAndMCPEnv(t *testing.T) {
 	})
 	setPassthroughMCPEnv(execution, map[string]string{"OPENCODE_CONFIG": "/tmp/opencode.json"})
 
-	env := mgr.buildPassthroughEnv(context.Background(), execution, []string{"ANTHROPIC_API_KEY", "MISSING_KEY"})
+	env, err := mgr.buildPassthroughEnv(context.Background(), execution, []string{"ANTHROPIC_API_KEY", "MISSING_KEY"})
+	require.NoError(t, err)
 
 	require.Equal(t, "https://proxy.internal", env["ANTHROPIC_BASE_URL"],
 		"Agent.Runtime().Env must reach the passthrough subprocess")

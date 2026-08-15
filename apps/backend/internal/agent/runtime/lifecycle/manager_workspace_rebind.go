@@ -35,6 +35,9 @@ func (m *Manager) RebindWorkspaceForSession(ctx context.Context, sessionID, work
 	if execution.IsPassthrough || execution.agentctl == nil || execution.ACPSessionID == "" {
 		return fmt.Errorf("workspace rebind is unsupported for this session; start a new session after attaching sources")
 	}
+	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
+		return err
+	}
 	execution.promptLifecycleMu.Lock()
 	defer execution.promptLifecycleMu.Unlock()
 	if execution.Status != v1.AgentStatusReady {
@@ -58,6 +61,9 @@ func (m *Manager) RebindWorkspaceForSession(ctx context.Context, sessionID, work
 		return m.rollbackWorkspaceRebind(ctx, execution, oldPath, oldRoots, acpID, fmt.Errorf("rebind agentctl workspace: %w", err))
 	}
 	execution.WorkspacePath = workspacePath
+	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
+		return m.rollbackWorkspaceRebind(ctx, execution, oldPath, oldRoots, acpID, err)
+	}
 	if _, err := execution.agentctl.Start(ctx); err != nil {
 		return m.rollbackWorkspaceRebind(ctx, execution, oldPath, oldRoots, acpID, fmt.Errorf("restart agent after workspace rebind: %w", err))
 	}
@@ -82,6 +88,10 @@ func (m *Manager) rollbackWorkspaceRebind(ctx context.Context, execution *AgentE
 		return fmt.Errorf("%w; rollback rebind failed: %v", cause, err)
 	}
 	execution.WorkspacePath = oldPath
+	if err := m.validateExecutionProfileFingerprint(rollbackCtx, execution); err != nil {
+		m.executionStore.UpdateError(execution.ID, err.Error())
+		return fmt.Errorf("%w; rollback profile binding failed: %v", cause, err)
+	}
 	if _, err := execution.agentctl.Start(rollbackCtx); err != nil {
 		m.executionStore.UpdateError(execution.ID, fmt.Sprintf("%v; rollback restart failed: %v", cause, err))
 		return fmt.Errorf("%w; rollback restart failed: %v", cause, err)

@@ -50,6 +50,11 @@ func (m *Manager) resolveStrictEnvironment(
 
 	resolved, err := runtimeenv.Resolve(ctx, definitions, m.resolveEnvironmentDefinition)
 	if err != nil {
+		var secretErr *runtimeenv.SecretError
+		if errors.As(err, &secretErr) &&
+			(secretErr.Origin == agentProfileOrigin || secretErr.Origin == executorProfileOrigin) {
+			return nil, ErrProfileSecret
+		}
 		return nil, fmt.Errorf("resolve task environment: %w", err)
 	}
 	return resolved, nil

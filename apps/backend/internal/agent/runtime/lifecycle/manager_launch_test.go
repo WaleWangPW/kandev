@@ -463,6 +463,53 @@ func TestBuildEnvForExecution_ResolvesSecretBackedProfileEnv(t *testing.T) {
 	}
 }
 
+func TestConfigureAndStartAgentPersistsSanitizedProfileFailureClass(t *testing.T) {
+	const expected = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	tests := []struct {
+		name       string
+		resolver   *mockAgentProfileResolver
+		want       error
+		wantStored string
+	}{
+		{
+			name: "drift",
+			resolver: &mockAgentProfileResolver{
+				fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			},
+			want: ErrProfileDrift, wantStored: "BLOCKED_PROFILE_DRIFT",
+		},
+		{
+			name: "secret",
+			resolver: &mockAgentProfileResolver{
+				fingerprint: expected,
+				envVars:     []settingsmodels.ProfileEnvVar{{Key: "TOKEN", SecretID: "secret-ref"}},
+			},
+			want: ErrProfileSecret, wantStored: "BLOCKED_PROFILE_SECRET",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := newTestManager(t)
+			mgr.profileResolver = tc.resolver
+			execution := &AgentExecution{
+				ID: "exec-" + tc.name, AgentProfileID: "profile-1",
+				metadata: map[string]interface{}{metadataKeyExpectedProfileFingerprint: expected},
+			}
+			if err := mgr.executionStore.Add(execution); err != nil {
+				t.Fatalf("seed execution: %v", err)
+			}
+			_, err := mgr.configureAndStartAgent(context.Background(), execution, "never")
+			if !errors.Is(err, tc.want) || err.Error() != tc.wantStored {
+				t.Fatalf("configureAndStartAgent error = %v, want %s", err, tc.wantStored)
+			}
+			current, ok := mgr.executionStore.Get(execution.ID)
+			if !ok || current.ErrorMessage != tc.wantStored {
+				t.Fatalf("stored error = %#v, want %q", current, tc.wantStored)
+			}
+		})
+	}
+}
+
 func TestBuildEnvForExecution_SeparatesOfficeAndExecutionProfiles(t *testing.T) {
 	mgr := newTestManager(t)
 	profileInfo := &AgentProfileInfo{

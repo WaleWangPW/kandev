@@ -101,6 +101,9 @@ func (m *Manager) StartAgentProcess(ctx context.Context, executionID string) (re
 		}
 		activityClaim.Commit()
 	}()
+	if err := m.validateExecutionProfileFingerprint(operationCtx, execution); err != nil {
+		return err
+	}
 
 	// Decide passthrough vs ACP. The session-creation snapshot
 	// (execution.IsPassthrough, sourced from TaskSession.IsPassthrough) is
@@ -318,9 +321,13 @@ func (m *Manager) buildEnvForExecution(ctx context.Context, executionID string, 
 	}
 
 	if profileInfo != nil {
-		m.mergeAgentProfileEnvFromInfo(ctx, profileInfo, env)
+		if err := m.mergeAgentProfileEnvFromInfo(ctx, profileInfo, env); err != nil {
+			return nil, err
+		}
 	} else {
-		m.mergeAgentProfileEnv(ctx, executionProfileID(req), env)
+		if err := m.mergeAgentProfileEnv(ctx, executionProfileID(req), env); err != nil {
+			return nil, err
+		}
 	}
 
 	// Add standard variables for recovery after backend restart

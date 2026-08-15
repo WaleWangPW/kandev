@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	settingsmodels "github.com/kandev/kandev/internal/agent/settings/models"
@@ -81,10 +82,13 @@ func TestResolveAgentProfileEnvVars_SecretAndValue(t *testing.T) {
 
 	log, _ := logger.NewLogger(logger.LoggingConfig{Level: "error", Format: "json"})
 	m := &Manager{logger: log, secretStore: store}
-	resolved := m.resolveAgentProfileEnvVars(context.Background(), []settingsmodels.ProfileEnvVar{
+	resolved, err := m.resolveAgentProfileEnvVars(context.Background(), []settingsmodels.ProfileEnvVar{
 		{Key: "PLAIN", Value: "plain"},
 		{Key: "FROM_SECRET", SecretID: "sec-1"},
 	})
+	if err != nil {
+		t.Fatalf("resolve profile env vars: %v", err)
+	}
 	if resolved["PLAIN"] != "plain" {
 		t.Fatalf("PLAIN: got %q", resolved["PLAIN"])
 	}
@@ -104,10 +108,38 @@ func TestResolveAgentProfileEnvVars_RejectsWorkspaceSecret(t *testing.T) {
 
 	log, _ := logger.NewLogger(logger.LoggingConfig{Level: "error", Format: "json"})
 	m := &Manager{logger: log, secretStore: store}
-	resolved := m.resolveAgentProfileEnvVars(context.Background(), []settingsmodels.ProfileEnvVar{{
+	resolved, err := m.resolveAgentProfileEnvVars(context.Background(), []settingsmodels.ProfileEnvVar{{
 		Key: "WORKSPACE_ONLY", SecretID: "workspace-secret",
 	}})
+	if !errors.Is(err, ErrProfileSecret) {
+		t.Fatalf("resolve profile env vars error = %v, want %v", err, ErrProfileSecret)
+	}
+	if resolved != nil {
+		t.Fatalf("secret failure returned partial environment: %#v", resolved)
+	}
 	if _, ok := resolved["WORKSPACE_ONLY"]; ok {
 		t.Fatalf("workspace secret was resolved into profile environment: %#v", resolved)
+	}
+}
+
+func TestMergeAgentProfileEnv_SecretFailureIsAtomicAndSanitized(t *testing.T) {
+	log, _ := logger.NewLogger(logger.LoggingConfig{Level: "error", Format: "json"})
+	m := &Manager{
+		logger: log,
+		profileResolver: &fixedFingerprintResolver{info: &AgentProfileInfo{
+			ProfileID: "profile-1",
+			EnvVars: []settingsmodels.ProfileEnvVar{
+				{Key: "PLAIN", Value: "must-not-be-merged"},
+				{Key: "SECRET", SecretID: "missing-secret-reference"},
+			},
+		}},
+	}
+	env := map[string]string{"EXISTING": "preserved"}
+	err := m.mergeAgentProfileEnv(context.Background(), "profile-1", env)
+	if !errors.Is(err, ErrProfileSecret) || err.Error() != "BLOCKED_PROFILE_SECRET" {
+		t.Fatalf("error = %v, want sanitized %v", err, ErrProfileSecret)
+	}
+	if len(env) != 1 || env["EXISTING"] != "preserved" {
+		t.Fatalf("secret failure mutated environment: %#v", env)
 	}
 }

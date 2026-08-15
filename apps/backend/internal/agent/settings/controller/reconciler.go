@@ -368,9 +368,8 @@ func (r *ProfileReconciler) seedDefaultProfile(
 }
 
 // healProfile validates the profile's model and mode against the cache and
-// auto-heals values that no longer exist. User-modified profiles are still
-// healed — we always keep profiles in a usable state; the "user_modified"
-// flag survives the write to retain user intent for other fields.
+// seeds system-managed empty values. Explicit non-empty user bindings survive
+// capability drift; the probe is not an authority to replace user intent.
 func (r *ProfileReconciler) healProfile(
 	ctx context.Context,
 	p *models.AgentProfile,
@@ -409,7 +408,7 @@ func (r *ProfileReconciler) healProfile(
 			zap.String("fallback_model", p.FallbackModel))
 	}
 
-	if p.Mode != "" && !modeExists(p.Mode, caps.Modes) {
+	if p.Mode != "" && !modeExists(p.Mode, caps.Modes) && !p.UserModified {
 		r.log.Info("profile mode no longer available, clearing",
 			zap.String("profile_id", p.ID),
 			zap.String("old_mode", p.Mode))

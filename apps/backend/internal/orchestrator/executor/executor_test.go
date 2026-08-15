@@ -189,6 +189,7 @@ func TestPrepareSessionSnapshotsProfileRuntimeConfig(t *testing.T) {
 				Model:         "gpt-5.6-sol",
 				Mode:          "agent",
 				ConfigOptions: map[string]string{"reasoning_effort": "high"},
+				Fingerprint:   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 			}, nil
 		},
 	}
@@ -204,6 +205,9 @@ func TestPrepareSessionSnapshotsProfileRuntimeConfig(t *testing.T) {
 	snapshot := repo.createTaskSessionCalls[0].AgentProfileSnapshot
 	if snapshot["mode"] != "agent" {
 		t.Fatalf("profile snapshot mode = %#v", snapshot["mode"])
+	}
+	if snapshot["fingerprint"] != "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+		t.Fatalf("profile snapshot fingerprint = %#v", snapshot["fingerprint"])
 	}
 	options, ok := snapshot["config_options"].(map[string]string)
 	if !ok || options["reasoning_effort"] != "high" {
@@ -466,12 +470,13 @@ func TestLaunchPreparedSession_Success(t *testing.T) {
 
 	// Pre-create session (as PrepareSession would)
 	session := &models.TaskSession{
-		ID:             "session-123",
-		TaskID:         "task-123",
-		AgentProfileID: "profile-123",
-		State:          models.TaskSessionStateCreated,
-		StartedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
+		ID:                   "session-123",
+		TaskID:               "task-123",
+		AgentProfileID:       "profile-123",
+		AgentProfileSnapshot: map[string]interface{}{"fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		State:                models.TaskSessionStateCreated,
+		StartedAt:            time.Now(),
+		UpdatedAt:            time.Now(),
 	}
 	repo.sessions[session.ID] = session
 
@@ -480,6 +485,9 @@ func TestLaunchPreparedSession_Success(t *testing.T) {
 	agentManager := &mockAgentManager{
 		launchAgentFunc: func(ctx context.Context, req *LaunchAgentRequest) (*LaunchAgentResponse, error) {
 			launchCalled = true
+			if req.ExpectedProfileFingerprint != "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+				t.Fatalf("expected profile fingerprint = %q", req.ExpectedProfileFingerprint)
+			}
 			if !req.StartAgent {
 				t.Error("expected lifecycle launch to retain initial-agent activity")
 			}
@@ -540,6 +548,61 @@ func TestLaunchPreparedSession_Success(t *testing.T) {
 	}
 	if repo.createTaskEnvironmentCalls[0].ID != launchedEnvID {
 		t.Errorf("Expected persisted task environment ID %q, got %q", launchedEnvID, repo.createTaskEnvironmentCalls[0].ID)
+	}
+}
+
+func TestPrepareSessionFailsClosedWithoutProfileFingerprint(t *testing.T) {
+	tests := []struct {
+		name string
+		info *AgentProfileInfo
+		err  error
+	}{
+		{name: "resolver error", err: errors.New("sensitive backend detail")},
+		{name: "missing fingerprint", info: &AgentProfileInfo{ProfileID: "profile-123"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newMockRepository()
+			executor := newTestExecutor(t, &mockAgentManager{resolveAgentProfileFunc: func(context.Context, string) (*AgentProfileInfo, error) {
+				return tt.info, tt.err
+			}}, repo)
+			_, err := executor.PrepareSession(context.Background(),
+				&v1.Task{ID: "task-123", WorkspaceID: "workspace-123"},
+				"profile-123", "executor-123", "", "step-123")
+			if !errors.Is(err, lifecycle.ErrProfileDrift) || err.Error() != "BLOCKED_PROFILE_DRIFT" {
+				t.Fatalf("PrepareSession error = %v, want sanitized %v", err, lifecycle.ErrProfileDrift)
+			}
+			if len(repo.createTaskSessionCalls) != 0 {
+				t.Fatalf("prepare persisted session after profile failure: %d calls", len(repo.createTaskSessionCalls))
+			}
+		})
+	}
+}
+
+func TestLaunchPreparedSessionBlocksProfileDriftBeforeLaunch(t *testing.T) {
+	repo := newMockRepository()
+	repo.sessions["session-drift"] = &models.TaskSession{
+		ID: "session-drift", TaskID: "task-drift", AgentProfileID: "profile-123",
+		AgentProfileSnapshot: map[string]interface{}{
+			"fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+		State: models.TaskSessionStateCreated,
+	}
+	agentManager := &mockAgentManager{resolveAgentProfileFunc: func(context.Context, string) (*AgentProfileInfo, error) {
+		return &AgentProfileInfo{
+			ProfileID:   "profile-123",
+			Fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		}, nil
+	}}
+	executor := newTestExecutor(t, agentManager, repo)
+	_, err := executor.LaunchPreparedSession(context.Background(),
+		&v1.Task{ID: "task-drift", WorkspaceID: "workspace-123"}, "session-drift",
+		LaunchOptions{AgentProfileID: "profile-123", StartAgent: true})
+	if !errors.Is(err, lifecycle.ErrProfileDrift) || err.Error() != "BLOCKED_PROFILE_DRIFT" {
+		t.Fatalf("LaunchPreparedSession error = %v, want sanitized %v", err, lifecycle.ErrProfileDrift)
+	}
+	if agentManager.launchAgentCallCount != 0 {
+		t.Fatalf("profile drift reached lifecycle launch: %d calls", agentManager.launchAgentCallCount)
 	}
 }
 

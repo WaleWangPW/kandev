@@ -600,11 +600,15 @@ func TestSwitchModelFallback_PreservesRestrictedMCPMode(t *testing.T) {
 				AssigneeAgentProfileID: tt.assignee,
 			}
 			repo.sessions["session-office"] = &models.TaskSession{
-				ID:             "session-office",
-				TaskID:         "task-office",
-				AgentProfileID: "office-agent",
-				State:          models.TaskSessionStateRunning,
-				Metadata:       tt.metadata,
+				ID:                 "session-office",
+				TaskID:             "task-office",
+				AgentProfileID:     "office-agent",
+				ExecutionProfileID: "execution-agent",
+				AgentProfileSnapshot: map[string]interface{}{
+					"fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				},
+				State:    models.TaskSessionStateRunning,
+				Metadata: tt.metadata,
 			}
 
 			var capturedReq *LaunchAgentRequest
@@ -633,9 +637,49 @@ func TestSwitchModelFallback_PreservesRestrictedMCPMode(t *testing.T) {
 			if capturedReq.McpMode != tt.wantMode {
 				t.Fatalf("McpMode = %q, want %q", capturedReq.McpMode, tt.wantMode)
 			}
+			if capturedReq.AgentProfileID != "execution-agent" || capturedReq.OfficeAgentProfileID != "office-agent" {
+				t.Fatalf("model-switch profile identities = execution %q office %q",
+					capturedReq.AgentProfileID, capturedReq.OfficeAgentProfileID)
+			}
+			if capturedReq.ExpectedProfileFingerprint != "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+				t.Fatalf("model-switch expected fingerprint = %q", capturedReq.ExpectedProfileFingerprint)
+			}
 			if capturedReq.WorkspaceID != "workspace-1" || capturedReq.Env[envGitLabToken] != "switch-token" {
 				t.Fatalf("model-switch credentials not workspace scoped: workspace=%q env=%#v", capturedReq.WorkspaceID, capturedReq.Env)
 			}
 		})
+	}
+}
+
+func TestSwitchModelFallbackBlocksProfileDriftBeforeStop(t *testing.T) {
+	repo := newMockRepository()
+	repo.tasks["task-1"] = &models.Task{ID: "task-1", WorkspaceID: "workspace-1"}
+	repo.sessions["session-1"] = &models.TaskSession{
+		ID: "session-1", TaskID: "task-1", AgentProfileID: "profile-1", State: models.TaskSessionStateRunning,
+		AgentProfileSnapshot: map[string]interface{}{
+			"fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+	}
+	stopCalled := false
+	manager := &mockAgentManager{
+		resolveAgentProfileFunc: func(context.Context, string) (*AgentProfileInfo, error) {
+			return &AgentProfileInfo{
+				ProfileID:   "profile-1",
+				Fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			}, nil
+		},
+		getExecutionIDForSessionFunc: func(context.Context, string) (string, error) { return "exec-old", nil },
+		stopAgentFunc: func(context.Context, string, bool) error {
+			stopCalled = true
+			return nil
+		},
+	}
+	exec := newTestExecutor(t, manager, repo)
+	_, err := exec.SwitchModel(context.Background(), "task-1", "session-1", "new-model", "continue")
+	if !errors.Is(err, lifecycle.ErrProfileDrift) || err.Error() != "BLOCKED_PROFILE_DRIFT" {
+		t.Fatalf("SwitchModel error = %v, want sanitized %v", err, lifecycle.ErrProfileDrift)
+	}
+	if stopCalled || manager.launchAgentCallCount != 0 {
+		t.Fatalf("drift reached stop/launch: stop=%v launch=%d", stopCalled, manager.launchAgentCallCount)
 	}
 }

@@ -503,6 +503,9 @@ func (m *Manager) ResetAgentContext(ctx context.Context, executionID string) err
 	if !exists {
 		return fmt.Errorf("execution %q not found: %w", executionID, ErrExecutionNotFound)
 	}
+	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
+		return err
+	}
 
 	// Passthrough agents always need full restart
 	if execution.PassthroughProcessID != "" {
@@ -727,6 +730,9 @@ func (m *Manager) RestartAgentProcess(ctx context.Context, executionID string) e
 	execution, exists := m.executionStore.Get(executionID)
 	if !exists {
 		return fmt.Errorf("execution %q not found: %w", executionID, ErrExecutionNotFound)
+	}
+	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
+		return err
 	}
 
 	// Passthrough agents: kill PTY and relaunch fresh (no --resume).
@@ -1706,6 +1712,9 @@ func (m *Manager) stopPassthroughProcess(ctx context.Context, executionID string
 // command_prefix cannot be tokenised, it returns an error so a context reset
 // never relaunches a configured agent without its wrapper.
 func (m *Manager) buildFreshAgentCommand(ctx context.Context, execution *AgentExecution, agentConfig agents.Agent) (agentCommands, error) {
+	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
+		return agentCommands{}, err
+	}
 	var profileInfo *AgentProfileInfo
 	if execution.AgentProfileID != "" && m.profileResolver != nil {
 		pi, resolveErr := m.profileResolver.ResolveProfile(ctx, execution.AgentProfileID)
@@ -1716,6 +1725,13 @@ func (m *Manager) buildFreshAgentCommand(ctx context.Context, execution *AgentEx
 			return agentCommands{}, fmt.Errorf("resolve profile %s for restart: %w", execution.AgentProfileID, resolveErr)
 		}
 		profileInfo = pi
+		expected, bindingErr := expectedProfileFingerprintFromMetadata(execution.MetadataSnapshot())
+		if bindingErr != nil {
+			return agentCommands{}, bindingErr
+		}
+		if err := validateProfileFingerprint(expected, profileInfo); err != nil {
+			return agentCommands{}, err
+		}
 	}
 
 	model := ""

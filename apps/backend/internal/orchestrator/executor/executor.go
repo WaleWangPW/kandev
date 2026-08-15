@@ -318,6 +318,7 @@ type AgentProfileInfo struct {
 	ProfileName                string
 	AgentID                    string
 	AgentName                  string
+	Fingerprint                string
 	Model                      string
 	Mode                       string
 	ConfigOptions              map[string]string
@@ -336,6 +337,9 @@ type LaunchAgentRequest struct {
 	TaskEnvironmentID string // Env owning this session (shared across sessions in the same task)
 	TaskTitle         string // Human-readable task title for semantic worktree naming
 	AgentProfileID    string
+	// ExpectedProfileFingerprint binds the request to the execution profile
+	// snapshot persisted when the session was prepared. Empty is legacy-only.
+	ExpectedProfileFingerprint string
 	// OfficeAgentProfileID is the stable Office identity. AgentProfileID stays
 	// the concrete execution profile inside the executor for compatibility.
 	OfficeAgentProfileID string

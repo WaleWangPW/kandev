@@ -666,6 +666,18 @@ func (s *Service) GetWorkspaceInfoForSession(ctx context.Context, taskID, sessio
 			}
 		}
 	}
+	// AgentProfileSnapshot is the durable prepare-time launch binding. Project
+	// it independently of ExecutorRunning so workspace-only recovery and a
+	// freshly prepared session cannot silently take the legacy empty-fingerprint
+	// path merely because no runtime row exists yet. Do this after merging the
+	// running row so that runtime metadata cannot replace the authoritative
+	// session binding. An explicitly malformed value is retained for the
+	// lifecycle parser to reject fail-closed.
+	if session.AgentProfileSnapshot != nil {
+		if fingerprint, exists := session.AgentProfileSnapshot["fingerprint"]; exists {
+			ensureWorkspaceMetadata(info)[lifecycle.MetadataKeyExpectedProfileFingerprint] = fingerprint
+		}
+	}
 
 	return info, nil
 }

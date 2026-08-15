@@ -219,6 +219,7 @@ func (m *mockAgentManager) ResolveAgentProfile(ctx context.Context, profileID st
 		AgentID:     "agent-123",
 		AgentName:   "Test Agent",
 		Model:       "claude-3-opus",
+		Fingerprint: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	}, nil
 }
 

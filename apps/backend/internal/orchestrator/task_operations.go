@@ -416,30 +416,33 @@ func (s *Service) StartCreatedSession(
 	// so the frontend tab displays the correct agent (it reads session.agent_profile_id).
 	if effectiveProfileID != session.AgentProfileID {
 		observedState := session.State
+		profileInfo, resolveErr := s.agentManager.ResolveAgentProfile(ctx, effectiveProfileID)
+		if resolveErr != nil || profileInfo == nil || profileInfo.ProfileID != effectiveProfileID ||
+			!lifecycle.IsValidProfileFingerprint(profileInfo.Fingerprint) {
+			return nil, lifecycle.ErrProfileDrift
+		}
+		profileSnapshot := map[string]interface{}{
+			"id":                           profileInfo.ProfileID,
+			"fingerprint":                  profileInfo.Fingerprint,
+			"name":                         profileInfo.ProfileName,
+			"agent_id":                     profileInfo.AgentID,
+			"agent_name":                   profileInfo.AgentName,
+			"model":                        profileInfo.Model,
+			"mode":                         profileInfo.Mode,
+			"config_options":               maps.Clone(profileInfo.ConfigOptions),
+			"auto_approve":                 profileInfo.AutoApprove,
+			"dangerously_skip_permissions": profileInfo.DangerouslySkipPermissions,
+			"cli_passthrough":              profileInfo.CLIPassthrough,
+		}
 		s.logger.Info("updating session agent profile for workflow step override",
 			zap.String("session_id", sessionID),
 			zap.String("old_profile", session.AgentProfileID),
 			zap.String("new_profile", effectiveProfileID))
 		session.AgentProfileID = effectiveProfileID
-		// Re-resolve the agent profile snapshot so the tab shows the correct agent logo/name.
-		// Set a minimal snapshot first so stale data is never persisted if resolution fails.
-		session.AgentProfileSnapshot = map[string]interface{}{"id": effectiveProfileID}
-		if profileInfo, err := s.agentManager.ResolveAgentProfile(ctx, effectiveProfileID); err != nil {
-			s.logger.Warn("failed to resolve agent profile snapshot for workflow step override",
-				zap.String("session_id", sessionID),
-				zap.String("profile_id", effectiveProfileID),
-				zap.Error(err))
-		} else if profileInfo != nil {
-			session.AgentProfileSnapshot = map[string]interface{}{
-				"id":             profileInfo.ProfileID,
-				"name":           profileInfo.ProfileName,
-				"agent_id":       profileInfo.AgentID,
-				"agent_name":     profileInfo.AgentName,
-				"model":          profileInfo.Model,
-				"mode":           profileInfo.Mode,
-				"config_options": maps.Clone(profileInfo.ConfigOptions),
-			}
-		}
+		// The override is persisted only after a fresh, complete launch binding
+		// has been resolved. Persisting an ID-only snapshot would make a newly
+		// prepared session indistinguishable from a legacy pre-binding row.
+		session.AgentProfileSnapshot = profileSnapshot
 		if err := s.persistFullTaskSessionIfCurrent(ctx, session, observedState); err != nil {
 			return nil, fmt.Errorf("persist workflow session profile: %w", err)
 		}

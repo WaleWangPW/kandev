@@ -3,8 +3,6 @@ package lifecycle
 import (
 	"context"
 
-	"go.uber.org/zap"
-
 	settingsmodels "github.com/kandev/kandev/internal/agent/settings/models"
 	"github.com/kandev/kandev/internal/gitconfigenv"
 )
@@ -16,23 +14,49 @@ const metadataKeyProfileEnvResolved = "profile_env_resolved"
 // mergeAgentProfileEnv fills missing keys in env from the agent profile's
 // env_vars. Existing keys in env (office tokens, executor profile env, etc.)
 // are never overwritten.
-func (m *Manager) mergeAgentProfileEnv(ctx context.Context, profileID string, env map[string]string) {
+func (m *Manager) mergeAgentProfileEnv(ctx context.Context, profileID string, env map[string]string) error {
 	if profileID == "" || env == nil || m.profileResolver == nil {
-		return
+		return nil
 	}
 	info, err := m.profileResolver.ResolveProfile(ctx, profileID)
 	if err != nil || info == nil {
-		return
+		return ErrProfileDrift
 	}
-	m.mergeAgentProfileEnvFromInfo(ctx, info, env)
+	return m.mergeAgentProfileEnvFromInfo(ctx, info, env)
 }
 
-func (m *Manager) mergeAgentProfileEnvFromInfo(ctx context.Context, info *AgentProfileInfo, env map[string]string) {
-	if info == nil || env == nil || len(info.EnvVars) == 0 {
-		return
+func (m *Manager) mergeExpectedAgentProfileEnv(
+	ctx context.Context, profileID string, env map[string]string, expected string,
+) error {
+	if profileID == "" || env == nil || m.profileResolver == nil {
+		if expected != "" {
+			return ErrProfileDrift
+		}
+		return nil
 	}
-	resolved := m.resolveAgentProfileEnvVars(ctx, info.EnvVars)
+	info, err := m.profileResolver.ResolveProfile(ctx, profileID)
+	if err != nil || info == nil {
+		if expected == "" {
+			return nil
+		}
+		return ErrProfileDrift
+	}
+	if err := validateProfileFingerprint(expected, info); err != nil {
+		return err
+	}
+	return m.mergeAgentProfileEnvFromInfo(ctx, info, env)
+}
+
+func (m *Manager) mergeAgentProfileEnvFromInfo(ctx context.Context, info *AgentProfileInfo, env map[string]string) error {
+	if info == nil || env == nil || len(info.EnvVars) == 0 {
+		return nil
+	}
+	resolved, err := m.resolveAgentProfileEnvVars(ctx, info.EnvVars)
+	if err != nil {
+		return err
+	}
 	mergeEnvFillMissing(env, resolved)
+	return nil
 }
 
 func (m *Manager) cacheResolvedProfileEnv(execution *AgentExecution, resolved map[string]string) {
@@ -42,16 +66,42 @@ func (m *Manager) cacheResolvedProfileEnv(execution *AgentExecution, resolved ma
 	execution.setMetadataValue(metadataKeyProfileEnvResolved, cloneStringMap(resolved))
 }
 
-func (m *Manager) mergeAgentProfileEnvForExecution(ctx context.Context, execution *AgentExecution, env map[string]string) {
+func (m *Manager) mergeAgentProfileEnvForExecution(ctx context.Context, execution *AgentExecution, env map[string]string) error {
 	if execution == nil {
-		return
+		return nil
 	}
 	value, _ := execution.metadataValue(metadataKeyProfileEnvResolved)
 	if cached, ok := value.(map[string]string); ok && len(cached) > 0 {
 		mergeEnvFillMissing(env, cached)
-		return
+		return nil
 	}
-	m.mergeAgentProfileEnv(ctx, execution.AgentProfileID, env)
+	expected, err := expectedProfileFingerprintFromMetadata(execution.MetadataSnapshot())
+	if err != nil {
+		return err
+	}
+	return m.mergeExpectedAgentProfileEnv(ctx, execution.AgentProfileID, env, expected)
+}
+
+// resolvedProfileEnvFromFinal extracts the already-resolved profile entries
+// from the final atomic runtime snapshot. This avoids a second secret reveal
+// after a runtime instance has been created.
+func resolvedProfileEnvFromFinal(envVars []settingsmodels.ProfileEnvVar, final map[string]string) map[string]string {
+	if len(envVars) == 0 || len(final) == 0 {
+		return nil
+	}
+	resolved := make(map[string]string, len(envVars))
+	for _, envVar := range envVars {
+		if envVar.Key == "" {
+			continue
+		}
+		if value, ok := final[envVar.Key]; ok && value != "" {
+			resolved[envVar.Key] = value
+		}
+	}
+	if len(resolved) == 0 {
+		return nil
+	}
+	return resolved
 }
 
 func mergeEnvFillMissing(dst, src map[string]string) {
@@ -72,13 +122,12 @@ func mergeEnvFillMissing(dst, src map[string]string) {
 	}
 }
 
-// resolveAgentProfileEnvVars resolves profile env entries. SecretID wins over
-// Value; if secret resolution fails, the entry is skipped rather than falling
-// back. Literal Value is used only when SecretID is empty, and empty keys are
-// ignored.
-func (m *Manager) resolveAgentProfileEnvVars(ctx context.Context, envVars []settingsmodels.ProfileEnvVar) map[string]string {
+// resolveAgentProfileEnvVars resolves a profile environment atomically.
+// SecretID wins over Value. Any secret failure discards the entire result and
+// returns a stable sanitized error; callers must not launch with a partial env.
+func (m *Manager) resolveAgentProfileEnvVars(ctx context.Context, envVars []settingsmodels.ProfileEnvVar) (map[string]string, error) {
 	if len(envVars) == 0 {
-		return nil
+		return nil, nil
 	}
 	resolved := make(map[string]string, len(envVars))
 	for _, ev := range envVars {
@@ -88,16 +137,11 @@ func (m *Manager) resolveAgentProfileEnvVars(ctx context.Context, envVars []sett
 		}
 		if ev.SecretID != "" {
 			if m.secretStore == nil {
-				m.logger.Warn("secret store not configured for profile env var",
-					zap.String("key", key))
-				continue
+				return nil, ErrProfileSecret
 			}
 			value, err := m.revealGlobalSecret(ctx, ev.SecretID)
 			if err != nil {
-				m.logger.Warn("failed to resolve secret for profile env var",
-					zap.String("key", key),
-					zap.Error(err))
-				continue
+				return nil, ErrProfileSecret
 			}
 			resolved[key] = value
 			continue
@@ -106,7 +150,7 @@ func (m *Manager) resolveAgentProfileEnvVars(ctx context.Context, envVars []sett
 			resolved[key] = ev.Value
 		}
 	}
-	return resolved
+	return resolved, nil
 }
 
 func (m *Manager) revealGlobalSecret(ctx context.Context, secretID string) (string, error) {

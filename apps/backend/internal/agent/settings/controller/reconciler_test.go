@@ -491,6 +491,55 @@ func TestProfileReconciler_SeedsEmptyModel(t *testing.T) {
 	}
 }
 
+func TestProfileReconciler_UserModifiedLaunchBindings(t *testing.T) {
+	tests := []struct {
+		name      string
+		model     string
+		mode      string
+		wantModel string
+		wantMode  string
+	}{
+		{
+			name: "non-empty values survive catalog drift", model: "explicit-model", mode: "explicit-mode",
+			wantModel: "explicit-model", wantMode: "explicit-mode",
+		},
+		{
+			name:      "empty values still seed from capabilities",
+			wantModel: "catalog-model", wantMode: "catalog-mode",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newFakeStore()
+			dbAgent := &models.Agent{Name: "codex-acp"}
+			_ = st.CreateAgent(context.Background(), dbAgent)
+			existing := &models.AgentProfile{
+				AgentID: dbAgent.ID, Name: "Explicit", Model: tt.model, Mode: tt.mode, UserModified: true,
+			}
+			_ = st.CreateAgentProfile(context.Background(), existing)
+
+			ag := &mockInferenceAgent{id: "codex-acp", displayName: "Codex", enabled: true}
+			caps := &fakeCapReader{caps: map[string]hostutility.AgentCapabilities{
+				"codex-acp": {
+					AgentType: "codex-acp", Status: hostutility.StatusOK,
+					Models: []hostutility.Model{{ID: "catalog-model", Name: "Catalog"}}, CurrentModelID: "catalog-model",
+					Modes: []hostutility.Mode{{ID: "catalog-mode", Name: "Catalog"}}, CurrentModeID: "catalog-mode",
+				},
+			}}
+			if err := newReconciler(t, st, caps, ag).Run(context.Background()); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			live, err := st.GetAgentProfile(context.Background(), existing.ID)
+			if err != nil {
+				t.Fatalf("get profile: %v", err)
+			}
+			if live.Model != tt.wantModel || live.Mode != tt.wantMode {
+				t.Fatalf("launch binding = (%q, %q), want (%q, %q)", live.Model, live.Mode, tt.wantModel, tt.wantMode)
+			}
+		})
+	}
+}
+
 // TestProfileReconciler_KeepsGoneFallbackModel verifies a gone fallback model is kept, not healed.
 
 func TestProfileReconciler_KeepsGoneFallbackModel(t *testing.T) {
