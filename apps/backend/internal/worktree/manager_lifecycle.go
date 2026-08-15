@@ -357,7 +357,7 @@ func (m *Manager) createContributionInTaskDir(
 	if err != nil {
 		return nil, err
 	}
-	worktreeID, branchName, err := m.addContributionWorktree(ctx, req, worktreePath, contributionRef, remoteName)
+	worktreeID, branchName, err := m.addContributionWorktree(ctx, req, worktreePath, contributionRef, remoteName, lease)
 	if err != nil {
 		return nil, err
 	}
@@ -439,12 +439,12 @@ func (m *Manager) validateTaskDir(taskDir string) error {
 // origin/<checkout-branch> so ahead/behind counts are relative to the PR's remote branch.
 func (m *Manager) addWorktreeForBranch(ctx context.Context, req CreateRequest, worktreePath, fallbackBranch, startPoint, baseRef string, lease *physicaldelete.ProvisionalLease) (string, string, error) {
 	if req.CheckoutBranch == "" {
-		id, err := m.gitAddWorktree(ctx, req.RepositoryPath, fallbackBranch, worktreePath, baseRef)
+		id, err := m.gitAddWorktree(ctx, req.RepositoryPath, fallbackBranch, worktreePath, baseRef, lease)
 		return id, fallbackBranch, err
 	}
 
 	// Try checking out the PR branch directly (common case: single task per PR).
-	id, err := m.gitAddWorktreeExisting(ctx, req.RepositoryPath, req.CheckoutBranch, worktreePath)
+	id, err := m.gitAddWorktreeExisting(ctx, req.RepositoryPath, req.CheckoutBranch, worktreePath, lease)
 	if err == nil {
 		m.setUpstreamIfExists(ctx, worktreePath, req.CheckoutBranch, req.CheckoutBranch)
 		return id, req.CheckoutBranch, nil
@@ -456,7 +456,7 @@ func (m *Manager) addWorktreeForBranch(ctx context.Context, req CreateRequest, w
 	// Branch is in use by another worktree — create a unique fallback branch
 	// using the original branch name with a random suffix.
 	suffixed := req.CheckoutBranch + "-" + SmallSuffix(3)
-	id, err = m.gitAddWorktree(ctx, req.RepositoryPath, suffixed, worktreePath, startPoint)
+	id, err = m.gitAddWorktree(ctx, req.RepositoryPath, suffixed, worktreePath, startPoint, lease)
 	if err == nil {
 		m.setUpstreamIfExists(ctx, worktreePath, suffixed, req.CheckoutBranch)
 	}
@@ -591,7 +591,7 @@ func (m *Manager) retryFetchAsRemoteTrackingRef(ctx context.Context, repoPath, b
 // If the branch is already checked out in a stale worktree (directory no longer exists),
 // it automatically prunes and retries. If the repository uses git-crypt, it creates
 // the worktree without checkout, then unlocks git-crypt and performs the checkout.
-func (m *Manager) gitAddWorktreeExisting(ctx context.Context, repoPath, branchName, worktreePath string) (string, error) {
+func (m *Manager) gitAddWorktreeExisting(ctx context.Context, repoPath, branchName, worktreePath string, _ *physicaldelete.ProvisionalLease) (string, error) {
 	release, err := acquireWorktreeTargetPath(ctx, worktreePath)
 	if err != nil {
 		return "", fmt.Errorf("acquire worktree target path: %w", err)
@@ -923,7 +923,7 @@ func (m *Manager) rollbackFailedNewBranchAdd(
 // gitAddWorktree runs "git worktree add" and returns the new worktree UUID.
 // If the repository uses git-crypt, it creates the worktree without checkout,
 // then unlocks git-crypt and performs the checkout separately.
-func (m *Manager) gitAddWorktree(ctx context.Context, repoPath, branchName, worktreePath, baseRef string) (string, error) {
+func (m *Manager) gitAddWorktree(ctx context.Context, repoPath, branchName, worktreePath, baseRef string, _ *physicaldelete.ProvisionalLease) (string, error) {
 	release, err := acquireWorktreeTargetPath(ctx, worktreePath)
 	if err != nil {
 		return "", fmt.Errorf("acquire worktree target path: %w", err)

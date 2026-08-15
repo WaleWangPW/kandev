@@ -25,7 +25,7 @@ func TestGitAddWorktree_FailureRollsBackNewBranchAndPartialWorktree(t *testing.T
 	repoPath := t.TempDir()
 	worktreePath := filepath.Join(t.TempDir(), "partial-worktree")
 
-	_, err = mgr.gitAddWorktree(context.Background(), repoPath, "feature/new", worktreePath, "main")
+	_, err = mgr.gitAddWorktree(context.Background(), repoPath, "feature/new", worktreePath, "main", nil)
 	if err == nil {
 		t.Fatal("gitAddWorktree() error = nil, want checkout failure")
 	}
@@ -55,7 +55,7 @@ func TestGitAddWorktree_FailureUsesAtomicBranchOwnership(t *testing.T) {
 		t.Fatalf("NewManager failed: %v", err)
 	}
 	_, err = mgr.gitAddWorktree(
-		context.Background(), t.TempDir(), "feature/new", filepath.Join(t.TempDir(), "worktree"), "main",
+		context.Background(), t.TempDir(), "feature/new", filepath.Join(t.TempDir(), "worktree"), "main", nil,
 	)
 	if err == nil {
 		t.Fatal("gitAddWorktree() error = nil, want checkout failure")
@@ -159,7 +159,7 @@ func TestGitAddWorktree_FailurePreservesPreexistingBranchAndDirectory(t *testing
 		t.Fatalf("create marker: %v", err)
 	}
 
-	_, err = mgr.gitAddWorktree(context.Background(), repoPath, "feature/existing", worktreePath, "main")
+	_, err = mgr.gitAddWorktree(context.Background(), repoPath, "feature/existing", worktreePath, "main", nil)
 	if err == nil {
 		t.Fatal("gitAddWorktree() error = nil, want existing branch failure")
 	}
@@ -186,7 +186,7 @@ func TestGitAddWorktree_PreRegistrationFailureRollsBackOwnedBranch(t *testing.T)
 		t.Fatalf("create target marker: %v", err)
 	}
 
-	_, err = mgr.gitAddWorktree(context.Background(), repoPath, "feature/pre-registration-failure", worktreePath, "main")
+	_, err = mgr.gitAddWorktree(context.Background(), repoPath, "feature/pre-registration-failure", worktreePath, "main", nil)
 	if err == nil {
 		t.Fatal("gitAddWorktree() error = nil, want pre-registration failure")
 	}
@@ -216,7 +216,7 @@ func TestGitAddWorktree_RegisteredCleanupFailureRestoresOwnedBranch(t *testing.T
 		t.Fatalf("NewManager failed: %v", err)
 	}
 	worktreePath := filepath.Join(t.TempDir(), "registered-worktree")
-	_, err = mgr.gitAddWorktree(context.Background(), t.TempDir(), "feature/new", worktreePath, "main")
+	_, err = mgr.gitAddWorktree(context.Background(), t.TempDir(), "feature/new", worktreePath, "main", nil)
 	if err == nil {
 		t.Fatal("gitAddWorktree() error = nil, want checkout failure")
 	}

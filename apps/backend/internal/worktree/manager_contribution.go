@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/task/models"
 	"go.uber.org/zap"
 )
@@ -90,6 +91,7 @@ func (m *Manager) validateContributionAncestor(ctx context.Context, repoPath, ex
 
 func (m *Manager) addContributionWorktree(
 	ctx context.Context, req CreateRequest, worktreePath, startPoint, remoteName string,
+	lease *physicaldelete.ProvisionalLease,
 ) (string, string, error) {
 	branchName := req.CheckoutBranch
 	exists, err := m.branchExists(ctx, req.RepositoryPath, "refs/heads/"+branchName)
@@ -99,10 +101,10 @@ func (m *Manager) addContributionWorktree(
 	if exists {
 		branchName = branchName + "-" + SmallSuffix(3)
 	}
-	id, err := m.gitAddWorktree(ctx, req.RepositoryPath, branchName, worktreePath, startPoint)
+	id, err := m.gitAddWorktree(ctx, req.RepositoryPath, branchName, worktreePath, startPoint, lease)
 	if err != nil && errors.Is(err, ErrBranchCheckedOut) {
 		branchName = req.CheckoutBranch + "-" + SmallSuffix(3)
-		id, err = m.gitAddWorktree(ctx, req.RepositoryPath, branchName, worktreePath, startPoint)
+		id, err = m.gitAddWorktree(ctx, req.RepositoryPath, branchName, worktreePath, startPoint, lease)
 	}
 	if err != nil {
 		return "", "", err
