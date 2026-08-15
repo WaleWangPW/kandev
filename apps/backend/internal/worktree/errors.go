@@ -80,7 +80,32 @@ var (
 	// the just-created physical worktree instead of admitting it after
 	// cleanup inventory was captured.
 	ErrTaskCleanupInProgress = errors.New("task cleanup in progress")
+
+	// ErrWorktreeReleaseConflict is returned when an environment-repository
+	// row no longer matches the complete generation captured for cleanup.
+	// Callers must fail closed: re-reading a newer row and retrying would let
+	// an old cleanup release a reactivated or replaced worktree reference.
+	ErrWorktreeReleaseConflict = errors.New("worktree release generation conflict")
 )
+
+// WorktreeReleaseConflictError identifies the worktree whose authoritative
+// task_environment_repos generation could not be released. Reason contains
+// only a bounded classifier; persisted values are deliberately not exposed.
+type WorktreeReleaseConflictError struct {
+	WorktreeID string
+	Reason     string
+}
+
+func (e *WorktreeReleaseConflictError) Error() string {
+	if e == nil {
+		return ErrWorktreeReleaseConflict.Error()
+	}
+	return fmt.Sprintf("%s: worktree %s: %s", ErrWorktreeReleaseConflict, e.WorktreeID, e.Reason)
+}
+
+func (e *WorktreeReleaseConflictError) Unwrap() error {
+	return ErrWorktreeReleaseConflict
+}
 
 // containsAuthFailure checks if git output indicates an authentication failure.
 func containsAuthFailure(lowerOutput string) bool {

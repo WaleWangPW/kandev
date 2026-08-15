@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kandev/kandev/internal/agent/executor"
 	"github.com/kandev/kandev/internal/common/logger"
@@ -118,6 +119,57 @@ func (s *inMemoryWorktreeStore) ListActiveWorktreePaths(_ context.Context) ([]st
 
 func (s *inMemoryWorktreeStore) CountActiveWorktreeReferences(_ context.Context, _ string, _ []string) (int, error) {
 	return 0, nil
+}
+
+func (s *inMemoryWorktreeStore) PrepareWorktreeRelease(
+	_ context.Context,
+	worktreeID string,
+	_ string,
+	_ string,
+	_ string,
+) (*worktree.WorktreeReleaseSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	wt := s.worktrees[worktreeID]
+	if wt == nil {
+		return nil, worktree.ErrWorktreeReleaseConflict
+	}
+	return &worktree.WorktreeReleaseSnapshot{
+		ID:                "row-" + wt.ID,
+		TaskEnvironmentID: wt.TaskEnvironmentID,
+		RepositoryID:      wt.RepositoryID,
+		BranchSlug:        wt.BranchSlug,
+		WorktreeID:        wt.ID,
+		WorktreePath:      wt.Path,
+		WorktreeBranch:    wt.Branch,
+		Status:            wt.Status,
+		CreatedAt:         wt.CreatedAt,
+		UpdatedAt:         wt.UpdatedAt,
+		MergedAt:          wt.MergedAt,
+		DeletedAt:         wt.DeletedAt,
+		ReleaseAt:         time.Now().UTC().Truncate(time.Microsecond),
+	}, nil
+}
+
+func (s *inMemoryWorktreeStore) ReleaseWorktreeReferenceCAS(
+	_ context.Context,
+	expected *worktree.WorktreeReleaseSnapshot,
+) (*worktree.WorktreeReleaseSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	wt := s.worktrees[expected.WorktreeID]
+	if wt == nil {
+		return nil, worktree.ErrWorktreeReleaseConflict
+	}
+	now := expected.ReleaseAt
+	wt.Status = worktree.StatusDeleted
+	wt.UpdatedAt = now
+	wt.DeletedAt = &now
+	released := *expected
+	released.Status = worktree.StatusDeleted
+	released.UpdatedAt = now
+	released.DeletedAt = &now
+	return &released, nil
 }
 
 // GetWorktreesBySessionID — MultiRepoStore.

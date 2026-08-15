@@ -14,6 +14,10 @@ type cleanupFailureStore struct {
 	*mockStore
 	referenceErrors map[string]error
 	referenceCalls  []string
+	prepareErrors   map[string]error
+	prepareCalls    []string
+	releaseErrors   map[string]error
+	releaseCalls    []string
 	updateCalls     int
 }
 
@@ -21,6 +25,8 @@ func newCleanupFailureStore() *cleanupFailureStore {
 	return &cleanupFailureStore{
 		mockStore:       newMockStore(),
 		referenceErrors: make(map[string]error),
+		prepareErrors:   make(map[string]error),
+		releaseErrors:   make(map[string]error),
 	}
 }
 
@@ -39,6 +45,121 @@ func (s *cleanupFailureStore) CountActiveWorktreeReferences(
 func (s *cleanupFailureStore) UpdateWorktree(ctx context.Context, wt *Worktree) error {
 	s.updateCalls++
 	return s.mockStore.UpdateWorktree(ctx, wt)
+}
+
+func (s *cleanupFailureStore) PrepareWorktreeRelease(
+	ctx context.Context,
+	worktreeID string,
+	taskEnvironmentID string,
+	repositoryID string,
+	branchSlug string,
+) (*WorktreeReleaseSnapshot, error) {
+	s.prepareCalls = append(s.prepareCalls, worktreeID)
+	if err := s.prepareErrors[worktreeID]; err != nil {
+		return nil, err
+	}
+	return s.mockStore.PrepareWorktreeRelease(ctx, worktreeID, taskEnvironmentID, repositoryID, branchSlug)
+}
+
+func (s *cleanupFailureStore) ReleaseWorktreeReferenceCAS(
+	ctx context.Context,
+	expected *WorktreeReleaseSnapshot,
+) (*WorktreeReleaseSnapshot, error) {
+	s.releaseCalls = append(s.releaseCalls, expected.WorktreeID)
+	if err := s.releaseErrors[expected.WorktreeID]; err != nil {
+		return nil, err
+	}
+	return s.mockStore.ReleaseWorktreeReferenceCAS(ctx, expected)
+}
+
+func TestCleanupWorktreesCapturesReleaseBeforePhysicalMutation(t *testing.T) {
+	store := newCleanupFailureStore()
+	mgr, err := NewManager(newTestConfig(t), store, newTestLogger())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	repoPath := initGitRepoWithRemote(t)
+	wt, err := mgr.Create(context.Background(), CreateRequest{
+		TaskID:         "task-snapshot-error",
+		SessionID:      "session-snapshot-error",
+		TaskTitle:      "Snapshot error",
+		RepositoryID:   "repository-snapshot-error",
+		RepositoryPath: repoPath,
+		BaseBranch:     "main",
+		TaskDirName:    "task-snapshot-error",
+		RepoName:       "repository-snapshot-error",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	prepareErr := &WorktreeReleaseConflictError{WorktreeID: wt.ID, Reason: "test drift"}
+	store.prepareErrors[wt.ID] = prepareErr
+	branchRef := "refs/heads/" + wt.Branch
+	branchOID := strings.TrimSpace(runGit(t, repoPath, "rev-parse", branchRef))
+	registeredPath, err := filepath.EvalSymlinks(wt.Path)
+	if err != nil {
+		t.Fatalf("resolve worktree path: %v", err)
+	}
+
+	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
+	if !errors.Is(err, ErrWorktreeReleaseConflict) {
+		t.Fatalf("CleanupWorktrees error = %v, want generation conflict", err)
+	}
+	if _, err := os.Stat(wt.Path); err != nil {
+		t.Fatalf("snapshot failure changed path: %v", err)
+	}
+	if got := strings.TrimSpace(runGit(t, repoPath, "rev-parse", branchRef)); got != branchOID {
+		t.Fatalf("snapshot failure changed branch: got %q want %q", got, branchOID)
+	}
+	registration := runGit(t, repoPath, "worktree", "list", "--porcelain")
+	if !strings.Contains(registration, "worktree "+registeredPath+"\n") {
+		t.Fatalf("snapshot failure changed Git registration: %s", registration)
+	}
+	if len(store.releaseCalls) != 0 || store.updateCalls != 0 {
+		t.Fatalf("snapshot failure reached store mutation: release=%v update=%d", store.releaseCalls, store.updateCalls)
+	}
+	if store.worktrees[wt.ID].Status != StatusActive {
+		t.Fatalf("snapshot failure changed store status: %q", store.worktrees[wt.ID].Status)
+	}
+	if _, ok := mgr.worktrees[cacheKey(wt.SessionID, wt.RepositoryID, wt.BranchSlug)]; !ok {
+		t.Fatal("snapshot failure evicted cache")
+	}
+}
+
+func TestCleanupWorktreesPropagatesReleaseConflictWithoutCacheEviction(t *testing.T) {
+	store := newCleanupFailureStore()
+	mgr, err := NewManager(newTestConfig(t), store, newTestLogger())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	wt, err := mgr.Create(context.Background(), CreateRequest{
+		TaskID:         "task-release-conflict",
+		SessionID:      "session-release-conflict",
+		TaskTitle:      "Release conflict",
+		RepositoryID:   "repository-release-conflict",
+		RepositoryPath: initGitRepoWithRemote(t),
+		BaseBranch:     "main",
+		TaskDirName:    "task-release-conflict",
+		RepoName:       "repository-release-conflict",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	store.releaseErrors[wt.ID] = &WorktreeReleaseConflictError{WorktreeID: wt.ID, Reason: "test drift"}
+
+	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
+	if !errors.Is(err, ErrWorktreeReleaseConflict) {
+		t.Fatalf("CleanupWorktrees error = %v, want generation conflict", err)
+	}
+	if _, err := os.Stat(wt.Path); !os.IsNotExist(err) {
+		t.Fatalf("physical removal did not complete before CAS conflict: %v", err)
+	}
+	if store.worktrees[wt.ID].Status != StatusActive {
+		t.Fatalf("CAS conflict changed store status: %q", store.worktrees[wt.ID].Status)
+	}
+	if _, ok := mgr.worktrees[cacheKey(wt.SessionID, wt.RepositoryID, wt.BranchSlug)]; !ok {
+		t.Fatal("CAS conflict evicted cache")
+	}
 }
 
 func TestCleanupWorktreesPreservesStateAfterDirectoryRemovalError(t *testing.T) {

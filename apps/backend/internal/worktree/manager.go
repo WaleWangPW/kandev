@@ -103,6 +103,15 @@ type Store interface {
 	// CountActiveWorktreeReferences counts non-deleted session associations
 	// for a physical worktree, excluding associations owned by the caller.
 	CountActiveWorktreeReferences(ctx context.Context, worktreeID string, excludeSessionIDs []string) (int, error)
+	// PrepareWorktreeRelease captures the complete authoritative
+	// task_environment_repos row before any Git or filesystem mutation.
+	PrepareWorktreeRelease(
+		ctx context.Context,
+		worktreeID, taskEnvironmentID, repositoryID, branchSlug string,
+	) (*WorktreeReleaseSnapshot, error)
+	// ReleaseWorktreeReferenceCAS tombstones exactly the captured row
+	// generation. A complete tombstone replay is returned without a write.
+	ReleaseWorktreeReferenceCAS(ctx context.Context, expected *WorktreeReleaseSnapshot) (*WorktreeReleaseSnapshot, error)
 }
 
 // MultiRepoStore is an optional capability some stores implement to support

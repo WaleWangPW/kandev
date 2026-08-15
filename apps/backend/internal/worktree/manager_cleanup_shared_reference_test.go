@@ -2,6 +2,7 @@ package worktree
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,7 +112,7 @@ func TestCleanupWorktrees_RemovesLastActiveReference(t *testing.T) {
 	assertWorktreeReferenceStatus(t, store, wt.ID, StatusDeleted)
 }
 
-func TestReleaseWorktreeReference_MissingAssociationIsIdempotent(t *testing.T) {
+func TestReleaseWorktreeReference_MissingAssociationFailsClosed(t *testing.T) {
 	mgr, store := newReferenceCleanupTestManager(t)
 	ctx := context.Background()
 	seedReferenceCleanupSession(t, store, "task-owner", "session-owner", models.TaskSessionStateCompleted)
@@ -120,8 +121,8 @@ func TestReleaseWorktreeReference_MissingAssociationIsIdempotent(t *testing.T) {
 		t.Fatalf("delete worktree record: %v", err)
 	}
 
-	if err := mgr.ReleaseWorktreeReference(ctx, wt); err != nil {
-		t.Fatalf("release missing worktree record: %v", err)
+	if err := mgr.ReleaseWorktreeReference(ctx, wt); !errors.Is(err, ErrWorktreeReleaseConflict) {
+		t.Fatalf("release missing worktree record error = %v, want generation conflict", err)
 	}
 }
 

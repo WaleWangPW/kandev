@@ -117,6 +117,53 @@ func (s *mockStore) CountActiveWorktreeReferences(_ context.Context, _ string, _
 	return 0, nil
 }
 
+func (s *mockStore) PrepareWorktreeRelease(
+	_ context.Context,
+	worktreeID string,
+	_ string,
+	_ string,
+	_ string,
+) (*WorktreeReleaseSnapshot, error) {
+	wt, ok := s.worktrees[worktreeID]
+	if !ok {
+		return nil, worktreeReleaseConflict(worktreeID, "authoritative row missing")
+	}
+	return &WorktreeReleaseSnapshot{
+		ID:                "row-" + wt.ID,
+		TaskEnvironmentID: wt.TaskEnvironmentID,
+		RepositoryID:      wt.RepositoryID,
+		BranchSlug:        wt.BranchSlug,
+		WorktreeID:        wt.ID,
+		WorktreePath:      wt.Path,
+		WorktreeBranch:    wt.Branch,
+		Status:            wt.Status,
+		CreatedAt:         wt.CreatedAt,
+		UpdatedAt:         wt.UpdatedAt,
+		MergedAt:          wt.MergedAt,
+		DeletedAt:         wt.DeletedAt,
+		ReleaseAt:         time.Now().UTC().Truncate(time.Microsecond),
+	}, nil
+}
+
+func (s *mockStore) ReleaseWorktreeReferenceCAS(
+	_ context.Context,
+	expected *WorktreeReleaseSnapshot,
+) (*WorktreeReleaseSnapshot, error) {
+	wt, ok := s.worktrees[expected.WorktreeID]
+	if !ok {
+		return nil, worktreeReleaseConflict(expected.WorktreeID, "authoritative row missing")
+	}
+	now := expected.ReleaseAt
+	wt.Status = StatusDeleted
+	wt.UpdatedAt = now
+	wt.DeletedAt = &now
+	released := *expected
+	released.Status = StatusDeleted
+	released.UpdatedAt = now
+	released.DeletedAt = &now
+	return &released, nil
+}
+
 // GetWorktreesBySessionID — MultiRepoStore.
 func (s *mockStore) GetWorktreesBySessionID(_ context.Context, sessionID string) ([]*Worktree, error) {
 	var out []*Worktree

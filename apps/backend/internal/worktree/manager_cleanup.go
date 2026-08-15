@@ -201,6 +201,20 @@ func (m *Manager) removeWorktree(ctx context.Context, wt *Worktree, removeBranch
 		return nil
 	}
 
+	// Freeze the complete authoritative environment-repository generation
+	// before cleanup crosses into scripts, Git, or filesystem mutation. The
+	// same snapshot is consumed after physical removal; re-reading there would
+	// let an old cleanup bind and release a reactivated replacement row.
+	var releaseSnapshot *WorktreeReleaseSnapshot
+	if m.store != nil {
+		releaseSnapshot, err = m.store.PrepareWorktreeRelease(
+			ctx, wt.ID, wt.TaskEnvironmentID, wt.RepositoryID, wt.BranchSlug,
+		)
+		if err != nil {
+			return fmt.Errorf("prepare worktree release %s: %w", wt.ID, err)
+		}
+	}
+
 	// Execute cleanup script BEFORE removing directory
 	m.runWorktreeCleanupScript(ctx, wt)
 
@@ -230,14 +244,12 @@ func (m *Manager) removeWorktree(ctx context.Context, wt *Worktree, removeBranch
 		}
 	}
 
-	// Update store
-	if m.store != nil {
-		if err := m.ReleaseWorktreeReference(ctx, wt); err != nil {
-			// Record may already be deleted by another cleanup path (e.g. task deletion).
-			// This is expected and harmless - only log at debug level.
-			m.logger.Debug("failed to update worktree status (may already be deleted)",
-				zap.String("worktree_id", wt.ID),
-				zap.Error(err))
+	// Release only the generation frozen before the physical action. A stale,
+	// missing, replaced, partial, or reactivated row is a typed hard failure;
+	// it must not be rebound or hidden as an idempotent success.
+	if releaseSnapshot != nil {
+		if err := m.releasePreparedWorktreeReference(ctx, wt, releaseSnapshot); err != nil {
+			return fmt.Errorf("release worktree reference %s: %w", wt.ID, err)
 		}
 	}
 
@@ -264,13 +276,30 @@ func (m *Manager) ReleaseWorktreeReference(ctx context.Context, wt *Worktree) er
 	if wt == nil || wt.SessionID == "" {
 		return fmt.Errorf("session ID is required to release worktree reference")
 	}
-	now := time.Now().UTC()
-	wt.Status = StatusDeleted
-	wt.DeletedAt = &now
-	wt.UpdatedAt = now
-	if err := m.store.UpdateWorktree(ctx, wt); err != nil && !errors.Is(err, ErrWorktreeNotFound) {
+	if m.store == nil {
+		return fmt.Errorf("worktree store is required to release worktree reference")
+	}
+	snapshot, err := m.store.PrepareWorktreeRelease(
+		ctx, wt.ID, wt.TaskEnvironmentID, wt.RepositoryID, wt.BranchSlug,
+	)
+	if err != nil {
 		return err
 	}
+	return m.releasePreparedWorktreeReference(ctx, wt, snapshot)
+}
+
+func (m *Manager) releasePreparedWorktreeReference(
+	ctx context.Context,
+	wt *Worktree,
+	snapshot *WorktreeReleaseSnapshot,
+) error {
+	released, err := m.store.ReleaseWorktreeReferenceCAS(ctx, snapshot)
+	if err != nil {
+		return err
+	}
+	wt.Status = released.Status
+	wt.UpdatedAt = released.UpdatedAt
+	wt.DeletedAt = released.DeletedAt
 	m.mu.Lock()
 	delete(m.worktrees, cacheKey(wt.SessionID, wt.RepositoryID, wt.BranchSlug))
 	m.mu.Unlock()

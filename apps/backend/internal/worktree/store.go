@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,12 +25,352 @@ type SQLiteStore struct {
 	ro *sqlx.DB // reader
 }
 
+// WorktreeReleaseSnapshot is the operation-bound, complete persisted
+// generation of one authoritative task_environment_repos row. It deliberately
+// does not reuse Worktree: Worktree.ID is worktree_id and that projection omits
+// the row id, position, and error message required by the release CAS.
+type WorktreeReleaseSnapshot struct {
+	ID                string
+	TaskEnvironmentID string
+	RepositoryID      string
+	BranchSlug        string
+	WorktreeID        string
+	WorktreePath      string
+	WorktreeBranch    string
+	Position          int
+	ErrorMessage      string
+	Status            string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	MergedAt          *time.Time
+	DeletedAt         *time.Time
+	// ReleaseAt is the operation token for the exact terminal transform. It
+	// is not a persisted fifteenth column; freezing it makes a replay
+	// distinguishable from a later mutation of updated_at or deleted_at.
+	ReleaseAt time.Time
+}
+
+// worktreeReleaseRawTimes preserves the exact SQLite timestamp tokens loaded
+// in the release transaction. SQLite comparisons are semantic (canonical
+// instants), but the final UPDATE predicates use these lexical tokens so a
+// concurrent rewrite between validation and mutation cannot be missed.
+type worktreeReleaseRawTimes struct {
+	createdAt string
+	updatedAt string
+	mergedAt  sql.NullString
+	deletedAt sql.NullString
+}
+
+const worktreeReleaseSelectCols = `
+	id, task_environment_id, repository_id, branch_slug,
+	worktree_id, worktree_path, worktree_branch,
+	position, error_message, status,
+	created_at, updated_at, merged_at, deleted_at`
+
+const worktreeReleaseSQLiteRawCols = `,
+	CAST(created_at AS TEXT), CAST(updated_at AS TEXT),
+	CAST(merged_at AS TEXT), CAST(deleted_at AS TEXT)`
+
 // NewSQLiteStore creates a new SQLite-backed worktree store.
 // It uses the provided writer and reader connections. The
 // task_environment_repos schema is owned by the task repository's
 // initializer; the store adds nothing on its own.
 func NewSQLiteStore(writer, reader *sqlx.DB) (*SQLiteStore, error) {
 	return &SQLiteStore{db: writer, ro: reader}, nil
+}
+
+// PrepareWorktreeRelease captures the complete environment-repository row
+// from the writer before cleanup crosses into Git or filesystem mutation.
+func (s *SQLiteStore) PrepareWorktreeRelease(
+	ctx context.Context,
+	worktreeID string,
+	taskEnvironmentID string,
+	repositoryID string,
+	branchSlug string,
+) (*WorktreeReleaseSnapshot, error) {
+	if worktreeID == "" || taskEnvironmentID == "" || repositoryID == "" {
+		return nil, worktreeReleaseConflict(worktreeID, "missing authoritative row binding")
+	}
+	query := `SELECT ` + worktreeReleaseSelectCols
+	if !dialect.IsPostgres(s.db.DriverName()) {
+		query += worktreeReleaseSQLiteRawCols
+	}
+	query += ` FROM task_environment_repos
+		WHERE worktree_id = ? AND task_environment_id = ?
+		  AND repository_id = ? AND branch_slug = ?`
+	snapshot, _, err := scanWorktreeReleaseRow(
+		s.db.QueryRowContext(ctx, s.db.Rebind(query), worktreeID, taskEnvironmentID, repositoryID, branchSlug),
+		!dialect.IsPostgres(s.db.DriverName()),
+	)
+	if err == sql.ErrNoRows {
+		return nil, worktreeReleaseConflict(worktreeID, "authoritative row missing")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("prepare worktree release %s: %w", worktreeID, err)
+	}
+	snapshot.ReleaseAt = time.Now().UTC().Truncate(time.Microsecond)
+	return snapshot, nil
+}
+
+// ReleaseWorktreeReferenceCAS releases exactly expected. PostgreSQL locks the
+// row and compares typed timestamps. SQLite validates canonical instants, then
+// binds the exact raw timestamp tokens loaded in the same writer transaction.
+// A complete tombstone replay commits no UPDATE and preserves byte identity.
+func (s *SQLiteStore) ReleaseWorktreeReferenceCAS(
+	ctx context.Context,
+	expected *WorktreeReleaseSnapshot,
+) (*WorktreeReleaseSnapshot, error) {
+	if expected == nil || expected.ID == "" || expected.WorktreeID == "" || expected.TaskEnvironmentID == "" {
+		worktreeID := ""
+		if expected != nil {
+			worktreeID = expected.WorktreeID
+		}
+		return nil, worktreeReleaseConflict(worktreeID, "incomplete expected generation")
+	}
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin worktree release %s: %w", expected.WorktreeID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	isPostgres := dialect.IsPostgres(s.db.DriverName())
+	query := `SELECT ` + worktreeReleaseSelectCols
+	if !isPostgres {
+		query += worktreeReleaseSQLiteRawCols
+	}
+	query += ` FROM task_environment_repos WHERE id = ?`
+	if isPostgres {
+		query += ` FOR UPDATE`
+	}
+	current, rawTimes, err := scanWorktreeReleaseRow(
+		tx.QueryRowContext(ctx, s.db.Rebind(query), expected.ID),
+		!isPostgres,
+	)
+	if err == sql.ErrNoRows {
+		return nil, worktreeReleaseConflict(expected.WorktreeID, "authoritative row missing or replaced")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load worktree release generation %s: %w", expected.WorktreeID, err)
+	}
+
+	switch classifyWorktreeRelease(expected, current) {
+	case worktreeReleaseReplay:
+		current.ReleaseAt = expected.ReleaseAt
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("commit worktree release replay %s: %w", expected.WorktreeID, err)
+		}
+		return current, nil
+	case worktreeReleaseDecisionConflict:
+		return nil, worktreeReleaseConflict(expected.WorktreeID, "persisted generation drifted")
+	case worktreeReleaseApply:
+		// Continue below.
+	default:
+		return nil, worktreeReleaseConflict(expected.WorktreeID, "invalid release classification")
+	}
+
+	releasedAt := expected.ReleaseAt
+	var result sql.Result
+	if isPostgres {
+		result, err = tx.ExecContext(ctx, s.db.Rebind(`
+			UPDATE task_environment_repos
+			SET status = ?, updated_at = ?, deleted_at = ?
+			WHERE id = ? AND task_environment_id = ? AND repository_id = ? AND branch_slug = ?
+			  AND worktree_id = ? AND worktree_path = ? AND worktree_branch = ?
+			  AND position = ? AND error_message = ? AND status = ?
+			  AND created_at = ? AND updated_at = ?
+			  AND merged_at IS NOT DISTINCT FROM ?
+			  AND deleted_at IS NOT DISTINCT FROM ?
+		`),
+			StatusDeleted, releasedAt, releasedAt,
+			current.ID, current.TaskEnvironmentID, current.RepositoryID, current.BranchSlug,
+			current.WorktreeID, current.WorktreePath, current.WorktreeBranch,
+			current.Position, current.ErrorMessage, current.Status,
+			current.CreatedAt, current.UpdatedAt, current.MergedAt, current.DeletedAt,
+		)
+	} else {
+		if rawTimes == nil {
+			return nil, worktreeReleaseConflict(expected.WorktreeID, "sqlite timestamp generation unavailable")
+		}
+		updateQuery, args := sqliteWorktreeReleaseUpdate(current, rawTimes, releasedAt)
+		result, err = tx.ExecContext(ctx, updateQuery, args...)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("release worktree generation %s: %w", expected.WorktreeID, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("read worktree release result %s: %w", expected.WorktreeID, err)
+	}
+	if rows != 1 {
+		return nil, worktreeReleaseConflict(expected.WorktreeID, "generation changed during release")
+	}
+
+	current.Status = StatusDeleted
+	current.UpdatedAt = releasedAt
+	current.DeletedAt = timePointer(releasedAt)
+	current.ReleaseAt = expected.ReleaseAt
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit worktree release %s: %w", expected.WorktreeID, err)
+	}
+	return current, nil
+}
+
+type worktreeReleaseDecision uint8
+
+const (
+	worktreeReleaseDecisionConflict worktreeReleaseDecision = iota
+	worktreeReleaseApply
+	worktreeReleaseReplay
+)
+
+func classifyWorktreeRelease(expected, current *WorktreeReleaseSnapshot) worktreeReleaseDecision {
+	if expected == nil || current == nil {
+		return worktreeReleaseDecisionConflict
+	}
+	if completeWorktreeTombstone(expected) {
+		if equalWorktreeReleaseSnapshot(expected, current) {
+			return worktreeReleaseReplay
+		}
+		return worktreeReleaseDecisionConflict
+	}
+	if !releasableWorktreeGeneration(expected) {
+		return worktreeReleaseDecisionConflict
+	}
+	if equalWorktreeReleaseSnapshot(expected, current) {
+		return worktreeReleaseApply
+	}
+	if exactWorktreeTombstoneReplay(expected, current) {
+		return worktreeReleaseReplay
+	}
+	return worktreeReleaseDecisionConflict
+}
+
+func releasableWorktreeGeneration(snapshot *WorktreeReleaseSnapshot) bool {
+	if snapshot == nil || snapshot.DeletedAt != nil || snapshot.ReleaseAt.IsZero() {
+		return false
+	}
+	return snapshot.Status == StatusActive || snapshot.Status == StatusMerged
+}
+
+func completeWorktreeTombstone(snapshot *WorktreeReleaseSnapshot) bool {
+	return snapshot != nil && snapshot.Status == StatusDeleted && snapshot.DeletedAt != nil
+}
+
+func exactWorktreeTombstoneReplay(expected, current *WorktreeReleaseSnapshot) bool {
+	return expected != nil && current != nil && !expected.ReleaseAt.IsZero() &&
+		completeWorktreeTombstone(current) &&
+		equalWorktreeReleaseStableGeneration(expected, current) &&
+		current.UpdatedAt.Equal(expected.ReleaseAt) &&
+		current.DeletedAt.Equal(expected.ReleaseAt)
+}
+
+func equalWorktreeReleaseSnapshot(a, b *WorktreeReleaseSnapshot) bool {
+	return equalWorktreeReleaseStableGeneration(a, b) &&
+		a.Status == b.Status &&
+		a.UpdatedAt.Equal(b.UpdatedAt) &&
+		equalOptionalTime(a.DeletedAt, b.DeletedAt)
+}
+
+func equalWorktreeReleaseStableGeneration(a, b *WorktreeReleaseSnapshot) bool {
+	return a != nil && b != nil &&
+		a.ID == b.ID &&
+		a.TaskEnvironmentID == b.TaskEnvironmentID &&
+		a.RepositoryID == b.RepositoryID &&
+		a.BranchSlug == b.BranchSlug &&
+		a.WorktreeID == b.WorktreeID &&
+		a.WorktreePath == b.WorktreePath &&
+		a.WorktreeBranch == b.WorktreeBranch &&
+		a.Position == b.Position &&
+		a.ErrorMessage == b.ErrorMessage &&
+		a.CreatedAt.Equal(b.CreatedAt) &&
+		equalOptionalTime(a.MergedAt, b.MergedAt)
+}
+
+func equalOptionalTime(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Equal(*b)
+}
+
+func timePointer(value time.Time) *time.Time {
+	return &value
+}
+
+func worktreeReleaseConflict(worktreeID, reason string) error {
+	return &WorktreeReleaseConflictError{WorktreeID: worktreeID, Reason: reason}
+}
+
+func scanWorktreeReleaseRow(
+	row rowScanner,
+	withSQLiteRawTimes bool,
+) (*WorktreeReleaseSnapshot, *worktreeReleaseRawTimes, error) {
+	snapshot := &WorktreeReleaseSnapshot{}
+	var mergedAt, deletedAt sql.NullTime
+	dest := []interface{}{
+		&snapshot.ID, &snapshot.TaskEnvironmentID, &snapshot.RepositoryID, &snapshot.BranchSlug,
+		&snapshot.WorktreeID, &snapshot.WorktreePath, &snapshot.WorktreeBranch,
+		&snapshot.Position, &snapshot.ErrorMessage, &snapshot.Status,
+		&snapshot.CreatedAt, &snapshot.UpdatedAt, &mergedAt, &deletedAt,
+	}
+	var rawTimes *worktreeReleaseRawTimes
+	if withSQLiteRawTimes {
+		rawTimes = &worktreeReleaseRawTimes{}
+		dest = append(dest,
+			&rawTimes.createdAt, &rawTimes.updatedAt,
+			&rawTimes.mergedAt, &rawTimes.deletedAt,
+		)
+	}
+	if err := row.Scan(dest...); err != nil {
+		return nil, nil, err
+	}
+	if mergedAt.Valid {
+		snapshot.MergedAt = timePointer(mergedAt.Time)
+	}
+	if deletedAt.Valid {
+		snapshot.DeletedAt = timePointer(deletedAt.Time)
+	}
+	return snapshot, rawTimes, nil
+}
+
+func sqliteWorktreeReleaseUpdate(
+	current *WorktreeReleaseSnapshot,
+	rawTimes *worktreeReleaseRawTimes,
+	releasedAt time.Time,
+) (string, []interface{}) {
+	var query strings.Builder
+	query.WriteString(`
+		UPDATE task_environment_repos
+		SET status = ?, updated_at = ?, deleted_at = ?
+		WHERE id = ? AND task_environment_id = ? AND repository_id = ? AND branch_slug = ?
+		  AND worktree_id = ? AND worktree_path = ? AND worktree_branch = ?
+		  AND position = ? AND error_message = ? AND status = ?
+		  AND CAST(created_at AS TEXT) = ? AND CAST(updated_at AS TEXT) = ?`)
+	args := []interface{}{
+		StatusDeleted, releasedAt, releasedAt,
+		current.ID, current.TaskEnvironmentID, current.RepositoryID, current.BranchSlug,
+		current.WorktreeID, current.WorktreePath, current.WorktreeBranch,
+		current.Position, current.ErrorMessage, current.Status,
+		rawTimes.createdAt, rawTimes.updatedAt,
+	}
+	appendSQLiteNullableTimestampPredicate(&query, &args, "merged_at", rawTimes.mergedAt)
+	appendSQLiteNullableTimestampPredicate(&query, &args, "deleted_at", rawTimes.deletedAt)
+	return query.String(), args
+}
+
+func appendSQLiteNullableTimestampPredicate(
+	query *strings.Builder,
+	args *[]interface{},
+	column string,
+	raw sql.NullString,
+) {
+	if !raw.Valid {
+		query.WriteString(" AND " + column + " IS NULL")
+		return
+	}
+	query.WriteString(" AND CAST(" + column + " AS TEXT) = ?")
+	*args = append(*args, raw.String)
 }
 
 // worktreeSelectCols is the SELECT projection shared by every worktree query.
