@@ -80,6 +80,12 @@ drift in any one of the fourteen columns fails closed. Tests mutate each column
 independently so a generic claim such as "all generation fields" cannot hide a
 missing predicate.
 
+These rows are permanent durable control-plane tombstones in this port. Their
+capacity grows with the number of distinct physical references ever admitted;
+purge, compaction, and environment-ID reuse are deliberately out of scope. Any
+future retention policy requires a separate design that preserves the complete
+generation CAS and proves that no retained cleanup can still address the row.
+
 The removed `task_session_worktrees` schema is historical input only and is not
 reintroduced, dual-read, or dual-written.
 

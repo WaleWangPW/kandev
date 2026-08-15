@@ -2,11 +2,63 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/kandev/kandev/internal/task/models"
+	"github.com/kandev/kandev/internal/task/repository/repoerrors"
 )
+
+func TestTaskResourceCleanupReservationReplayAndActiveSemantics(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepoForHealTests(t)
+	seedBarrierTask(t, repo, "task-reservation-semantics")
+	first := &models.TaskResourceCleanupJob{
+		ID: "job-reservation-first", OperationID: "delete:reservation-semantics",
+		TaskID: "task-reservation-semantics", Trigger: models.TaskResourceCleanupTriggerDelete,
+		State: models.TaskResourceCleanupStatePrepared, ResourceSnapshot: `{"generation":"first"}`,
+	}
+	if err := repo.CreateTaskResourceCleanupJob(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	second := &models.TaskResourceCleanupJob{
+		ID: "job-reservation-second", OperationID: "delete:reservation-other",
+		TaskID: first.TaskID, Trigger: models.TaskResourceCleanupTriggerDelete,
+		State: models.TaskResourceCleanupStatePending,
+	}
+	if err := repo.CreateTaskResourceCleanupJob(ctx, second); !errors.Is(err, repoerrors.ErrTaskCleanupInProgress) {
+		t.Fatalf("second active reservation error = %v, want ErrTaskCleanupInProgress", err)
+	}
+
+	if err := repo.DeleteTask(ctx, first.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	replay := &models.TaskResourceCleanupJob{
+		ID: "job-replay-different", OperationID: first.OperationID,
+		TaskID: first.TaskID, Trigger: models.TaskResourceCleanupTriggerArchive,
+		State: models.TaskResourceCleanupStatePending, ResourceSnapshot: `{"generation":"different"}`,
+	}
+	if err := repo.CreateTaskResourceCleanupJob(ctx, replay); err != nil {
+		t.Fatalf("operation replay after task deletion: %v", err)
+	}
+	stored, err := repo.GetTaskResourceCleanupJobByOperationID(ctx, first.OperationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ID != first.ID || stored.TaskID != first.TaskID || stored.Trigger != first.Trigger ||
+		stored.ResourceSnapshot != first.ResourceSnapshot {
+		t.Fatalf("operation replay changed winner: %+v", stored)
+	}
+	missing := &models.TaskResourceCleanupJob{
+		ID: "job-missing-task", OperationID: "delete:missing-task-new-operation",
+		TaskID: first.TaskID, Trigger: models.TaskResourceCleanupTriggerDelete,
+		State: models.TaskResourceCleanupStatePending,
+	}
+	if err := repo.CreateTaskResourceCleanupJob(ctx, missing); !errors.Is(err, repoerrors.ErrTaskCleanupInProgress) {
+		t.Fatalf("new reservation beside active orphan error = %v, want ErrTaskCleanupInProgress", err)
+	}
+}
 
 func TestTaskResourceCleanupJobSurvivesTaskDeletion(t *testing.T) {
 	ctx := context.Background()
@@ -42,6 +94,7 @@ func TestTaskResourceCleanupJobSurvivesTaskDeletion(t *testing.T) {
 func TestTaskResourceCleanupJobClaimAndRetry(t *testing.T) {
 	ctx := context.Background()
 	repo := newRepoForHealTests(t)
+	seedBarrierTask(t, repo, "task-retry")
 	job := &models.TaskResourceCleanupJob{
 		ID: "job-retry", OperationID: "delete:retry", TaskID: "task-retry",
 		Trigger: models.TaskResourceCleanupTriggerDelete,
@@ -81,6 +134,7 @@ func TestListPreparedTaskResourceCleanupJobsExcludesRunnableStates(t *testing.T)
 			Trigger: models.TaskResourceCleanupTriggerDelete, State: models.TaskResourceCleanupStatePending,
 		},
 	} {
+		seedBarrierTask(t, repo, job.TaskID)
 		if err := repo.CreateTaskResourceCleanupJob(ctx, job); err != nil {
 			t.Fatalf("CreateTaskResourceCleanupJob(%s): %v", job.ID, err)
 		}
@@ -113,6 +167,7 @@ func TestHasActiveTaskResourceCleanupJobTracksAdmissionStates(t *testing.T) {
 	for _, tt := range states {
 		t.Run(string(tt.state), func(t *testing.T) {
 			taskID := "task-" + string(tt.state)
+			seedBarrierTask(t, repo, taskID)
 			job := &models.TaskResourceCleanupJob{
 				ID: "job-" + string(tt.state), OperationID: "delete:" + taskID, TaskID: taskID,
 				Trigger: models.TaskResourceCleanupTriggerDelete, State: tt.state, ResourceSnapshot: `{}`,
@@ -134,6 +189,7 @@ func TestHasActiveTaskResourceCleanupJobTracksAdmissionStates(t *testing.T) {
 func TestTaskResourceCleanupJobStaleClaimCannotOverwriteCancellation(t *testing.T) {
 	ctx := context.Background()
 	repo := newRepoForHealTests(t)
+	seedBarrierTask(t, repo, "task-cancel-race")
 	job := &models.TaskResourceCleanupJob{
 		ID: "job-cancel-race", OperationID: "archive:cancel-race", TaskID: "task-cancel-race",
 		Trigger: models.TaskResourceCleanupTriggerArchive,
@@ -177,6 +233,7 @@ func TestTaskResourceCleanupJobStaleClaimCannotOverwriteCancellation(t *testing.
 func TestTaskResourceCleanupFailedJobIsTerminalAndNotDue(t *testing.T) {
 	ctx := context.Background()
 	repo := newRepoForHealTests(t)
+	seedBarrierTask(t, repo, "task-failed")
 	job := &models.TaskResourceCleanupJob{
 		ID: "job-failed", OperationID: "delete:failed", TaskID: "task-failed",
 		Trigger: models.TaskResourceCleanupTriggerDelete,
@@ -217,6 +274,7 @@ func TestTaskResourceCleanupFailedJobIsTerminalAndNotDue(t *testing.T) {
 func TestTaskResourceCleanupFailedUnclaimedCompletionHasTimestamp(t *testing.T) {
 	ctx := context.Background()
 	repo := newRepoForHealTests(t)
+	seedBarrierTask(t, repo, "task-failed-unclaimed")
 	job := &models.TaskResourceCleanupJob{
 		ID: "job-failed-unclaimed", OperationID: "delete:failed-unclaimed", TaskID: "task-failed-unclaimed",
 		Trigger: models.TaskResourceCleanupTriggerDelete,
@@ -242,6 +300,7 @@ func TestTaskResourceCleanupFailedUnclaimedCompletionHasTimestamp(t *testing.T) 
 func TestPreparedCleanupSnapshotStartAndRunningReset(t *testing.T) {
 	ctx := context.Background()
 	repo := newRepoForHealTests(t)
+	seedBarrierTask(t, repo, "task-prepared-lifecycle")
 	job := &models.TaskResourceCleanupJob{
 		ID: "job-prepared-lifecycle", OperationID: "delete:prepared-lifecycle", TaskID: "task-prepared-lifecycle",
 		Trigger: models.TaskResourceCleanupTriggerDelete, State: models.TaskResourceCleanupStatePrepared,

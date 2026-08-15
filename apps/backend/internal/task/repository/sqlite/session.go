@@ -2146,14 +2146,43 @@ func (r *Repository) ListTaskSessionWorktrees(ctx context.Context, sessionID str
 // (PR watch reconciliation, branch listings) see the current branch rather
 // than the value captured at worktree creation.
 func (r *Repository) UpdateTaskSessionWorktreeBranch(ctx context.Context, sessionID, branch string) error {
-	now := time.Now().UTC()
-	_, err := r.db.ExecContext(ctx, r.db.Rebind(`
+	return r.updateTaskSessionWorktreeBranch(ctx, sessionID, ``, nil, branch)
+}
+
+func (r *Repository) updateTaskSessionWorktreeBranch(
+	ctx context.Context,
+	sessionID string,
+	scope string,
+	scopeArgs []interface{},
+	branch string,
+) error {
+	tx, err := r.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := r.mutableEnvironmentReposBySessionLocked(ctx, tx, sessionID); err != nil {
+		return err
+	}
+	query := `
 		UPDATE task_environment_repos SET worktree_branch = ?, updated_at = ?
 		WHERE task_environment_id = (SELECT task_environment_id FROM task_sessions WHERE id = ?)
 		  AND deleted_at IS NULL
-		  AND status = 'active'
-	`), branch, now, sessionID)
-	return err
+		  AND status = 'active'` + scope
+	args := []interface{}{branch, time.Now().UTC(), sessionID}
+	args = append(args, scopeArgs...)
+	result, err := tx.ExecContext(ctx, r.db.Rebind(query), args...)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("environment-repository branch mutation fenced: no active row")
+	}
+	return tx.Commit()
 }
 
 // UpdateTaskSessionWorktreeBranchByRepository updates the cached worktree_branch
@@ -2161,32 +2190,18 @@ func (r *Repository) UpdateTaskSessionWorktreeBranch(ctx context.Context, sessio
 // live git operations in multi-repo tasks so sibling repositories keep their
 // branch snapshots.
 func (r *Repository) UpdateTaskSessionWorktreeBranchByRepository(ctx context.Context, sessionID, repositoryID, branch string) error {
-	now := time.Now().UTC()
-	_, err := r.db.ExecContext(ctx, r.db.Rebind(`
-		UPDATE task_environment_repos
-		SET worktree_branch = ?, updated_at = ?
-		WHERE task_environment_id = (SELECT task_environment_id FROM task_sessions WHERE id = ?)
-		  AND repository_id = ?
-		  AND deleted_at IS NULL
-		  AND status = 'active'
-	`), branch, now, sessionID, repositoryID)
-	return err
+	return r.updateTaskSessionWorktreeBranch(
+		ctx, sessionID, ` AND repository_id = ?`, []interface{}{repositoryID}, branch,
+	)
 }
 
 // UpdateTaskSessionWorktreeBranchByWorktree updates exactly one worktree row.
 // This is the repository-scoped variant needed when a task attaches multiple
 // branches from the same repository.
 func (r *Repository) UpdateTaskSessionWorktreeBranchByWorktree(ctx context.Context, sessionID, worktreeID, branch string) error {
-	now := time.Now().UTC()
-	_, err := r.db.ExecContext(ctx, r.db.Rebind(`
-		UPDATE task_environment_repos
-		SET worktree_branch = ?, updated_at = ?
-		WHERE task_environment_id = (SELECT task_environment_id FROM task_sessions WHERE id = ?)
-		  AND worktree_id = ?
-		  AND deleted_at IS NULL
-		  AND status = 'active'
-	`), branch, now, sessionID, worktreeID)
-	return err
+	return r.updateTaskSessionWorktreeBranch(
+		ctx, sessionID, ` AND worktree_id = ?`, []interface{}{worktreeID}, branch,
+	)
 }
 
 // ListWorktreesBySessionIDs returns the active environment-repository rows for

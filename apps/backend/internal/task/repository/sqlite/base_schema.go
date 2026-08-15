@@ -32,6 +32,7 @@ func (r *Repository) initSchema() error {
 		r.runMigrations,
 		r.hideBuiltinWorkflows,
 		r.normalizeTaskWorktreeOwnership,
+		r.detachTaskEnvironmentRepoLifecycle,
 		r.healDuplicateTaskEnvironments,
 		r.ensureTaskEnvironmentTaskUniqueIndex,
 		r.healSessionTaskEnvironmentIDs,
@@ -746,7 +747,6 @@ const sessionWorktreeSchemaDDL = `
 		updated_at TIMESTAMP NOT NULL,
 		merged_at TIMESTAMP,
 		deleted_at TIMESTAMP,
-		FOREIGN KEY (task_environment_id) REFERENCES task_environments(id) ON DELETE CASCADE,
 		UNIQUE(task_environment_id, repository_id, branch_slug)
 	);
 

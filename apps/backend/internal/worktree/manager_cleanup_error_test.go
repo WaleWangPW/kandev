@@ -15,6 +15,7 @@ type cleanupFailureStore struct {
 	referenceErrors map[string]error
 	referenceCalls  []string
 	prepareErrors   map[string]error
+	prepareMutators map[string]func(*WorktreeReleaseSnapshot)
 	prepareCalls    []string
 	releaseErrors   map[string]error
 	releaseCalls    []string
@@ -26,6 +27,7 @@ func newCleanupFailureStore() *cleanupFailureStore {
 		mockStore:       newMockStore(),
 		referenceErrors: make(map[string]error),
 		prepareErrors:   make(map[string]error),
+		prepareMutators: make(map[string]func(*WorktreeReleaseSnapshot)),
 		releaseErrors:   make(map[string]error),
 	}
 }
@@ -58,7 +60,14 @@ func (s *cleanupFailureStore) PrepareWorktreeRelease(
 	if err := s.prepareErrors[worktreeID]; err != nil {
 		return nil, err
 	}
-	return s.mockStore.PrepareWorktreeRelease(ctx, worktreeID, taskEnvironmentID, repositoryID, branchSlug)
+	snapshot, err := s.mockStore.PrepareWorktreeRelease(ctx, worktreeID, taskEnvironmentID, repositoryID, branchSlug)
+	if err != nil {
+		return nil, err
+	}
+	if mutate := s.prepareMutators[worktreeID]; mutate != nil {
+		mutate(snapshot)
+	}
+	return snapshot, nil
 }
 
 func (s *cleanupFailureStore) ReleaseWorktreeReferenceCAS(
@@ -123,6 +132,91 @@ func TestCleanupWorktreesCapturesReleaseBeforePhysicalMutation(t *testing.T) {
 	}
 	if _, ok := mgr.worktrees[cacheKey(wt.SessionID, wt.RepositoryID, wt.BranchSlug)]; !ok {
 		t.Fatal("snapshot failure evicted cache")
+	}
+}
+
+func TestCleanupWorktreesRejectsProjectionDriftBeforePhysicalMutation(t *testing.T) {
+	store := newCleanupFailureStore()
+	mgr, err := NewManager(newTestConfig(t), store, newTestLogger())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	repoPath := initGitRepoWithRemote(t)
+	wt, err := mgr.Create(context.Background(), CreateRequest{
+		TaskID:         "task-projection-drift",
+		SessionID:      "session-projection-drift",
+		TaskTitle:      "Projection drift",
+		RepositoryID:   "repository-projection-drift",
+		RepositoryPath: repoPath,
+		BaseBranch:     "main",
+		TaskDirName:    "task-projection-drift",
+		RepoName:       "repository-projection-drift",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	store.prepareMutators[wt.ID] = func(snapshot *WorktreeReleaseSnapshot) {
+		snapshot.WorktreePath += "-replacement"
+	}
+
+	branchRef := "refs/heads/" + wt.Branch
+	branchOID := strings.TrimSpace(runGit(t, repoPath, "rev-parse", branchRef))
+	registeredPath, err := filepath.EvalSymlinks(wt.Path)
+	if err != nil {
+		t.Fatalf("resolve worktree path: %v", err)
+	}
+	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
+	if !errors.Is(err, ErrWorktreeReleaseConflict) {
+		t.Fatalf("CleanupWorktrees error = %v, want generation conflict", err)
+	}
+	if _, err := os.Stat(wt.Path); err != nil {
+		t.Fatalf("projection drift changed path: %v", err)
+	}
+	if got := strings.TrimSpace(runGit(t, repoPath, "rev-parse", branchRef)); got != branchOID {
+		t.Fatalf("projection drift changed branch: got %q want %q", got, branchOID)
+	}
+	registration := runGit(t, repoPath, "worktree", "list", "--porcelain")
+	if !strings.Contains(registration, "worktree "+registeredPath+"\n") {
+		t.Fatalf("projection drift changed Git registration: %s", registration)
+	}
+	if len(store.releaseCalls) != 0 || store.updateCalls != 0 {
+		t.Fatalf("projection drift reached store mutation: release=%v update=%d", store.releaseCalls, store.updateCalls)
+	}
+	if _, ok := mgr.worktrees[cacheKey(wt.SessionID, wt.RepositoryID, wt.BranchSlug)]; !ok {
+		t.Fatal("projection drift evicted cache")
+	}
+}
+
+func TestValidateCleanupWorktreeBindingRejectsEveryProjectedIdentityDrift(t *testing.T) {
+	wt := &Worktree{
+		ID: "worktree-binding", TaskEnvironmentID: "environment-binding",
+		RepositoryID: "repository-binding", BranchSlug: "slug-binding",
+		Path: "/tmp/binding", Branch: "feature/binding",
+	}
+	valid := &WorktreeReleaseSnapshot{
+		WorktreeID: wt.ID, TaskEnvironmentID: wt.TaskEnvironmentID,
+		RepositoryID: wt.RepositoryID, BranchSlug: wt.BranchSlug,
+		WorktreePath: wt.Path, WorktreeBranch: wt.Branch,
+	}
+	if err := validateCleanupWorktreeBinding(wt, valid); err != nil {
+		t.Fatalf("valid binding rejected: %v", err)
+	}
+	tests := map[string]func(*WorktreeReleaseSnapshot){
+		"worktree ID": func(snapshot *WorktreeReleaseSnapshot) { snapshot.WorktreeID += "-drift" },
+		"environment": func(snapshot *WorktreeReleaseSnapshot) { snapshot.TaskEnvironmentID += "-drift" },
+		"repository":  func(snapshot *WorktreeReleaseSnapshot) { snapshot.RepositoryID += "-drift" },
+		"branch slug": func(snapshot *WorktreeReleaseSnapshot) { snapshot.BranchSlug += "-drift" },
+		"path":        func(snapshot *WorktreeReleaseSnapshot) { snapshot.WorktreePath += "-drift" },
+		"branch":      func(snapshot *WorktreeReleaseSnapshot) { snapshot.WorktreeBranch += "-drift" },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			drifted := *valid
+			mutate(&drifted)
+			if err := validateCleanupWorktreeBinding(wt, &drifted); !errors.Is(err, ErrWorktreeReleaseConflict) {
+				t.Fatalf("binding error = %v, want ErrWorktreeReleaseConflict", err)
+			}
+		})
 	}
 }
 

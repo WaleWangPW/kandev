@@ -59,7 +59,7 @@ func TestWorkspaceInventoryOnlyProtectsActiveTaskEnvironments(t *testing.T) {
 	}
 }
 
-func TestWorkspaceInventoryOnlyProtectsActiveTaskWorktrees(t *testing.T) {
+func TestWorkspaceInventoryProtectsActiveOrphansButNotDeletedTombstones(t *testing.T) {
 	database := newContainerInventoryDatabase(t)
 	insertContainerInventoryTask(t, database, "active", v1.TaskStateInProgress, false)
 	insertContainerInventoryTask(t, database, "archived", v1.TaskStateInProgress, true)
@@ -84,14 +84,35 @@ func TestWorkspaceInventoryOnlyProtectsActiveTaskWorktrees(t *testing.T) {
 			t.Fatalf("insert task worktree for %q: %v", item.taskID, err)
 		}
 	}
+	if _, err := database.Exec(
+		"INSERT INTO task_environment_repos (id, task_environment_id, status, worktree_path) VALUES (?, ?, 'active', ?)",
+		"worktree-orphan", "env-missing", "/tasks/orphan/repo",
+	); err != nil {
+		t.Fatalf("insert active orphan worktree: %v", err)
+	}
+	if _, err := database.Exec(
+		"INSERT INTO task_environment_repos (id, task_environment_id, status, worktree_path, deleted_at) VALUES (?, ?, 'deleted', ?, ?)",
+		"worktree-tombstone", "env-missing", "/tasks/tombstone/repo", time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("insert deleted tombstone: %v", err)
+	}
 
 	paths, err := (&storageInventory{reader: database}).activeWorktreePaths(context.Background())
 	if err != nil {
 		t.Fatalf("activeWorktreePaths: %v", err)
 	}
-	want := []string{"/tasks/active_abc/repo"}
-	if !reflect.DeepEqual(paths, want) {
-		t.Fatalf("active worktree paths = %#v, want %#v", paths, want)
+	want := map[string]bool{
+		"/tasks/active_abc/repo":   true,
+		"/tasks/archived_def/repo": true,
+		"/tasks/deleted_ghi/repo":  true,
+		"/tasks/orphan/repo":       true,
+	}
+	got := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		got[path] = true
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("active worktree paths = %#v, want %#v", got, want)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -125,6 +126,186 @@ func TestTaskCleanupBarrier_AllowsCreationWithoutBarrier(t *testing.T) {
 		WorktreeID: "wt-1", WorktreePath: "/tmp/wt-1",
 	}); err != nil {
 		t.Fatalf("CreateTaskEnvironmentRepo without barrier: %v", err)
+	}
+}
+
+func TestTaskCleanupBarrierRejectsEnvironmentRepoMutationAndBranchUpdate(t *testing.T) {
+	repo := newBarrierTestRepo(t)
+	ctx := context.Background()
+	seedBarrierTask(t, repo, "task-barrier-mutation")
+	if err := repo.CreateTaskEnvironment(ctx, &models.TaskEnvironment{
+		ID: "env-barrier-mutation", TaskID: "task-barrier-mutation",
+		ExecutorType: "worktree", WorkspacePath: "/tmp", Status: models.TaskEnvironmentStatusReady,
+		Repos: []*models.TaskEnvironmentRepo{{
+			ID: "repo-row-barrier-mutation", RepositoryID: "repository",
+			WorktreeID: "worktree", WorktreePath: "/tmp/worktree",
+			WorktreeBranch: "feature/original", Status: "active",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateTaskSession(ctx, &models.TaskSession{
+		ID: "session-barrier-mutation", TaskID: "task-barrier-mutation",
+		TaskEnvironmentID: "env-barrier-mutation", State: models.TaskSessionStateCreated,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reserveBarrier(t, repo, "task-barrier-mutation", "op-mutation")
+
+	envRepo := &models.TaskEnvironmentRepo{
+		ID: "repo-row-barrier-mutation", BranchSlug: "changed",
+		WorktreeID: "worktree", WorktreePath: "/tmp/changed",
+		WorktreeBranch: "feature/changed", Status: "active",
+	}
+	wantUpdatedAt := envRepo.UpdatedAt
+	for name, mutate := range map[string]func() error{
+		"update": func() error { return repo.UpdateTaskEnvironmentRepo(ctx, envRepo) },
+		"delete": func() error { return repo.DeleteTaskEnvironmentRepo(ctx, envRepo.ID) },
+		"delete by environment": func() error {
+			return repo.DeleteTaskEnvironmentReposByEnv(ctx, "env-barrier-mutation")
+		},
+		"branch": func() error {
+			return repo.UpdateTaskSessionWorktreeBranch(ctx, "session-barrier-mutation", "feature/changed")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := mutate(); !errors.Is(err, repoerrors.ErrTaskCleanupInProgress) {
+				t.Fatalf("mutation error = %v, want ErrTaskCleanupInProgress", err)
+			}
+		})
+	}
+	if !envRepo.UpdatedAt.Equal(wantUpdatedAt) {
+		t.Fatalf("fenced update changed caller generation: got %v want %v", envRepo.UpdatedAt, wantUpdatedAt)
+	}
+	var path, branch, status string
+	if err := repo.db.QueryRow(`
+		SELECT worktree_path, worktree_branch, status
+		FROM task_environment_repos WHERE id = 'repo-row-barrier-mutation'
+	`).Scan(&path, &branch, &status); err != nil {
+		t.Fatal(err)
+	}
+	if path != "/tmp/worktree" || branch != "feature/original" || status != "active" {
+		t.Fatalf("barrier mutation changed row: path=%q branch=%q status=%q", path, branch, status)
+	}
+}
+
+func TestEnvironmentRepoOrphanRejectsMutationAndEnvironmentIDReuse(t *testing.T) {
+	repo := newBarrierTestRepo(t)
+	ctx := context.Background()
+	seedBarrierTask(t, repo, "task-orphan-owner")
+	if err := repo.CreateTaskEnvironment(ctx, &models.TaskEnvironment{
+		ID: "env-durable-orphan", TaskID: "task-orphan-owner",
+		ExecutorType: "worktree", WorkspacePath: "/tmp", Status: models.TaskEnvironmentStatusReady,
+		Repos: []*models.TaskEnvironmentRepo{{
+			ID: "repo-row-durable-orphan", RepositoryID: "repository",
+			WorktreeID: "worktree", WorktreePath: "/tmp/worktree",
+			WorktreeBranch: "feature/original", Status: "active",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.DeleteTask(ctx, "task-orphan-owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpdateTaskEnvironmentRepo(ctx, &models.TaskEnvironmentRepo{
+		ID: "repo-row-durable-orphan", WorktreeID: "worktree", WorktreePath: "/tmp/changed",
+		Status: "active",
+	}); err == nil {
+		t.Fatal("orphan update succeeded")
+	}
+	if err := repo.DeleteTaskEnvironmentRepo(ctx, "repo-row-durable-orphan"); err == nil {
+		t.Fatal("orphan delete succeeded")
+	}
+	seedBarrierTask(t, repo, "task-reuse-attempt")
+	err := repo.CreateTaskEnvironment(ctx, &models.TaskEnvironment{
+		ID: "env-durable-orphan", TaskID: "task-reuse-attempt",
+		ExecutorType: "worktree", WorkspacePath: "/tmp/reused", Status: models.TaskEnvironmentStatusReady,
+	})
+	if err == nil {
+		t.Fatal("environment ID with durable tombstone was reused")
+	}
+}
+
+func TestSQLiteCleanupReservationAndEnvironmentMutationShareWriterOrder(t *testing.T) {
+	repo := newBarrierTestRepo(t)
+	ctx := context.Background()
+	seedBarrierTask(t, repo, "task-sqlite-linearization")
+	if err := repo.CreateTaskEnvironment(ctx, &models.TaskEnvironment{
+		ID: "env-sqlite-linearization", TaskID: "task-sqlite-linearization",
+		ExecutorType: "worktree", WorkspacePath: "/tmp", Status: models.TaskEnvironmentStatusReady,
+		Repos: []*models.TaskEnvironmentRepo{{
+			ID: "repo-row-sqlite-linearization", RepositoryID: "repository",
+			WorktreeID: "worktree", WorktreePath: "/tmp/original",
+			WorktreeBranch: "feature/original", Status: "active",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mutationTx, err := repo.db.BeginTxx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = mutationTx.Rollback() }()
+	if err := repo.mutableEnvironmentRepoByIDLocked(ctx, mutationTx, "repo-row-sqlite-linearization"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mutationTx.Exec(`
+		UPDATE task_environment_repos
+		SET worktree_path = '/tmp/mutation-winner'
+		WHERE id = 'repo-row-sqlite-linearization'
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	waitsBefore := repo.db.Stats().WaitCount
+	started := make(chan struct{})
+	reserved := make(chan error, 1)
+	go func() {
+		close(started)
+		reserved <- repo.CreateTaskResourceCleanupJob(ctx, &models.TaskResourceCleanupJob{
+			ID: "job-sqlite-linearization", OperationID: "archive:sqlite-linearization",
+			TaskID: "task-sqlite-linearization", Trigger: models.TaskResourceCleanupTriggerArchive,
+			State: models.TaskResourceCleanupStatePrepared,
+		})
+	}()
+	<-started
+	waitForSQLiteWriterWait(t, repo.db, waitsBefore)
+	if err := mutationTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-reserved; err != nil {
+		t.Fatalf("reservation after mutation commit: %v", err)
+	}
+
+	update := &models.TaskEnvironmentRepo{
+		ID: "repo-row-sqlite-linearization", RepositoryID: "repository",
+		WorktreeID: "worktree", WorktreePath: "/tmp/late-mutation",
+		WorktreeBranch: "feature/late", Status: "active",
+	}
+	if err := repo.UpdateTaskEnvironmentRepo(ctx, update); !errors.Is(err, repoerrors.ErrTaskCleanupInProgress) {
+		t.Fatalf("mutation after reservation error = %v, want ErrTaskCleanupInProgress", err)
+	}
+	var path string
+	if err := repo.db.Get(&path, `
+		SELECT worktree_path FROM task_environment_repos
+		WHERE id = 'repo-row-sqlite-linearization'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if path != "/tmp/mutation-winner" {
+		t.Fatalf("late mutation changed path to %q", path)
+	}
+}
+
+func waitForSQLiteWriterWait(t *testing.T, database *sqlx.DB, before int64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for database.Stats().WaitCount <= before {
+		if time.Now().After(deadline) {
+			t.Fatal("cleanup reservation did not wait for the SQLite writer transaction")
+		}
+		runtime.Gosched()
 	}
 }
 

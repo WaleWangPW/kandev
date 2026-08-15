@@ -213,6 +213,9 @@ func (m *Manager) removeWorktree(ctx context.Context, wt *Worktree, removeBranch
 		if err != nil {
 			return fmt.Errorf("prepare worktree release %s: %w", wt.ID, err)
 		}
+		if err := validateCleanupWorktreeBinding(wt, releaseSnapshot); err != nil {
+			return err
+		}
 	}
 
 	// Execute cleanup script BEFORE removing directory
@@ -267,6 +270,26 @@ func (m *Manager) removeWorktree(ctx context.Context, wt *Worktree, removeBranch
 		zap.String("path", wt.Path),
 		zap.Bool("branch_removed", removeBranch))
 
+	return nil
+}
+
+// validateCleanupWorktreeBinding prevents a stale durable cleanup snapshot
+// from crossing into scripts, Git, or filesystem mutation after its projected
+// identity/path/branch drifted from the authoritative fourteen-column row.
+func validateCleanupWorktreeBinding(wt *Worktree, snapshot *WorktreeReleaseSnapshot) error {
+	if wt == nil || snapshot == nil ||
+		wt.ID != snapshot.WorktreeID ||
+		wt.TaskEnvironmentID != snapshot.TaskEnvironmentID ||
+		wt.RepositoryID != snapshot.RepositoryID ||
+		wt.BranchSlug != snapshot.BranchSlug ||
+		wt.Path != snapshot.WorktreePath ||
+		wt.Branch != snapshot.WorktreeBranch {
+		worktreeID := ""
+		if wt != nil {
+			worktreeID = wt.ID
+		}
+		return worktreeReleaseConflict(worktreeID, "cleanup projection drifted from authoritative generation")
+	}
 	return nil
 }
 

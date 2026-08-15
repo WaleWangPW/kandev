@@ -464,9 +464,9 @@ func (r *Repository) tableColumns(tx *sqlx.Tx, table string) (map[string]bool, e
 
 // cutoverSwap drops the legacy schema and renames the shadow tables into
 // place. The environment-repository table is dropped before the environment
-// table because PostgreSQL refuses to drop a table referenced by a foreign
-// key; SQLite has FK enforcement disabled for the swap. Postgres constraint
-// names are restored to their canonical form afterwards.
+// table. Postgres constraint names are restored to their canonical form
+// afterwards; the durable environment-repository authority has no lifecycle
+// foreign key to rename.
 func (r *Repository) cutoverSwap(tx *sqlx.Tx) error {
 	if _, err := tx.Exec(`DROP TABLE task_session_worktrees`); err != nil {
 		return fmt.Errorf("cutover: drop task_session_worktrees: %w", err)
@@ -523,7 +523,6 @@ func (r *Repository) cutoverRenamePostgresConstraints(tx *sqlx.Tx) error {
 		constraintType   string
 	}{
 		{"task_environments", "task_environments_task_id_fkey", "task_environments_shadow_task_id_fkey", "f"},
-		{tableTaskEnvRepos, "task_environment_repos_task_environment_id_fkey", "task_environment_repos_shadow_task_environment_id_fkey", "f"},
 		{tableTaskEnvRepos, "task_environment_repos_env_repo_branch_key", "task_environment_repos_shadow_task_environment_id_", "u"},
 	}
 	for _, rename := range renames {

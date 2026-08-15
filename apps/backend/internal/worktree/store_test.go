@@ -2,6 +2,7 @@ package worktree
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -13,6 +14,87 @@ import (
 	dbutil "github.com/kandev/kandev/internal/db"
 	tasksqlite "github.com/kandev/kandev/internal/task/repository/sqlite"
 )
+
+func TestSQLiteStoreMutationFenceRejectsCleanupBarrier(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	store.seedSessionWithEnvironment(t, "session-fenced", "task-fenced")
+	wt := &Worktree{
+		ID: "worktree-fenced", SessionID: "session-fenced", RepositoryID: "repo-fenced",
+		Path: "/tmp/original", Branch: "feature/original", Status: StatusActive,
+	}
+	if err := store.CreateWorktree(ctx, wt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO task_resource_cleanup_jobs (
+			id, operation_id, task_id, trigger, state, resource_snapshot,
+			created_at, updated_at
+		) VALUES (
+			'cleanup-fenced', 'operation-fenced', 'task-fenced', 'archive', 'prepared', '{}',
+			CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+		)`); err != nil {
+		t.Fatal(err)
+	}
+	update := *wt
+	update.Path = "/tmp/changed"
+	update.Branch = "feature/changed"
+	wantUpdatedAt := update.UpdatedAt
+	if err := store.UpdateWorktree(ctx, &update); !errors.Is(err, ErrTaskCleanupInProgress) {
+		t.Fatalf("UpdateWorktree error = %v, want ErrTaskCleanupInProgress", err)
+	}
+	if !update.UpdatedAt.Equal(wantUpdatedAt) {
+		t.Fatalf("fenced update changed caller generation: got %v want %v", update.UpdatedAt, wantUpdatedAt)
+	}
+	if err := store.DeleteWorktree(ctx, wt.ID); !errors.Is(err, ErrTaskCleanupInProgress) {
+		t.Fatalf("DeleteWorktree error = %v, want ErrTaskCleanupInProgress", err)
+	}
+	assertPersistedWorktreeBinding(t, store, wt.ID, "/tmp/original", "feature/original", StatusActive)
+}
+
+func TestSQLiteStoreMutationFenceRejectsDurableOrphan(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	store.seedSessionWithEnvironment(t, "session-orphan", "task-orphan")
+	wt := &Worktree{
+		ID: "worktree-orphan", SessionID: "session-orphan", RepositoryID: "repo-orphan",
+		Path: "/tmp/orphan", Branch: "feature/orphan", Status: StatusActive,
+	}
+	if err := store.CreateWorktree(ctx, wt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM tasks WHERE id = 'task-orphan'`); err != nil {
+		t.Fatal(err)
+	}
+	update := *wt
+	update.Path = "/tmp/replacement"
+	wantUpdatedAt := update.UpdatedAt
+	if err := store.UpdateWorktree(ctx, &update); !errors.Is(err, ErrWorktreeReleaseConflict) {
+		t.Fatalf("UpdateWorktree error = %v, want ErrWorktreeReleaseConflict", err)
+	}
+	if !update.UpdatedAt.Equal(wantUpdatedAt) {
+		t.Fatalf("orphan fence changed caller generation: got %v want %v", update.UpdatedAt, wantUpdatedAt)
+	}
+	if err := store.DeleteWorktree(ctx, wt.ID); !errors.Is(err, ErrWorktreeReleaseConflict) {
+		t.Fatalf("DeleteWorktree error = %v, want ErrWorktreeReleaseConflict", err)
+	}
+	assertPersistedWorktreeBinding(t, store, wt.ID, "/tmp/orphan", "feature/orphan", StatusActive)
+}
+
+func assertPersistedWorktreeBinding(t *testing.T, store *SQLiteStore, worktreeID, path, branch, status string) {
+	t.Helper()
+	var gotPath, gotBranch, gotStatus string
+	if err := store.db.QueryRow(`
+		SELECT worktree_path, worktree_branch, status
+		FROM task_environment_repos WHERE worktree_id = ?
+	`, worktreeID).Scan(&gotPath, &gotBranch, &gotStatus); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != path || gotBranch != branch || gotStatus != status {
+		t.Fatalf("persisted binding = (%q, %q, %q), want (%q, %q, %q)",
+			gotPath, gotBranch, gotStatus, path, branch, status)
+	}
+}
 
 // newTestStore opens a SQLite DB with the task repository schema (which owns
 // the task_environment_repos tables the store reads and writes) and

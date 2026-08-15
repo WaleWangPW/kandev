@@ -440,6 +440,140 @@ func TestPostgresNormalizeTaskWorktreeOwnershipIsNoOpOnFreshSchema(t *testing.T)
 	}
 }
 
+func TestPostgresTaskEnvironmentRepoSurvivesLogicalEnvironmentDelete(t *testing.T) {
+	db := testutil.OpenIsolatedPostgres(t, testutil.PostgresDSNFromEnv(t))
+	repo, err := NewWithDB(db, db, nil)
+	if err != nil {
+		t.Fatalf("init fresh postgres schema: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if _, err := db.Exec(db.Rebind(`
+		INSERT INTO tasks (id, title, created_at, updated_at)
+		VALUES (?, ?, ?, ?)
+	`), "task-retained-reference", "Retained reference", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(db.Rebind(`
+		INSERT INTO task_environments (id, task_id, executor_type, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`), "env-retained-reference", "task-retained-reference", "worktree", "ready", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(db.Rebind(`
+		INSERT INTO task_environment_repos (
+			id, task_environment_id, repository_id, branch_slug,
+			worktree_id, worktree_path, worktree_branch,
+			position, error_message, status, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`), "row-retained-reference", "env-retained-reference", "repo-retained-reference", "",
+		"wt-retained-reference", "/tmp/retained-reference", "feature/retained-reference",
+		2, "", "active", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM task_environments WHERE id = 'env-retained-reference'`); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.Get(&count, `SELECT COUNT(*) FROM task_environment_repos WHERE id = 'row-retained-reference'`); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("retained reference count = %d, want 1", count)
+	}
+	if err := repo.detachTaskEnvironmentRepoLifecycle(); err != nil {
+		t.Fatalf("migration replay: %v", err)
+	}
+}
+
+func TestPostgresDetachTaskEnvironmentRepoLifecycleIsExactAndFailClosed(t *testing.T) {
+	t.Run("one exact lifecycle key and replay", func(t *testing.T) {
+		db := testutil.OpenIsolatedPostgres(t, testutil.PostgresDSNFromEnv(t))
+		repo, err := NewWithDB(db, db, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`
+			ALTER TABLE task_environment_repos
+			ADD CONSTRAINT task_environment_repos_legacy_environment_fk
+			FOREIGN KEY (task_environment_id) REFERENCES task_environments(id) ON DELETE CASCADE
+		`); err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.detachTaskEnvironmentRepoLifecycle(); err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.detachTaskEnvironmentRepoLifecycle(); err != nil {
+			t.Fatalf("replay: %v", err)
+		}
+		if count := postgresEnvironmentRepoForeignKeyCount(t, db); count != 0 {
+			t.Fatalf("foreign key count = %d, want 0", count)
+		}
+	})
+
+	t.Run("unknown foreign key is retained", func(t *testing.T) {
+		db := testutil.OpenIsolatedPostgres(t, testutil.PostgresDSNFromEnv(t))
+		repo, err := NewWithDB(db, db, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, statement := range []string{
+			`ALTER TABLE task_environment_repos ADD CONSTRAINT exact_environment_fk
+				FOREIGN KEY (task_environment_id) REFERENCES task_environments(id) ON DELETE CASCADE`,
+			`ALTER TABLE task_environment_repos ADD CONSTRAINT unexpected_repository_fk
+				FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE`,
+		} {
+			if _, err := db.Exec(statement); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := repo.detachTaskEnvironmentRepoLifecycle(); err == nil {
+			t.Fatal("unknown foreign key was silently dropped")
+		}
+		if count := postgresEnvironmentRepoForeignKeyCount(t, db); count != 2 {
+			t.Fatalf("foreign key count after rejection = %d, want 2", count)
+		}
+	})
+
+	t.Run("multiple exact lifecycle keys are retained", func(t *testing.T) {
+		db := testutil.OpenIsolatedPostgres(t, testutil.PostgresDSNFromEnv(t))
+		repo, err := NewWithDB(db, db, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"environment_fk_one", "environment_fk_two"} {
+			if _, err := db.Exec(fmt.Sprintf(`
+				ALTER TABLE task_environment_repos ADD CONSTRAINT %s
+				FOREIGN KEY (task_environment_id) REFERENCES task_environments(id) ON DELETE CASCADE
+			`, name)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := repo.detachTaskEnvironmentRepoLifecycle(); err == nil {
+			t.Fatal("multiple lifecycle keys were silently accepted")
+		}
+		if count := postgresEnvironmentRepoForeignKeyCount(t, db); count != 2 {
+			t.Fatalf("foreign key count after rejection = %d, want 2", count)
+		}
+	})
+}
+
+func postgresEnvironmentRepoForeignKeyCount(t *testing.T, db *sqlx.DB) int {
+	t.Helper()
+	var count int
+	if err := db.Get(&count, `
+		SELECT COUNT(*)
+		FROM pg_constraint con
+		JOIN pg_class source ON source.oid = con.conrelid
+		JOIN pg_namespace nsp ON nsp.oid = source.relnamespace
+		WHERE source.relname = 'task_environment_repos'
+			AND nsp.nspname = current_schema()
+			AND con.contype = 'f'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
 func TestPostgresCutoverHybridNormalizedEnvironmentWithLegacySessionWorktrees(t *testing.T) {
 	db := testutil.OpenIsolatedPostgres(t, testutil.PostgresDSNFromEnv(t))
 	if _, err := NewWithDB(db, db, nil); err != nil {

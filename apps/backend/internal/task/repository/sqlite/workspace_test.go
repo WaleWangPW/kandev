@@ -320,13 +320,26 @@ func assertNoWorkspaceCascadeDependents(t *testing.T, repo *Repository) {
 		"task_repositories",
 		"task_sessions",
 		"task_environments",
-		"task_environment_repos",
 		"task_session_turns",
 		"task_session_messages",
 		"task_plans",
 		"task_plan_revisions",
 	} {
 		assertTableRowCount(t, repo, table, 0)
+	}
+	// Environment-repository rows are durable physical-reference authority.
+	// The logical workspace cascade must not erase the exact generation before
+	// the cleanup workflow releases it through its fourteen-column CAS.
+	assertTableRowCount(t, repo, "task_environment_repos", 1)
+	var id, environmentID, status string
+	if err := repo.ro.QueryRow(`
+		SELECT id, task_environment_id, status
+		FROM task_environment_repos
+	`).Scan(&id, &environmentID, &status); err != nil {
+		t.Fatalf("read durable workspace cleanup authority: %v", err)
+	}
+	if id != "env-repo-delete" || environmentID != "env-delete" || status != "active" {
+		t.Fatalf("durable workspace cleanup authority = (%q, %q, %q)", id, environmentID, status)
 	}
 }
 

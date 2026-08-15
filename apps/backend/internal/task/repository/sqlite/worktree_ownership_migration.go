@@ -54,12 +54,11 @@ func finalTaskEnvironmentsDDL(tableName string) string {
 }
 
 // finalTaskEnvironmentReposDDL is the task_environment_repos shape with the
-// physical-worktree lifecycle columns (status, merged_at, deleted_at).
-// refTable is the environment table the FK targets (the shadow name during
-// the cutover). SQLite rewrites FK references when the parent table is
-// renamed; PostgreSQL binds by OID, so the shadow constraint keeps its
-// shadow-scoped name and is renamed after the swap.
-func finalTaskEnvironmentReposDDL(tableName, refTable string) string {
+// physical-worktree lifecycle columns (status, merged_at, deleted_at). The
+// environment ID is an immutable lifecycle binding, not an ON DELETE child:
+// the row must survive task/environment deletion until physical cleanup can
+// bind and tombstone its exact fourteen-column generation.
+func finalTaskEnvironmentReposDDL(tableName, _ string) string {
 	return fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS %s (
 			id TEXT PRIMARY KEY,
@@ -76,9 +75,8 @@ func finalTaskEnvironmentReposDDL(tableName, refTable string) string {
 			updated_at TIMESTAMP NOT NULL,
 			merged_at TIMESTAMP,
 			deleted_at TIMESTAMP,
-			FOREIGN KEY (task_environment_id) REFERENCES %s(id) ON DELETE CASCADE,
 			UNIQUE(task_environment_id, repository_id, branch_slug)
-		)`, tableName, refTable)
+		)`, tableName)
 }
 
 // normalizeTaskWorktreeOwnership performs the one-time cutover to the

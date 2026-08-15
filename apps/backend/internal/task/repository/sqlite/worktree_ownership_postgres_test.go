@@ -324,8 +324,8 @@ func TestCutoverPostgres_FreshSchemaIsFinal(t *testing.T) {
 	if tableCount != 0 {
 		t.Fatal("fresh postgres database must not contain task_session_worktrees")
 	}
-	// The environment FK must reference tasks and the repos FK must
-	// reference task_environments after the swap.
+	// The physical-reference row must not be an ON DELETE child of the logical
+	// task environment; it survives until exact release CAS tombstones it.
 	var fkCount int
 	if err := db.Get(&fkCount, `
 		SELECT COUNT(*) FROM information_schema.table_constraints tc
@@ -339,7 +339,7 @@ func TestCutoverPostgres_FreshSchemaIsFinal(t *testing.T) {
 		  AND tc.table_schema = current_schema()`); err != nil {
 		t.Fatalf("count env-repo FK: %v", err)
 	}
-	if fkCount != 1 {
-		t.Fatalf("task_environment_repos FK to task_environments missing: %d", fkCount)
+	if fkCount != 0 {
+		t.Fatalf("task_environment_repos lifecycle FK count = %d, want 0", fkCount)
 	}
 }

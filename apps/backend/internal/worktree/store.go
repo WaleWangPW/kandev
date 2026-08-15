@@ -571,6 +571,33 @@ func (s *SQLiteStore) checkTaskCleanupBarrierLocked(ctx context.Context, tx *sql
 	return nil
 }
 
+// checkEnvironmentRepoMutableLocked fences every non-release mutation. A
+// durable orphan is cleanup authority, not a mutable live row. The exact
+// ReleaseWorktreeReferenceCAS path is the only writer allowed after the
+// logical parent disappears or a cleanup barrier becomes active.
+func (s *SQLiteStore) checkEnvironmentRepoMutableLocked(
+	ctx context.Context,
+	tx *sqlx.Tx,
+	predicate string,
+	value string,
+) error {
+	var taskID string
+	query := `
+		SELECT task.id
+		FROM task_environment_repos ter
+		INNER JOIN task_environments environment ON environment.id = ter.task_environment_id
+		INNER JOIN tasks task ON task.id = environment.task_id
+		WHERE ` + predicate + `
+		LIMIT 1`
+	if err := tx.QueryRowContext(ctx, s.db.Rebind(query), value).Scan(&taskID); err != nil {
+		if err == sql.ErrNoRows {
+			return worktreeReleaseConflict(value, "logical parent absent; mutation fenced")
+		}
+		return fmt.Errorf("resolve worktree mutation owner: %w", err)
+	}
+	return s.checkTaskCleanupBarrierLocked(ctx, tx, taskID)
+}
+
 // GetWorktreeByID retrieves a worktree by its unique ID.
 func (s *SQLiteStore) GetWorktreeByID(ctx context.Context, id string) (*Worktree, error) {
 	row := s.ro.QueryRowContext(ctx, s.ro.Rebind(`
@@ -660,7 +687,15 @@ func (s *SQLiteStore) GetWorktreesByRepositoryID(ctx context.Context, repoID str
 
 // UpdateWorktree updates an existing worktree record.
 func (s *SQLiteStore) UpdateWorktree(ctx context.Context, wt *Worktree) error {
-	wt.UpdatedAt = time.Now().UTC()
+	updatedAt := time.Now().UTC()
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.checkEnvironmentRepoMutableLocked(ctx, tx, `ter.worktree_id = ?`, wt.ID); err != nil {
+		return err
+	}
 
 	query := `
 		UPDATE task_environment_repos SET
@@ -672,7 +707,7 @@ func (s *SQLiteStore) UpdateWorktree(ctx context.Context, wt *Worktree) error {
 		wt.Path,
 		wt.Branch,
 		wt.Status,
-		wt.UpdatedAt,
+		updatedAt,
 		wt.MergedAt,
 		wt.DeletedAt,
 		wt.ID,
@@ -682,30 +717,42 @@ func (s *SQLiteStore) UpdateWorktree(ctx context.Context, wt *Worktree) error {
 		args = append(args, wt.TaskEnvironmentID)
 	}
 
-	result, err := s.db.ExecContext(ctx, s.db.Rebind(query), args...)
+	result, err := tx.ExecContext(ctx, s.db.Rebind(query), args...)
 	if err != nil {
 		return err
 	}
 
 	rows, _ := result.RowsAffected()
-	if rows == 0 {
+	if rows != 1 {
 		return fmt.Errorf("%w: %s", ErrWorktreeNotFound, wt.ID)
 	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	wt.UpdatedAt = updatedAt
 	return nil
 }
 
 // DeleteWorktree removes a worktree record.
 func (s *SQLiteStore) DeleteWorktree(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, s.db.Rebind(`DELETE FROM task_environment_repos WHERE worktree_id = ?`), id)
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.checkEnvironmentRepoMutableLocked(ctx, tx, `ter.worktree_id = ?`, id); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, s.db.Rebind(`DELETE FROM task_environment_repos WHERE worktree_id = ?`), id)
 	if err != nil {
 		return err
 	}
 
 	rows, _ := result.RowsAffected()
-	if rows == 0 {
+	if rows != 1 {
 		return fmt.Errorf("worktree not found: %s", id)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ListActiveWorktrees returns all worktrees with status 'active'.

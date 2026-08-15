@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
 
 	"github.com/kandev/kandev/internal/task/models"
+	"github.com/kandev/kandev/internal/task/repository/repoerrors"
 )
 
 const taskResourceCleanupColumns = `
@@ -17,6 +19,9 @@ const taskResourceCleanupColumns = `
 	next_attempt_at, last_error, created_at, updated_at, completed_at`
 
 func (r *Repository) CreateTaskResourceCleanupJob(ctx context.Context, job *models.TaskResourceCleanupJob) error {
+	if job == nil {
+		return fmt.Errorf("task resource cleanup job is required")
+	}
 	if job.ID == "" {
 		job.ID = uuid.NewString()
 	}
@@ -26,14 +31,131 @@ func (r *Repository) CreateTaskResourceCleanupJob(ctx context.Context, job *mode
 	if job.State == "" {
 		job.State = models.TaskResourceCleanupStatePending
 	}
-	_, err := r.db.ExecContext(ctx, r.db.Rebind(`
+
+	tx, err := r.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin task resource cleanup reservation: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if taskCleanupBarrierState(job.State) {
+		// Reservation for a live task takes the same task-row lock as every
+		// ownership mutation, before inspecting operation replay or active jobs. A
+		// mutation that commits first is therefore visible before this INSERT;
+		// a reservation that commits first is visible to the mutation's barrier
+		// read. A replay after logical task deletion remains a zero-write no-op.
+		if err := r.lockTaskCleanupDomainLocked(ctx, tx, job.TaskID); err != nil {
+			if !errors.Is(err, ErrTaskNotFound) {
+				return err
+			}
+			replay, replayErr := r.taskResourceCleanupOperationExistsLocked(ctx, tx, job.OperationID)
+			if replayErr != nil {
+				return replayErr
+			}
+			if replay {
+				return tx.Commit()
+			}
+			// Durable cleanup jobs intentionally outlive task deletion. Recovery
+			// and late workspace-cascade capture may therefore persist a job after
+			// the exact logical task row is gone. There is then no live ownership
+			// mutation domain to race; preserve that established behavior, but
+			// re-read active-job semantics in this same writer transaction before
+			// inserting the orphan recovery intent.
+			active, activeErr := r.activeTaskResourceCleanupJobLocked(ctx, tx, job.TaskID)
+			if activeErr != nil {
+				return activeErr
+			}
+			if active {
+				return fmt.Errorf("%w: %s", repoerrors.ErrTaskCleanupInProgress, job.TaskID)
+			}
+			// Continue to the insert below.
+		} else {
+			replay, err := r.taskResourceCleanupOperationExistsLocked(ctx, tx, job.OperationID)
+			if err != nil {
+				return err
+			}
+			if replay {
+				return tx.Commit()
+			}
+			active, err := r.activeTaskResourceCleanupJobLocked(ctx, tx, job.TaskID)
+			if err != nil {
+				return err
+			}
+			if active {
+				return fmt.Errorf("%w: %s", repoerrors.ErrTaskCleanupInProgress, job.TaskID)
+			}
+		}
+	}
+
+	result, err := tx.ExecContext(ctx, r.db.Rebind(`
 		INSERT INTO task_resource_cleanup_jobs (`+taskResourceCleanupColumns+`)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(operation_id) DO NOTHING
 	`), job.ID, job.OperationID, job.TaskID, job.Trigger, job.State,
 		job.ResourceSnapshot, job.Attempts, job.NextAttemptAt, job.LastError,
 		job.CreatedAt, job.UpdatedAt, job.CompletedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read task resource cleanup reservation result: %w", err)
+	}
+	if rows == 0 {
+		replay, replayErr := r.taskResourceCleanupOperationExistsLocked(ctx, tx, job.OperationID)
+		if replayErr != nil {
+			return replayErr
+		}
+		if !replay {
+			return fmt.Errorf("task resource cleanup reservation lost without operation replay")
+		}
+	} else if rows != 1 {
+		return fmt.Errorf("task resource cleanup reservation affected %d rows", rows)
+	}
+	return tx.Commit()
+}
+
+func taskCleanupBarrierState(state models.TaskResourceCleanupState) bool {
+	return state == models.TaskResourceCleanupStatePrepared ||
+		state == models.TaskResourceCleanupStatePending ||
+		state == models.TaskResourceCleanupStateRunning ||
+		state == models.TaskResourceCleanupStateRetryWait
+}
+
+func (r *Repository) taskResourceCleanupOperationExistsLocked(
+	ctx context.Context,
+	tx *sqlx.Tx,
+	operationID string,
+) (bool, error) {
+	var exists bool
+	if err := tx.QueryRowContext(ctx, r.db.Rebind(`
+		SELECT EXISTS (
+			SELECT 1 FROM task_resource_cleanup_jobs WHERE operation_id = ?
+		)`), operationID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check task resource cleanup operation replay: %w", err)
+	}
+	return exists, nil
+}
+
+func (r *Repository) activeTaskResourceCleanupJobLocked(
+	ctx context.Context,
+	tx *sqlx.Tx,
+	taskID string,
+) (bool, error) {
+	var active bool
+	if err := tx.QueryRowContext(ctx, r.db.Rebind(`
+		SELECT EXISTS (
+			SELECT 1 FROM task_resource_cleanup_jobs
+			WHERE task_id = ? AND state IN (?, ?, ?, ?)
+		)`), taskID,
+		models.TaskResourceCleanupStatePrepared,
+		models.TaskResourceCleanupStatePending,
+		models.TaskResourceCleanupStateRunning,
+		models.TaskResourceCleanupStateRetryWait,
+	).Scan(&active); err != nil {
+		return false, fmt.Errorf("check active task resource cleanup reservation: %w", err)
+	}
+	return active, nil
 }
 
 // UpdateTaskResourceCleanupSnapshot writes the resource inventory captured

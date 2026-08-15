@@ -40,6 +40,16 @@ func (r *Repository) CreateTaskEnvironment(ctx context.Context, env *models.Task
 	if err := r.taskCleanupBarrierLocked(ctx, tx, env.TaskID); err != nil {
 		return err
 	}
+	var residual bool
+	if err := tx.QueryRowContext(ctx, r.db.Rebind(`
+		SELECT EXISTS (
+			SELECT 1 FROM task_environment_repos WHERE task_environment_id = ?
+		)`), env.ID).Scan(&residual); err != nil {
+		return fmt.Errorf("check residual environment-repository authority: %w", err)
+	}
+	if residual {
+		return fmt.Errorf("create task environment: id %s has durable worktree tombstones", env.ID)
+	}
 
 	if _, err := tx.ExecContext(ctx, r.db.Rebind(`
 		INSERT INTO task_environments (
@@ -194,8 +204,8 @@ func (r *Repository) TransferTaskEnvironmentToTask(ctx context.Context, envID, t
 	return nil
 }
 
-// DeleteTaskEnvironment deletes a task environment by ID.
-// Per-repo rows are removed via ON DELETE CASCADE.
+// DeleteTaskEnvironment deletes the logical task environment. Durable
+// environment-repository rows remain until exact release CAS tombstones them.
 func (r *Repository) DeleteTaskEnvironment(ctx context.Context, id string) error {
 	result, err := r.db.ExecContext(ctx, r.db.Rebind(`
 		DELETE FROM task_environments WHERE id = ?
@@ -343,9 +353,16 @@ func (r *Repository) ListTaskEnvironmentRepos(ctx context.Context, envID string)
 
 // UpdateTaskEnvironmentRepo updates an existing per-repo row.
 func (r *Repository) UpdateTaskEnvironmentRepo(ctx context.Context, repo *models.TaskEnvironmentRepo) error {
-	repo.UpdatedAt = time.Now().UTC()
-
-	result, err := r.db.ExecContext(ctx, r.db.Rebind(`
+	updatedAt := time.Now().UTC()
+	tx, err := r.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := r.mutableEnvironmentRepoByIDLocked(ctx, tx, repo.ID); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, r.db.Rebind(`
 		UPDATE task_environment_repos SET
 			branch_slug = ?,
 			worktree_id = ?, worktree_path = ?, worktree_branch = ?,
@@ -355,7 +372,7 @@ func (r *Repository) UpdateTaskEnvironmentRepo(ctx context.Context, repo *models
 	`),
 		repo.BranchSlug, repo.WorktreeID, repo.WorktreePath, repo.WorktreeBranch,
 		repo.Position, repo.ErrorMessage, repo.Status,
-		repo.MergedAt, repo.DeletedAt, repo.UpdatedAt,
+		repo.MergedAt, repo.DeletedAt, updatedAt,
 		repo.ID,
 	)
 	if err != nil {
@@ -365,12 +382,24 @@ func (r *Repository) UpdateTaskEnvironmentRepo(ctx context.Context, repo *models
 	if rows == 0 {
 		return fmt.Errorf("task environment repo not found: %s", repo.ID)
 	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	repo.UpdatedAt = updatedAt
 	return nil
 }
 
 // DeleteTaskEnvironmentRepo removes a single per-repo row.
 func (r *Repository) DeleteTaskEnvironmentRepo(ctx context.Context, id string) error {
-	result, err := r.db.ExecContext(ctx, r.db.Rebind(`
+	tx, err := r.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := r.mutableEnvironmentRepoByIDLocked(ctx, tx, id); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, r.db.Rebind(`
 		DELETE FROM task_environment_repos WHERE id = ?
 	`), id)
 	if err != nil {
@@ -380,13 +409,23 @@ func (r *Repository) DeleteTaskEnvironmentRepo(ctx context.Context, id string) e
 	if rows == 0 {
 		return fmt.Errorf("task environment repo not found: %s", id)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // DeleteTaskEnvironmentReposByEnv removes all per-repo rows for an environment.
 func (r *Repository) DeleteTaskEnvironmentReposByEnv(ctx context.Context, envID string) error {
-	_, err := r.db.ExecContext(ctx, r.db.Rebind(`
+	tx, err := r.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := r.mutableEnvironmentReposByEnvironmentLocked(ctx, tx, envID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, r.db.Rebind(`
 		DELETE FROM task_environment_repos WHERE task_environment_id = ?
-	`), envID)
-	return err
+	`), envID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

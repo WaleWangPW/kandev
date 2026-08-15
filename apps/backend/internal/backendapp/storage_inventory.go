@@ -59,14 +59,12 @@ func (i *storageInventory) LoadWorkspaceInventory(ctx context.Context) (workspac
 
 func (i *storageInventory) activeWorktreePaths(ctx context.Context) ([]string, error) {
 	paths := make([]string, 0)
-	// Worktrees are task-owned: the inventory reads task_environment_repos
-	// through the owning environment's task row, so a zero-session task
-	// workspace is still protected from storage maintenance.
-	query := "SELECT ter.worktree_path FROM task_environment_repos ter " +
-		"INNER JOIN task_environments te ON te.id = ter.task_environment_id " +
-		"INNER JOIN tasks t ON t.id = te.task_id " +
-		"WHERE t.archived_at IS NULL AND ter.status = 'active' " +
-		"AND ter.deleted_at IS NULL AND ter.worktree_path <> ''"
+	// Active environment-repository rows are physical inventory even after the
+	// logical task/environment parent is gone. Dropping an active orphan through
+	// an INNER JOIN would let storage GC race the durable release CAS. Complete
+	// deleted tombstones no longer protect bytes.
+	query := "SELECT worktree_path FROM task_environment_repos " +
+		"WHERE status = 'active' AND deleted_at IS NULL AND worktree_path <> ''"
 	if err := i.reader.SelectContext(ctx, &paths, query); err != nil {
 		return nil, err
 	}
