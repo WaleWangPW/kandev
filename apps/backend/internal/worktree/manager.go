@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kandev/kandev/internal/common/logger"
+	"github.com/kandev/kandev/internal/physicaldelete"
 )
 
 const (
@@ -56,6 +57,10 @@ type Manager struct {
 	pullTimeout  time.Duration
 	// Bound for cheap git ref-inspection commands (branchExists, currentBranch).
 	inspectTimeout time.Duration
+
+	// admission is the single central gate for managed-root lifecycle actions.
+	// Nil is deliberately fail-closed.
+	admission physicaldelete.Admission
 }
 
 // ScriptEnvironmentProvider supplies install-managed environment variables to
@@ -179,6 +184,11 @@ func (m *Manager) SetRepositoryProvider(provider RepositoryProvider) {
 // SetScriptMessageHandler sets the script message handler for executing setup/cleanup scripts.
 func (m *Manager) SetScriptMessageHandler(handler ScriptMessageHandler) {
 	m.scriptMsgHandler = handler
+}
+
+// SetAdmission wires the central physical-delete admission service.
+func (m *Manager) SetAdmission(admission physicaldelete.Admission) {
+	m.admission = admission
 }
 
 // ListActiveWorktreePaths returns the absolute on-disk paths of all

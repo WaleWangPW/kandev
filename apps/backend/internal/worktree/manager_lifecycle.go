@@ -35,6 +35,11 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Worktree, err
 	if req.BranchIdentitySlug != "" && SanitizeBranchSlug(req.BranchIdentitySlug) == "" {
 		return nil, ErrInvalidBranchSlug
 	}
+	// This check must precede store/repository/Git/filesystem/runtime access.
+	// Missing composition is an explicit fail-closed result, never a fallback.
+	if err := m.requireAdmission(); err != nil {
+		return nil, err
+	}
 
 	if wt, handled, err := m.tryReuseExisting(ctx, req); handled {
 		return wt, err
@@ -238,8 +243,16 @@ func (m *Manager) resolveBaseRefWithFallback(ctx context.Context, req *CreateReq
 // worktree one level below the task root and break agentctl's sibling-based
 // multi-repo detection.
 func (m *Manager) createInTaskDir(ctx context.Context, req CreateRequest, baseRef, fallbackWarning, fallbackDetail string) (*Worktree, error) {
-	worktreePath, err := m.prepareTaskWorktreePath(req)
+	worktreePath, err := m.taskWorktreePath(req)
 	if err != nil {
+		return nil, err
+	}
+	lease, err := m.beginProvisionalLease(ctx, req, worktreePath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = lease.Close() }()
+	if err := m.prepareTaskWorktreePath(req, worktreePath); err != nil {
 		return nil, err
 	}
 
@@ -249,7 +262,7 @@ func (m *Manager) createInTaskDir(ctx context.Context, req CreateRequest, baseRe
 	var fetchResult *FetchBranchResult
 	checkoutMode := req
 	if req.RemoteContribution != nil {
-		return m.createContributionInTaskDir(ctx, req, worktreePath, fallbackWarning, fallbackDetail)
+		return m.createContributionInTaskDir(ctx, req, worktreePath, fallbackWarning, fallbackDetail, lease)
 	}
 	if req.CheckoutBranch != "" {
 		if req.RemoteSyncHandled {
@@ -262,18 +275,6 @@ func (m *Manager) createInTaskDir(ctx context.Context, req CreateRequest, baseRe
 				checkoutMode.CheckoutBranch = ""
 			}
 		} else {
-			// PRNumber != 0 means the caller wants the refs/pull/<N>/head ref;
-			// fork PR branches don't exist as plain refs locally or under
-			// origin/<branch>, so the existence probe must be skipped and the
-			// fetch path always runs.
-			//
-			// When PRNumber == 0 and the named branch is absent locally and on
-			// origin, the caller's intent is "create a new branch with this
-			// name" rather than "fetch this existing ref" — the historical
-			// fetch-then-check-out path errored ("not found locally or on
-			// remote") in that case and rolled back. We drop CheckoutBranch
-			// from the request copy and pass the desired name as the fallback
-			// (new) branch name so gitAddWorktree creates it from baseRef.
 			if req.PRNumber == 0 && !m.checkoutBranchExistsAnywhere(ctx, req.RepositoryPath, req.CheckoutBranch) {
 				m.logger.Info("checkout branch missing locally and on origin; creating new branch with this name",
 					zap.String("repository_path", req.RepositoryPath),
@@ -295,9 +296,12 @@ func (m *Manager) createInTaskDir(ctx context.Context, req CreateRequest, baseRe
 		}
 	}
 
-	worktreeID, branchName, err := m.addWorktreeForBranch(ctx, checkoutMode, worktreePath, branchName, startPoint, baseRef)
+	worktreeID, branchName, err := m.addWorktreeForBranch(ctx, checkoutMode, worktreePath, branchName, startPoint, baseRef, lease)
 	if err != nil {
 		return nil, err
+	}
+	if err := lease.Bind(ctx); err != nil {
+		return nil, fmt.Errorf("bind provisional lease: %w", err)
 	}
 
 	wt := m.buildWorktreeRecord(worktreeID, req, worktreePath, branchName)
@@ -346,14 +350,18 @@ func (m *Manager) createContributionInTaskDir(
 	ctx context.Context,
 	req CreateRequest,
 	worktreePath, fallbackWarning, fallbackDetail string,
+	lease *physicaldelete.ProvisionalLease,
 ) (*Worktree, error) {
 	remoteName, contributionRef, err := m.materializeRemoteContribution(ctx, req.RepositoryPath, req.RemoteContribution)
 	if err != nil {
 		return nil, err
 	}
-	worktreeID, branchName, err := m.addContributionWorktree(ctx, req, worktreePath, contributionRef, remoteName)
+	worktreeID, branchName, err := m.addContributionWorktree(ctx, req, worktreePath, contributionRef, remoteName, lease)
 	if err != nil {
 		return nil, err
+	}
+	if err := lease.Bind(ctx); err != nil {
+		return nil, fmt.Errorf("bind provisional lease: %w", err)
 	}
 	wt := m.buildWorktreeRecord(worktreeID, req, worktreePath, branchName)
 	if err := m.persistAndCacheWorktree(ctx, wt, req, worktreePath); err != nil {
@@ -371,7 +379,7 @@ func (m *Manager) createContributionInTaskDir(
 	return wt, nil
 }
 
-func (m *Manager) prepareTaskWorktreePath(req CreateRequest) (string, error) {
+func (m *Manager) taskWorktreePath(req CreateRequest) (string, error) {
 	repoDir := SanitizeRepoDirName(req.RepoName)
 	if repoDir == "" {
 		return "", ErrInvalidRepoName
@@ -385,20 +393,24 @@ func (m *Manager) prepareTaskWorktreePath(req CreateRequest) (string, error) {
 		return "", fmt.Errorf("failed to get task worktree path: %w", err)
 	}
 
+	return worktreePath, nil
+}
+
+func (m *Manager) prepareTaskWorktreePath(req CreateRequest, worktreePath string) error {
 	taskDir := filepath.Dir(worktreePath)
 	if err := m.validateTaskDir(taskDir); err != nil {
-		return "", err
+		return err
 	}
 	if err := os.MkdirAll(taskDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create task directory: %w", err)
+		return fmt.Errorf("failed to create task directory: %w", err)
 	}
 	if err := storageworkspaces.WriteOwnershipMarker(taskDir, storageworkspaces.OwnershipMarker{
 		TaskID: req.TaskID, WorkspaceID: req.WorkspaceID, TaskDirName: req.TaskDirName,
 		LayoutVersion: storageworkspaces.LayoutVersionSemantic,
 	}); err != nil {
-		return "", fmt.Errorf("mark task directory ownership: %w", err)
+		return fmt.Errorf("mark task directory ownership: %w", err)
 	}
-	return worktreePath, nil
+	return nil
 }
 
 func (m *Manager) validateTaskDir(taskDir string) error {
@@ -424,14 +436,14 @@ func (m *Manager) validateTaskDir(taskDir string) error {
 // and falling back to a suffixed branch if the checkout branch is already in use.
 // When a checkout branch is specified, it sets the upstream tracking branch to
 // origin/<checkout-branch> so ahead/behind counts are relative to the PR's remote branch.
-func (m *Manager) addWorktreeForBranch(ctx context.Context, req CreateRequest, worktreePath, fallbackBranch, startPoint, baseRef string) (string, string, error) {
+func (m *Manager) addWorktreeForBranch(ctx context.Context, req CreateRequest, worktreePath, fallbackBranch, startPoint, baseRef string, lease *physicaldelete.ProvisionalLease) (string, string, error) {
 	if req.CheckoutBranch == "" {
-		id, err := m.gitAddWorktree(ctx, req.RepositoryPath, fallbackBranch, worktreePath, baseRef)
+		id, err := m.gitAddWorktree(ctx, req.RepositoryPath, fallbackBranch, worktreePath, baseRef, lease)
 		return id, fallbackBranch, err
 	}
 
 	// Try checking out the PR branch directly (common case: single task per PR).
-	id, err := m.gitAddWorktreeExisting(ctx, req.RepositoryPath, req.CheckoutBranch, worktreePath)
+	id, err := m.gitAddWorktreeExisting(ctx, req.RepositoryPath, req.CheckoutBranch, worktreePath, lease)
 	if err == nil {
 		m.setUpstreamIfExists(ctx, worktreePath, req.CheckoutBranch, req.CheckoutBranch)
 		return id, req.CheckoutBranch, nil
@@ -443,7 +455,7 @@ func (m *Manager) addWorktreeForBranch(ctx context.Context, req CreateRequest, w
 	// Branch is in use by another worktree — create a unique fallback branch
 	// using the original branch name with a random suffix.
 	suffixed := req.CheckoutBranch + "-" + SmallSuffix(3)
-	id, err = m.gitAddWorktree(ctx, req.RepositoryPath, suffixed, worktreePath, startPoint)
+	id, err = m.gitAddWorktree(ctx, req.RepositoryPath, suffixed, worktreePath, startPoint, lease)
 	if err == nil {
 		m.setUpstreamIfExists(ctx, worktreePath, suffixed, req.CheckoutBranch)
 	}
