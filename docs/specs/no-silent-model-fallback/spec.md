@@ -1,6 +1,6 @@
 # No Silent Model Fallback
 
-**Status**: approved (design package; amended 2026-08-09)
+**Status**: approved (design package; amended 2026-08-15)
 **Date**: 2026-08-04
 **Slug**: `no-silent-model-fallback`
 
@@ -392,3 +392,44 @@ explicitly enable the toggle — that opt-in is the point of the feature.
 - **Hover is supplementary**: every info icon is focusable, and coarse-pointer
   devices receive the same content in a drawer. The visible option helper copy
   remains the baseline explanation.
+
+## Persistent launch binding amendment
+
+An explicit profile selection remains authoritative between task preparation and
+process launch. Kandev derives a deterministic, secret-free SHA-256 fingerprint
+from every launch-relevant profile field, stores it with the prepared execution,
+and verifies the same fingerprint immediately before every initial launch,
+resume, recovery launch, and passthrough launch.
+
+- A user-modified, non-empty model or mode is never replaced merely because the
+  current capability catalog does not advertise it. System-managed profiles may
+  still seed empty fields and reconcile defaults.
+- A legacy prepared execution without a fingerprint remains launchable under the
+  compatibility path. Once a fingerprint exists, a mismatch fails closed with a
+  sanitized `BLOCKED_PROFILE_DRIFT` classification and starts no agent process.
+- The fingerprint contains no resolved secret value, secret identifier, token,
+  raw command prefix, or other credential material. Logs and API errors expose
+  only the classification and the digest when needed for correlation.
+- Resolving a profile environment is atomic. If the secret store is unavailable,
+  a referenced secret is missing, or revealing it fails, the launch fails with
+  sanitized `BLOCKED_PROFILE_SECRET`; Kandev supplies no partial environment and
+  starts no agent process.
+- ACP, passthrough, initial launch, resume, startup recovery, executor launch, and
+  office-driven launch use the same binding and secret-failure outcome. No path
+  silently falls back to a different persisted profile or a partial environment.
+
+### Binding scenarios
+
+- **GIVEN** a user-modified profile with a non-empty mode that is absent from the
+  current catalog, **WHEN** profile reconciliation runs, **THEN** the stored mode
+  remains unchanged.
+- **GIVEN** a prepared execution whose profile fingerprint differs from the
+  current profile, **WHEN** any launch or resume path runs, **THEN** the result is
+  `BLOCKED_PROFILE_DRIFT` and no process starts.
+- **GIVEN** a legacy prepared execution without a fingerprint, **WHEN** its
+  profile is otherwise valid, **THEN** the compatibility launch path remains
+  available.
+- **GIVEN** one required profile secret cannot be resolved, **WHEN** any launch
+  path builds the environment, **THEN** the result is
+  `BLOCKED_PROFILE_SECRET`, the environment is empty, and no secret identifier
+  or value appears in the error or logs.
