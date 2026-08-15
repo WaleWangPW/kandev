@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/system/storage"
 	storageworkspaces "github.com/kandev/kandev/internal/system/storage/workspaces"
 	"go.uber.org/zap"
@@ -356,7 +357,7 @@ func (m *Manager) createContributionInTaskDir(
 	if err != nil {
 		return nil, err
 	}
-	worktreeID, branchName, err := m.addContributionWorktree(ctx, req, worktreePath, contributionRef, remoteName, lease)
+	worktreeID, branchName, err := m.addContributionWorktree(ctx, req, worktreePath, contributionRef, remoteName)
 	if err != nil {
 		return nil, err
 	}
@@ -438,12 +439,12 @@ func (m *Manager) validateTaskDir(taskDir string) error {
 // origin/<checkout-branch> so ahead/behind counts are relative to the PR's remote branch.
 func (m *Manager) addWorktreeForBranch(ctx context.Context, req CreateRequest, worktreePath, fallbackBranch, startPoint, baseRef string, lease *physicaldelete.ProvisionalLease) (string, string, error) {
 	if req.CheckoutBranch == "" {
-		id, err := m.gitAddWorktree(ctx, req.RepositoryPath, fallbackBranch, worktreePath, baseRef, lease)
+		id, err := m.gitAddWorktree(ctx, req.RepositoryPath, fallbackBranch, worktreePath, baseRef)
 		return id, fallbackBranch, err
 	}
 
 	// Try checking out the PR branch directly (common case: single task per PR).
-	id, err := m.gitAddWorktreeExisting(ctx, req.RepositoryPath, req.CheckoutBranch, worktreePath, lease)
+	id, err := m.gitAddWorktreeExisting(ctx, req.RepositoryPath, req.CheckoutBranch, worktreePath)
 	if err == nil {
 		m.setUpstreamIfExists(ctx, worktreePath, req.CheckoutBranch, req.CheckoutBranch)
 		return id, req.CheckoutBranch, nil
@@ -455,7 +456,7 @@ func (m *Manager) addWorktreeForBranch(ctx context.Context, req CreateRequest, w
 	// Branch is in use by another worktree — create a unique fallback branch
 	// using the original branch name with a random suffix.
 	suffixed := req.CheckoutBranch + "-" + SmallSuffix(3)
-	id, err = m.gitAddWorktree(ctx, req.RepositoryPath, suffixed, worktreePath, startPoint, lease)
+	id, err = m.gitAddWorktree(ctx, req.RepositoryPath, suffixed, worktreePath, startPoint)
 	if err == nil {
 		m.setUpstreamIfExists(ctx, worktreePath, suffixed, req.CheckoutBranch)
 	}

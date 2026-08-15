@@ -105,6 +105,40 @@ var registrations = []runtimeFlagRegistration{
 	},
 	{
 		definition: RuntimeFlagDefinition{
+			Key:         "features.archivedResourceReconcile",
+			EnvVar:      "KANDEV_FEATURES_ARCHIVED_RESOURCE_RECONCILE",
+			Kind:        KindFeature,
+			Label:       "Archived resource reconcile",
+			Description: "Enables DB-only reconciliation of archived resource anchors.",
+			Stability:   StabilityExperimental,
+			RiskLevel:   RiskHigh,
+			RiskDescription: "Archived-resource reconcile mutates durable cleanup anchors. " +
+				"Enable it only after the lifecycle service is fully ported and tested.",
+			RestartRequired: true,
+			Mutable:         true,
+		},
+		read:  func(cfg *config.Config) bool { return cfg.Features.ArchivedResourceReconcile },
+		apply: func(cfg *config.Config, value bool) { cfg.Features.ArchivedResourceReconcile = value },
+	},
+	{
+		definition: RuntimeFlagDefinition{
+			Key:         "features.archivedResourcePhysicalRelease",
+			EnvVar:      "KANDEV_FEATURES_ARCHIVED_RESOURCE_PHYSICAL_RELEASE",
+			Kind:        KindFeature,
+			Label:       "Archived resource physical release",
+			Description: "Enables the sealed absent-target release admission path.",
+			Stability:   StabilityExperimental,
+			RiskLevel:   RiskHigh,
+			RiskDescription: "Physical release is deliberately unavailable in this release. " +
+				"Enabling this flag does not provide a physical executor.",
+			RestartRequired: true,
+			Mutable:         true,
+		},
+		read:  func(cfg *config.Config) bool { return cfg.Features.ArchivedResourcePhysicalRelease },
+		apply: func(cfg *config.Config, value bool) { cfg.Features.ArchivedResourcePhysicalRelease = value },
+	},
+	{
+		definition: RuntimeFlagDefinition{
 			Key:         "debug.devMode",
 			EnvVar:      "KANDEV_DEBUG_DEV_MODE",
 			Kind:        KindDebug,

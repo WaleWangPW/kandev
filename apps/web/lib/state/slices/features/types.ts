@@ -11,6 +11,8 @@ export const defaultFeatureFlags = {
   auth: false,
   claudeBackgroundPromptHandoff: false,
   claudeMidTurnSteering: false,
+  archivedResourceReconcile: false,
+  archivedResourcePhysicalRelease: false,
 } as const;
 
 export type FeatureName = keyof typeof defaultFeatureFlags;

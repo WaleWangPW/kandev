@@ -393,6 +393,16 @@ type FeaturesConfig struct {
 	// kill-switch after rollout because the agent-side fold is undocumented and
 	// can regress without notice.
 	ClaudeMidTurnSteering bool `mapstructure:"claude_mid_turn_steering" json:"claudeMidTurnSteering"`
+
+	// ArchivedResourceReconcile enables DB-only reconciliation of archived
+	// resource anchors. It is a restart-scoped release toggle and remains off in
+	// every shipped profile until the lifecycle service is fully ported.
+	ArchivedResourceReconcile bool `mapstructure:"archived_resource_reconcile" json:"archivedResourceReconcile"`
+
+	// ArchivedResourcePhysicalRelease enables the sealed absent-target release
+	// admission path. Physical release is deliberately unavailable in this
+	// release, so this flag stays off in all profiles.
+	ArchivedResourcePhysicalRelease bool `mapstructure:"archived_resource_physical_release" json:"archivedResourcePhysicalRelease"`
 }
 
 // LoggingConfig holds logging configuration.

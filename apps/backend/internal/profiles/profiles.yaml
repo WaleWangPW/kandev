@@ -69,6 +69,18 @@ features:
     dev:  "false"
     e2e:  "false"
 
+  # Archived-resource lifecycle gates. Both remain off in every shipped profile:
+  # reconcile is DB-only and physical release has no available executor.
+  KANDEV_FEATURES_ARCHIVED_RESOURCE_RECONCILE:
+    prod: "false"
+    dev:  "false"
+    e2e:  "false"
+
+  KANDEV_FEATURES_ARCHIVED_RESOURCE_PHYSICAL_RELEASE:
+    prod: "false"
+    dev:  "false"
+    e2e:  "false"
+
 # ── Mock providers ────────────────────────────────────────────────
 # Swap real third-party services for in-memory fakes. Production
 # leaves all of these unset (real APIs). Dev opts into the mock agent

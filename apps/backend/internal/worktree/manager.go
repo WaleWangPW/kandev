@@ -13,6 +13,11 @@ import (
 	"github.com/kandev/kandev/internal/physicaldelete"
 )
 
+// testAdmissionFactory is set by worktree tests to inject a fresh
+// physical-delete admission service for every manager created with NewManager.
+// Production callers must wire admission explicitly via SetAdmission.
+var testAdmissionFactory func() physicaldelete.Admission
+
 const (
 	defaultGitFetchTimeout = 90 * time.Second
 	defaultGitPullTimeout  = 60 * time.Second
@@ -164,7 +169,7 @@ func NewManager(cfg Config, store Store, log *logger.Logger) (*Manager, error) {
 		pullTimeout = time.Duration(cfg.PullTimeoutSeconds) * time.Second
 	}
 
-	return &Manager{
+	m := &Manager{
 		config:         cfg,
 		logger:         log.WithFields(zap.String("component", "worktree-manager")),
 		store:          store,
@@ -173,7 +178,11 @@ func NewManager(cfg Config, store Store, log *logger.Logger) (*Manager, error) {
 		fetchTimeout:   fetchTimeout,
 		pullTimeout:    pullTimeout,
 		inspectTimeout: defaultGitInspectTimeout,
-	}, nil
+	}
+	if testAdmissionFactory != nil {
+		m.admission = testAdmissionFactory()
+	}
+	return m, nil
 }
 
 // SetRepositoryProvider sets the repository provider for fetching repository information.

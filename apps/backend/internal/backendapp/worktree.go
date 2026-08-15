@@ -15,6 +15,7 @@ import (
 	"github.com/kandev/kandev/internal/common/logger"
 	"github.com/kandev/kandev/internal/common/subproc"
 	"github.com/kandev/kandev/internal/db"
+	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/task/models"
 	taskservice "github.com/kandev/kandev/internal/task/service"
 	"github.com/kandev/kandev/internal/worktree"
@@ -71,6 +72,15 @@ func provideWorktreeManager(dbPool *db.Pool, cfg *config.Config, log *logger.Log
 	if err != nil {
 		return nil, nil, nil, err
 	}
+
+	admission, err := physicaldelete.New(physicaldelete.Config{
+		Inventory: physicaldelete.NewSQLInventorySource(dbPool.Writer()),
+	})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("physical-delete admission: %w", err)
+	}
+	manager.SetAdmission(admission)
+
 	if lifecycleMgr != nil {
 		lifecycleMgr.SetWorktreeManager(manager)
 		lifecycleMgr.SetBootMessageService(&bootMsgAdapter{svc: taskSvc})

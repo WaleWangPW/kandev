@@ -13,6 +13,7 @@ import (
 
 	"github.com/kandev/kandev/internal/agent/runtime/lifecycle"
 	"github.com/kandev/kandev/internal/db"
+	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/task/models"
 	taskrepo "github.com/kandev/kandev/internal/task/repository"
 	sqliterepo "github.com/kandev/kandev/internal/task/repository/sqlite"
@@ -279,6 +280,15 @@ func newMaterializerWorktreeMgr(t *testing.T, taskRoot string) *worktree.Manager
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
+	admission, err := physicaldelete.New(physicaldelete.Config{
+		Inventory: physicaldelete.InventorySourceFunc(func(context.Context) (physicaldelete.Inventory, error) {
+			return physicaldelete.Inventory{Complete: true}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatalf("physicaldelete.New: %v", err)
+	}
+	mgr.SetAdmission(admission)
 	return mgr
 }
 
