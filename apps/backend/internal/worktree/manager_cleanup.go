@@ -206,9 +206,7 @@ func (m *Manager) removeWorktree(ctx context.Context, wt *Worktree, removeBranch
 
 	// Remove worktree directory
 	if err := m.removeWorktreeDir(ctx, wt.Path, wt.RepositoryPath); err != nil {
-		m.logger.Warn("failed to remove worktree directory",
-			zap.String("path", wt.Path),
-			zap.Error(err))
+		return fmt.Errorf("remove worktree directory %s: %w", wt.Path, err)
 	}
 
 	// Optionally remove the branch from the main repository
@@ -407,7 +405,8 @@ func (m *Manager) CleanupWorktrees(ctx context.Context, worktrees []*Worktree) e
 		return nil
 	}
 
-	var lastErr error
+	var firstErr error
+	successful := make([]*Worktree, 0, len(worktrees))
 	for _, wt := range worktrees {
 		if wt == nil {
 			continue
@@ -417,22 +416,23 @@ func (m *Manager) CleanupWorktrees(ctx context.Context, worktrees []*Worktree) e
 				zap.String("task_id", wt.TaskID),
 				zap.String("worktree_id", wt.ID),
 				zap.Error(err))
-			lastErr = err
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
+		successful = append(successful, wt)
 	}
 
 	m.mu.Lock()
-	for _, wt := range worktrees {
-		if wt == nil {
-			continue
-		}
+	for _, wt := range successful {
 		if wt.SessionID != "" {
 			delete(m.worktrees, cacheKey(wt.SessionID, wt.RepositoryID, wt.BranchSlug))
 		}
 	}
 	m.mu.Unlock()
 
-	return lastErr
+	return firstErr
 }
 
 // OnTaskDeleted cleans up all worktrees for a task when it is deleted.
