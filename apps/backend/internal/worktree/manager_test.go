@@ -32,7 +32,8 @@ func newTestConfig(t *testing.T) Config {
 
 // mockStore implements Store for testing
 type mockStore struct {
-	worktrees map[string]*Worktree
+	worktrees                map[string]*Worktree
+	getBySessionAndRepoCalls int
 }
 
 func newMockStore() *mockStore {
@@ -177,12 +178,43 @@ func (s *mockStore) GetWorktreesBySessionID(_ context.Context, sessionID string)
 
 // GetWorktreeBySessionAndRepository — MultiRepoStore.
 func (s *mockStore) GetWorktreeBySessionAndRepository(_ context.Context, sessionID, repoID, branchSlug string) (*Worktree, error) {
+	s.getBySessionAndRepoCalls++
 	for _, wt := range s.worktrees {
 		if wt.SessionID == sessionID && wt.RepositoryID == repoID && wt.BranchSlug == branchSlug && wt.Status == StatusActive {
 			return wt, nil
 		}
 	}
 	return nil, nil
+}
+
+func TestManagerCreateWithoutAdmissionFailsBeforeStoreOrGitAccess(t *testing.T) {
+	store := newMockStore()
+	mgr, err := NewManager(newTestConfig(t), store, newTestLogger())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// Production composition must set this explicitly. Clear the test factory
+	// admission to prove the public Create boundary remains fail-closed.
+	mgr.admission = nil
+	nonexistentRepo := filepath.Join(t.TempDir(), "must-not-be-inspected")
+	_, err = mgr.Create(context.Background(), CreateRequest{
+		TaskID:         "task-no-admission",
+		SessionID:      "session-no-admission",
+		RepositoryID:   "repository-no-admission",
+		RepositoryPath: nonexistentRepo,
+		BaseBranch:     "main",
+		TaskDirName:    "task-no-admission",
+		RepoName:       "repository-no-admission",
+	})
+	if err == nil || !strings.Contains(err.Error(), "admission is not configured") {
+		t.Fatalf("Create error = %v, want missing-admission failure", err)
+	}
+	if store.getBySessionAndRepoCalls != 0 {
+		t.Fatalf("store reuse lookups = %d, want zero before admission", store.getBySessionAndRepoCalls)
+	}
+	if _, statErr := os.Stat(nonexistentRepo); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("repository path changed or inspected through creation: stat error = %v", statErr)
+	}
 }
 
 func TestNewManager(t *testing.T) {
