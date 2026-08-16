@@ -265,55 +265,56 @@ type Repos struct {
 
 // Service provides task business logic
 type Service struct {
-	workspaces                  repository.WorkspaceRepository
-	tasks                       repository.TaskRepository
-	taskRepos                   repository.TaskRepoRepository
-	workspaceFolders            repository.TaskWorkspaceFolderRepository
-	workflows                   repository.WorkflowRepository
-	messages                    repository.MessageRepository
-	attachments                 repository.AttachmentRepository
-	turns                       repository.TurnRepository
-	sessions                    repository.SessionRepository
-	gitSnapshots                repository.GitSnapshotRepository
-	repoEntities                repository.RepositoryEntityRepository
-	repositoryCleanup           repository.RepositoryCleanupRepository
-	executors                   repository.ExecutorRepository
-	environments                repository.EnvironmentRepository
-	taskEnvironments            repository.TaskEnvironmentRepository
-	reviews                     repository.ReviewRepository
-	resourceCleanups            repository.TaskResourceCleanupRepository
-	statusSummaries             repository.TaskStatusSummaryRepository
-	attachmentSvc               *AttachmentService
-	statusSummaryPRs            TaskStatusSummaryPRReader
-	queuedPromptCounter         QueuedPromptCounter
-	eventBus                    bus.EventBus
-	logger                      *logger.Logger
-	discoveryConfig             RepositoryDiscoveryConfig
-	worktreeCleanup             WorktreeCleanup
-	physicalDeleteAdmission     physicaldelete.Admission
-	executionStopper            TaskExecutionStopper
-	rowLivenessProber           TaskRowLivenessProber
-	contextWindowResetter       func(context.Context, string) error
-	cleanupActivity             TaskResourceCleanupActivityGate
-	branchMaterializer          BranchMaterializer
-	workspaceSourceMaterializer WorkspaceSourceMaterializer
-	workspaceSourceLocksMu      sync.Mutex
-	workspaceSourceLocks        map[string]*sync.Mutex
-	providerProber              ProviderDefaultBranchProber
-	gitArchiveCapture           GitArchiveCapture
-	workflowStepCreator         WorkflowStepCreator
-	workspaceBootstrapper       WorkspaceBootstrapper
-	workflowStepGetter          WorkflowStepGetter
-	startStepResolver           StartStepResolver
-	stepHistoryRecorder         StepHistoryRecorder
-	prTaskResolver              PRTaskResolver
-	quickChatDir                string // Directory for quick-chat workspaces (e.g., ~/.kandev/quick-chat)
-	branchFetcher               *branchFetcher
-	envDestroyer                EnvironmentDestroyer
-	sessionRunningChecker       SessionRunningChecker
-	remoteBranchLister          RemoteBranchLister
-	repoCloneLocation           RepoCloneLocation
-	blockers                    BlockerRepository
+	workspaces                         repository.WorkspaceRepository
+	tasks                              repository.TaskRepository
+	taskRepos                          repository.TaskRepoRepository
+	workspaceFolders                   repository.TaskWorkspaceFolderRepository
+	workflows                          repository.WorkflowRepository
+	messages                           repository.MessageRepository
+	attachments                        repository.AttachmentRepository
+	turns                              repository.TurnRepository
+	sessions                           repository.SessionRepository
+	gitSnapshots                       repository.GitSnapshotRepository
+	repoEntities                       repository.RepositoryEntityRepository
+	repositoryCleanup                  repository.RepositoryCleanupRepository
+	executors                          repository.ExecutorRepository
+	environments                       repository.EnvironmentRepository
+	taskEnvironments                   repository.TaskEnvironmentRepository
+	reviews                            repository.ReviewRepository
+	resourceCleanups                   repository.TaskResourceCleanupRepository
+	archivedResourceTerminalRepository ArchivedResourceTerminalRepository
+	statusSummaries                    repository.TaskStatusSummaryRepository
+	attachmentSvc                      *AttachmentService
+	statusSummaryPRs                   TaskStatusSummaryPRReader
+	queuedPromptCounter                QueuedPromptCounter
+	eventBus                           bus.EventBus
+	logger                             *logger.Logger
+	discoveryConfig                    RepositoryDiscoveryConfig
+	worktreeCleanup                    WorktreeCleanup
+	physicalDeleteAdmission            physicaldelete.Admission
+	executionStopper                   TaskExecutionStopper
+	rowLivenessProber                  TaskRowLivenessProber
+	contextWindowResetter              func(context.Context, string) error
+	cleanupActivity                    TaskResourceCleanupActivityGate
+	branchMaterializer                 BranchMaterializer
+	workspaceSourceMaterializer        WorkspaceSourceMaterializer
+	workspaceSourceLocksMu             sync.Mutex
+	workspaceSourceLocks               map[string]*sync.Mutex
+	providerProber                     ProviderDefaultBranchProber
+	gitArchiveCapture                  GitArchiveCapture
+	workflowStepCreator                WorkflowStepCreator
+	workspaceBootstrapper              WorkspaceBootstrapper
+	workflowStepGetter                 WorkflowStepGetter
+	startStepResolver                  StartStepResolver
+	stepHistoryRecorder                StepHistoryRecorder
+	prTaskResolver                     PRTaskResolver
+	quickChatDir                       string // Directory for quick-chat workspaces (e.g., ~/.kandev/quick-chat)
+	branchFetcher                      *branchFetcher
+	envDestroyer                       EnvironmentDestroyer
+	sessionRunningChecker              SessionRunningChecker
+	remoteBranchLister                 RemoteBranchLister
+	repoCloneLocation                  RepoCloneLocation
+	blockers                           BlockerRepository
 	// dependencyEdgeMu serializes validate-then-insert for dependency edges so
 	// two concurrent adds cannot each pass a cycle walk that predates the
 	// other's insert and commit a cycle between them.
@@ -443,6 +444,14 @@ func (s *Service) SetWorktreeCleanup(cleanup WorktreeCleanup) {
 // entire managed-root authority shares one lock domain.
 func (s *Service) SetPhysicalDeleteAdmission(admission physicaldelete.Admission) {
 	s.physicalDeleteAdmission = admission
+}
+
+// SetArchivedResourceTerminalRepository wires the strict DB-only terminal
+// repository used by the three Task06 actions. Optional in tests; production
+// backendapp wires this through the same TaskResourceCleanupRepository the
+// rest of the service uses.
+func (s *Service) SetArchivedResourceTerminalRepository(repo ArchivedResourceTerminalRepository) {
+	s.archivedResourceTerminalRepository = repo
 }
 
 func (s *Service) setCleanupDoneForTestHook(ch chan struct{}) {

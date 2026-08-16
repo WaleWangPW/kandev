@@ -89,6 +89,12 @@ func (s *Service) Execute(ctx context.Context, request Request) (Receipt, error)
 		if err := s.verifyAbsentTargetRelease(normalized, snapshot); err != nil {
 			return withReason(receipt, reasonForError(err)), err
 		}
+		// RootPolicy still gates release: a managed root never accepts an
+		// absent-target release, even though the executor is no-op. The
+		// release admission must fail closed against any root-protected path.
+		if s.root.protects(normalized.Resource) {
+			return withReason(receipt, DenialProtected), ErrProtectedResource
+		}
 		return s.executeUnavailable(ctx, normalized, receipt)
 	}
 	if s.root.protects(normalized.Resource) {

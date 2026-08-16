@@ -128,6 +128,9 @@ type ArchivedResourceTerminalRepository interface {
 }
 
 func (s *Service) archivedResourceTerminalRepo() (ArchivedResourceTerminalRepository, error) {
+	if s.archivedResourceTerminalRepository != nil {
+		return s.archivedResourceTerminalRepository, nil
+	}
 	if s.resourceCleanups == nil {
 		return nil, ErrArchivedResourceReleaseUnavailable
 	}
@@ -305,9 +308,10 @@ func (s *Service) invokeAbsentTargetAdmission(
 	req ArchivedResourceReleaseRequest,
 ) error {
 	// The release request binds to the retained anchor by its canonical
-	// identity (operation_id, snapshot_digest, etc.). The inventory uses the
-	// same identity to locate the validated anchor and prove the path's
-	// absence; any drift or unknown anchor state fails the admission closed.
+	// identity (operation_id, snapshot_digest, etc.). The admission
+	// identifies the anchor by its worktree_id (Resource.ID) so the receipt
+	// observes the v0.88 ResourceID convention; every other identity field
+	// is verified inside the sealed admission.
 	managedRootKey, err := physicaldelete.ComputeAnchorManagedRootKey(req.AnchorWorktreePath)
 	if err != nil {
 		return err
@@ -319,7 +323,7 @@ func (s *Service) invokeAbsentTargetAdmission(
 		Force:     false,
 		Resource: physicaldelete.Resource{
 			Kind: physicaldelete.ResourceKindEnvironmentRepo,
-			ID:   req.AnchorOperationID,
+			ID:   req.AnchorWorktreeID,
 			Path: req.AnchorWorktreePath,
 		},
 		AnchorIdentity: physicaldelete.AnchorIdentity{

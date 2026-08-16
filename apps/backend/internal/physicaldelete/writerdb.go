@@ -157,7 +157,7 @@ func decodeCleanupAnchorRow(row sqlCleanupJob) (CleanupAnchor, error) {
 			State:          row.State,
 			SnapshotDigest: row.SnapshotDigest,
 		}, nil
-	case "archived_resource_reconcile":
+	case "reconcile", "archived_resource_reconcile":
 		return decodeRetainedReconcileAnchor(row)
 	default:
 		return CleanupAnchor{}, fmt.Errorf("%w: unknown cleanup trigger %q", ErrUnknownInventory, row.Trigger)

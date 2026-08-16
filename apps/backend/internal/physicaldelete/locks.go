@@ -152,6 +152,12 @@ func canonicalLockPaths(paths []string) ([]string, error) {
 	return result, nil
 }
 
+// CanonicalLockPathForTest exposes canonicalLockPath for tests that need
+// to seed fixtures with the same canonical form the admission will produce.
+func CanonicalLockPathForTest(path string) (string, error) {
+	return canonicalLockPath(path)
+}
+
 func canonicalLockPath(path string) (string, error) {
 	if path == "" || strings.IndexByte(path, 0) >= 0 {
 		return "", fmt.Errorf("empty or NUL path")

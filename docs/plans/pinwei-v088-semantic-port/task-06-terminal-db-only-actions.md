@@ -244,7 +244,76 @@ shipped `archivedResourceReconcile` / `archivedResourcePhysicalRelease` flags
 remain default-off; no route, runtime, or live action was started; no live DB,
 API, or remote server was contacted.
 
-### Composition fix receipt (counterexample response)
+### Terminal action fix receipt (counterexample response)
+
+The previous composition-fix candidate (`eb90182`) routed the release
+admission through `physicaldelete.New` but:
+1. the receipt's `ResourceID` carried the anchor's `operation_id` instead
+   of the v0.88-conventional `worktree_id`;
+2. the release path skipped the central `RootPolicy` and would accept a
+   root-protected path;
+3. no test exercised the service end-to-end through the real
+   `physicaldelete.New` + `SQLInventorySource` composition to verify the
+   exact-bound anchor identity, the CAS path, and the no-op
+   `Mutated=false` / `Executor=ExecutorNone` contract.
+
+This successor closes all three gaps:
+
+- **Inventory loader** (`apps/backend/internal/physicaldelete/writerdb.go`)
+  - Accepts both `reconcile` (`models.TaskResourceCleanupTriggerReconcile`,
+    the canonical v0.88 trigger value Task05 writes) and the historical
+    `archived_resource_reconcile` (used by the existing
+    `TestSQLInventorySourceRejectsUnvalidatedReconcileAndFutureCleanup`),
+    so the Task05 v2/v3 seed pattern and the canonical writer both load.
+- **Service** (`apps/backend/internal/task/service`)
+  - `ReleaseAbsentArchivedResourceTarget` sends the anchor's `worktree_id`
+    (not `operation_id`) as `physicaldelete.Request.Resource.ID` so the
+    receipt's `ResourceID` follows the v0.88 convention.
+  - `verifyAbsentTargetRelease` consults the configured `RootPolicy` after
+    the inventory absence proof succeeds, so a root-protected release
+    path fails closed with `ErrProtectedResource` (mapped to
+    `ErrArchivedResourceReleaseAdmissionDenied` at the service layer).
+- **Composition** (`apps/backend/internal/backendapp/worktree.go`)
+  - Unchanged; the same `physicaldelete.New` instance continues to be
+    shared with the task service.
+
+- **Tests** (`apps/backend/internal/task/service/resource_cleanup_terminal_release_real_test.go`)
+  - Real-composition fixture builds an in-memory SQLite writer DB with the
+    full v0.88 schema, seeds a Task05-built retained v2 anchor using the
+    canonical `models.TaskResourceCleanupTriggerReconcile` trigger, and
+    wires the same `physicaldelete.New(physicaldelete.Config{
+    Inventory: NewSQLInventorySource(db)})` instance into the service via
+    `SetPhysicalDeleteAdmission` plus a `terminalReleaseCASRepo` that
+    performs the exact DB-only CAS.
+  - `TestTerminalReleaseRealCompositionNoOpSucceeds` proves the success
+    path: the admission passes, the CAS flips the anchor from `retained`
+    to `released` with the canonical `revision=1` / `completed_at` /
+    `managed_root_key` fields byte-equal, and the result carries the
+    exact-bound metadata.
+  - `TestTerminalReleaseReceiptResourceIDIsWorktreeID` exercises the sealed
+    admission directly and verifies `receipt.ResourceID` is the
+    `worktree_id`, not the `operation_id`.
+  - `TestTerminalReleaseRootPolicyRejectsRootProtectedPath` constructs a
+    `RootPolicy` whose only protected path equals the release target, and
+    asserts both the central admission and the service-level call fail
+    closed.
+  - `TestTerminalReleaseExactBoundIdentityMismatchFails` walks four
+    identity-drift mutations (operation_id, worktree_id, digest,
+    task_id) and verifies each fails closed through the real
+    composition.
+
+### Re-verification (all `env -u KANDEV_TEST_POSTGRES_DSN`, from `apps/backend`)
+
+```text
+$ go test ./internal/task/models ./internal/task/repository/sqlite \
+        ./internal/task/service ./internal/task/handlers ./internal/physicaldelete \
+        -run 'PendingMove|ReleaseAbsent|EnvironmentRetirement|Inventory' -count=1
+ok  internal/task/models             0.680s
+ok  internal/task/repository/sqlite   0.853s
+ok  internal/task/service            0.962s
+ok  internal/task/handlers           1.258s
+ok  internal/physicaldelete          0.644s
+```
 
 The previous candidate (`225c022`) routed `ReleaseAbsentArchivedResourceTarget`
 through a sealed `physicaldelete.Admission`, but the real writer inventory
