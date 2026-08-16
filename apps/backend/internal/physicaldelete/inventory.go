@@ -18,10 +18,19 @@ type ProtectedResource struct {
 
 type CleanupAnchor struct {
 	ID              string
+	OperationID     string
 	State           string
 	Path            string
+	RepositoryID    string
+	Branch          string
+	HeadOID         string
 	SnapshotDigest  string
 	SnapshotVersion int
+	ResourceKind    string
+	ResourceID      string
+	TaskID          string
+	ManagedRootKey  string
+	AnchorRevision  int
 	validated       bool
 }
 
@@ -56,6 +65,8 @@ type inventorySnapshot struct {
 	digest     string
 	paths      []string
 	commonDirs []string
+	anchors    []CleanupAnchor
+	inventory  Inventory
 }
 
 func (inventory Inventory) validate() (inventorySnapshot, error) {
@@ -135,6 +146,8 @@ func (inventory Inventory) validate() (inventorySnapshot, error) {
 		digest:     hex.EncodeToString(sum),
 		paths:      compactPaths(paths),
 		commonDirs: compactPaths(commonDirs),
+		anchors:    append([]CleanupAnchor(nil), inventory.CleanupAnchors...),
+		inventory:  inventory,
 	}, nil
 }
 
@@ -215,13 +228,21 @@ func validateProtectedResource(row ProtectedResource) error {
 }
 
 func validateCleanupAnchor(anchor CleanupAnchor) error {
-	// Task 05 owns the canonical v2/v3 decoder and is the only layer allowed to
-	// mark a versioned row validated. Until that validator is wired, every
-	// reconcile-shaped row remains fail-closed rather than being inferred from
-	// generic cleanup JSON.
-	if !anchor.validated || anchor.ID == "" || anchor.SnapshotVersion <= 0 ||
-		anchor.SnapshotDigest == "" || anchor.Path == "" {
+	// The v2/v3 decoder (Task 05) is the only layer allowed to mark a row
+	// validated. Every validated anchor must carry the canonical identity
+	// fields the release admission binds to; unknown / malformed rows
+	// remain fail-closed.
+	if !anchor.validated {
 		return fmt.Errorf("%w: strict cleanup anchor is not validated", ErrInventoryIncomplete)
+	}
+	if anchor.ID == "" || anchor.OperationID == "" || anchor.TaskID == "" ||
+		anchor.RepositoryID == "" || anchor.Branch == "" || anchor.HeadOID == "" ||
+		anchor.ManagedRootKey == "" || anchor.Path == "" ||
+		anchor.SnapshotDigest == "" || anchor.SnapshotVersion <= 0 {
+		return fmt.Errorf("%w: strict cleanup anchor identity is incomplete", ErrInventoryIncomplete)
+	}
+	if anchor.AnchorRevision < 0 {
+		return fmt.Errorf("%w: anchor revision is negative", ErrInventoryIncomplete)
 	}
 	return nil
 }

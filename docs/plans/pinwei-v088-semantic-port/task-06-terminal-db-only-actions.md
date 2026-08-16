@@ -243,3 +243,115 @@ PostgreSQL runtime remains `NOT_RUN`; no new dependency was installed; the
 shipped `archivedResourceReconcile` / `archivedResourcePhysicalRelease` flags
 remain default-off; no route, runtime, or live action was started; no live DB,
 API, or remote server was contacted.
+
+### Composition fix receipt (counterexample response)
+
+The previous candidate (`225c022`) routed `ReleaseAbsentArchivedResourceTarget`
+through a sealed `physicaldelete.Admission`, but the real writer inventory
+loader (`SQLInventorySource.Load`) returned `ErrInventoryIncomplete` for any
+row with `trigger='archived_resource_reconcile'` — meaning the Task05 v2/v3
+anchor decoder was never wired into the inventory. Any legal release
+(which requires a retained v2 anchor) was therefore fail-closed by
+inventory load before admission ran. The mock-only tests in the previous
+candidate used an empty cleanup-anchor set and never exercised the real
+composition path.
+
+This successor commit closes that gap end-to-end:
+
+- **Inventory** (`apps/backend/internal/physicaldelete`)
+  - `selectCleanupAnchors` now decodes each `task_resource_cleanup_jobs`
+    row via the Task05 canonical decoder. Generic cleanup rows
+    (`archive`, `delete`, …) produce unvalidated anchors that never become
+    release candidates. `archived_resource_reconcile` rows are routed
+    through `decodeRetainedReconcileAnchor`, which calls
+    `models.DecodeArchivedResourceReconcileSnapshot` (v2) or
+    `models.DecodeArchivedResourceGroupReconcileSnapshot` (v3) and verifies
+    every redundant header column. Any decode failure or column drift fails
+    the entire inventory closed.
+  - `CleanupAnchor` carries the full canonical identity (`OperationID`,
+    `SnapshotDigest`, `ResourceKind`, `ResourceID`, `TaskID`,
+    `ManagedRootKey`, `AnchorRevision`, `Path`, `RepositoryID`, `Branch`,
+    `HeadOID`, `SnapshotVersion`) so the release admission can perform an
+    exact-bound match.
+  - `inventory.validate` requires every validated anchor to carry that
+    identity; unknown / malformed rows fail closed.
+  - `Request.AnchorIdentity` is a new struct that the release admission
+    verifies field-by-field against the loaded anchor. `ComputeAnchorManagedRootKey`
+    derives the canonical managed root key from the worktree path.
+  - `Execute` short-circuits `verifyAnchors` for `ActionReleaseAbsent`
+    (the absence is proven via the inventory, not Lstat) and routes through
+    a new `verifyAbsentTargetRelease` that:
+    1. finds the unique validated retained anchor whose
+       `OperationID` / `SnapshotDigest` / `ResourceKind` / `ResourceID` /
+       `TaskID` / `ManagedRootKey` / `SnapshotVersion` match `AnchorIdentity`;
+    2. verifies the target path is absent from each non-anchor inventory
+       source (`EnvironmentRepositories`, `ExecutorWorktrees`,
+       `TaskEnvironments`, `WorkspaceGroups`, `QuarantineEntries`) by
+       walking the per-source slices so deduped path collisions cannot hide
+       a remaining reference;
+    3. verifies the requested `CommonDir` is not in any non-anchor
+       common-dir.
+  - `inventorySnapshot` now carries the full `Inventory` so the release
+    admission can iterate every source slice independently.
+
+- **Service** (`apps/backend/internal/task/service`)
+  - `ReleaseAbsentArchivedResourceTarget` populates `physicaldelete.AnchorIdentity`
+    with every redundant header field so the central admission has the full
+    canonical identity to bind. All other fields are unchanged.
+
+- **Tests** (`apps/backend/internal/physicaldelete/composer_release_test.go`)
+  - Real-composition fixture: builds an in-memory SQLite writer DB with the
+    full v0.88 schema, seeds a Task05-built retained v2 anchor, and runs
+    `physicaldelete.New(physicaldelete.Config{Inventory: NewSQLInventorySource(db)})`
+    — the exact path `backendapp.provideWorktreeManager` uses.
+  - Success: `TestRealCompositionReleaseAdmitsExactBoundRetainedAnchor`
+    proves `Mutated=false`, `Executor=ExecutorNone`, `Action=ActionReleaseAbsent`,
+    non-empty `InventoryDigest`, and a non-empty canonical lock entry.
+  - Zero-write failure cases (all return their declared typed error):
+    - `…OnExtraRepositoryReference` — `task_environment_repos.worktree_path`
+      still points at the target.
+    - `…OnExecutorReference` — `executors_running` still points at the target.
+    - `…OnUnknownWorkspaceState` — `task_workspace_groups.cleanup_status` is
+      not one of the four accepted states.
+    - `…OnMalformedV2` — v2 anchor with invalid snapshot bytes fails inventory
+      decode, so the whole load is fail-closed.
+    - `…OnDriftDigest` — request digest does not match anchor digest.
+    - `…OnUnknownOperationID` — request binds to a non-existent anchor.
+    - `…OnWrongResourceKind` — request resource_kind does not match anchor.
+    - `…OnAnchorNotRetained` — anchor state mutated away from `retained`.
+    - `…OnWrongAnchorVersion` — request version does not match anchor.
+    - `…OnEmptyAnchorIdentity` — request omits anchor identity.
+    - `…OnChildren` — request carries children (release must be leaf-only).
+  - Zero durable side effect:
+    `TestRealCompositionReleaseLeavesAnchorAndTargetUntouched` verifies the
+    anchor row's `state` and `completed_at` are byte-equal before and after
+    the admission, and `task_environment_repos` row count is unchanged.
+
+### Re-verification (all `env -u KANDEV_TEST_POSTGRES_DSN`, from `apps/backend`)
+
+```text
+$ go test ./internal/task/models ./internal/task/repository/sqlite \
+        ./internal/task/service ./internal/task/handlers ./internal/physicaldelete \
+        -run 'PendingMove|ReleaseAbsent|EnvironmentRetirement|Inventory' -count=1
+ok  internal/task/models             1.246s
+ok  internal/task/repository/sqlite   1.156s
+ok  internal/task/service            1.440s
+ok  internal/task/handlers           1.427s
+ok  internal/physicaldelete          1.735s
+
+$ go test -race ./internal/task/repository/sqlite ./internal/task/service \
+        -run 'PendingMove|ReleaseAbsent|EnvironmentRetirement' -count=1
+ok  internal/task/repository/sqlite   2.293s
+ok  internal/task/service            2.303s
+
+$ go vet ./internal/task/... ./internal/physicaldelete
+(no output)
+
+$ go build ./...
+(no output)
+```
+
+PostgreSQL runtime remains `NOT_RUN`; no new dependency was installed; the
+shipped `archivedResourceReconcile` / `archivedResourcePhysicalRelease` flags
+remain default-off; no route, runtime, or live action was started; no live DB,
+API, or remote server was contacted.

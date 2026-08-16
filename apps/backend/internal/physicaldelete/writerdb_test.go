@@ -33,7 +33,7 @@ func TestSQLInventorySourceLoadsV088ProtectionSources(t *testing.T) {
 		`INSERT INTO executors_running VALUES ('exec-row', 'running', ?)`, paths[2],
 		`INSERT INTO task_workspace_groups VALUES ('group-row', 'cleanup_pending', ?)`, paths[3],
 		`INSERT INTO storage_quarantine_entries VALUES ('quarantine-row', 'quarantined', ?, ?)`, paths[4], paths[5],
-		`INSERT INTO task_resource_cleanup_jobs VALUES ('cleanup-row', 'archive', 'pending', '{}')`,
+		`INSERT INTO task_resource_cleanup_jobs VALUES ('cleanup-row', 'operation-test', 'archive', 'pending', '{}', 0, '', '', '', '', 0, NULL)`,
 	)
 
 	inventory, err := NewSQLInventorySource(db).Load(context.Background())
@@ -59,7 +59,7 @@ func TestSQLInventorySourceAcceptsOnlyKnownGenericCleanupMatrix(t *testing.T) {
 			t.Run(trigger+"/"+state, func(t *testing.T) {
 				db := openInventoryTestDB(t)
 				createInventorySchema(t, db)
-				_, err := db.Exec(`INSERT INTO task_resource_cleanup_jobs VALUES (?, ?, ?, '{}')`, "cleanup-row", trigger, state)
+				_, err := db.Exec(`INSERT INTO task_resource_cleanup_jobs VALUES (?, 'operation-test', ?, ?, '{}', 0, '', '', '', '', 0, NULL)`, "cleanup-row", trigger, state)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -90,7 +90,7 @@ func TestSQLInventorySourceRejectsUnvalidatedReconcileAndFutureCleanup(t *testin
 		t.Run(tt.name, func(t *testing.T) {
 			db := openInventoryTestDB(t)
 			createInventorySchema(t, db)
-			_, err := db.Exec(`INSERT INTO task_resource_cleanup_jobs VALUES ('cleanup-row', ?, ?, '{}')`, tt.trigger, tt.state)
+			_, err := db.Exec(`INSERT INTO task_resource_cleanup_jobs VALUES ('cleanup-row', 'operation-test', ?, ?, '{}', 0, '', '', '', '', 0, NULL)`, tt.trigger, tt.state)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -158,7 +158,7 @@ func createInventorySchema(t *testing.T, db *sqlx.DB) {
 		`CREATE TABLE executors_running (id TEXT, status TEXT, worktree_path TEXT)`,
 		`CREATE TABLE task_workspace_groups (id TEXT, cleanup_status TEXT, materialized_path TEXT)`,
 		`CREATE TABLE storage_quarantine_entries (id TEXT, state TEXT, original_path TEXT, quarantine_path TEXT)`,
-		`CREATE TABLE task_resource_cleanup_jobs (id TEXT, trigger TEXT, state TEXT, resource_snapshot TEXT)`,
+		`CREATE TABLE task_resource_cleanup_jobs (id TEXT, operation_id TEXT, trigger TEXT, state TEXT, resource_snapshot TEXT, snapshot_version INTEGER, snapshot_digest TEXT, resource_kind TEXT, resource_id TEXT, managed_root_key TEXT, anchor_revision INTEGER, active_scope_key TEXT)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {

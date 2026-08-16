@@ -5,8 +5,11 @@ package physicaldelete
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -155,8 +158,42 @@ type Request struct {
 	Resource  Resource
 	Children  []Resource
 	Identity  ProvisionalIdentity
+	// AnchorIdentity is the canonical identity of the retained v2/v3
+	// reconcile anchor the request binds to. It is consumed only by
+	// ActionReleaseAbsent. Every field must match the decoded snapshot or
+	// the release admission denies the request.
+	AnchorIdentity AnchorIdentity
 
 	lease *ProvisionalLease
+}
+
+// AnchorIdentity is the exact-bound identity the release admission verifies
+// against the inventory. OperationID is the retained anchor's canonical
+// operation_id; Digest is its reconcile snapshot digest; the remaining
+// fields are the persisted identity columns.
+type AnchorIdentity struct {
+	OperationID     string
+	SnapshotDigest  string
+	ResourceKind    string
+	ResourceID      string
+	TaskID          string
+	ManagedRootKey  string
+	SnapshotVersion int
+}
+
+// ComputeAnchorManagedRootKey derives the canonical managed-root key from a
+// worktree path. Both the model layer and the inventory agree on this
+// derivation; a mismatch is treated as an invalid release request.
+func ComputeAnchorManagedRootKey(worktreePath string) (string, error) {
+	if worktreePath == "" {
+		return "", errors.New("physicaldelete: empty anchor worktree path")
+	}
+	if !filepath.IsAbs(worktreePath) || filepath.Clean(worktreePath) != worktreePath ||
+		filepath.Dir(worktreePath) == worktreePath {
+		return "", errors.New("physicaldelete: anchor worktree path is not canonical")
+	}
+	sum := sha256.Sum256([]byte(worktreePath))
+	return "git_worktree:" + hex.EncodeToString(sum[:]), nil
 }
 
 type CreateRequest struct {

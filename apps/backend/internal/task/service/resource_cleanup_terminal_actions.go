@@ -304,6 +304,14 @@ func (s *Service) invokeAbsentTargetAdmission(
 	ctx context.Context,
 	req ArchivedResourceReleaseRequest,
 ) error {
+	// The release request binds to the retained anchor by its canonical
+	// identity (operation_id, snapshot_digest, etc.). The inventory uses the
+	// same identity to locate the validated anchor and prove the path's
+	// absence; any drift or unknown anchor state fails the admission closed.
+	managedRootKey, err := physicaldelete.ComputeAnchorManagedRootKey(req.AnchorWorktreePath)
+	if err != nil {
+		return err
+	}
 	physicalRequest := physicaldelete.Request{
 		Action:    physicaldelete.ActionReleaseAbsent,
 		Authority: physicaldelete.AuthorityAdmin,
@@ -311,8 +319,17 @@ func (s *Service) invokeAbsentTargetAdmission(
 		Force:     false,
 		Resource: physicaldelete.Resource{
 			Kind: physicaldelete.ResourceKindEnvironmentRepo,
-			ID:   req.AnchorWorktreeID,
+			ID:   req.AnchorOperationID,
 			Path: req.AnchorWorktreePath,
+		},
+		AnchorIdentity: physicaldelete.AnchorIdentity{
+			OperationID:     req.AnchorOperationID,
+			SnapshotDigest:  req.AnchorDigest,
+			ResourceKind:    "git_worktree",
+			ResourceID:      req.AnchorWorktreeID,
+			TaskID:          req.AnchorTaskID,
+			ManagedRootKey:  managedRootKey,
+			SnapshotVersion: 2,
 		},
 	}
 	receipt, err := s.physicalDeleteAdmission.Execute(ctx, physicalRequest)

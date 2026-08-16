@@ -80,6 +80,17 @@ func (s *Service) Execute(ctx context.Context, request Request) (Receipt, error)
 			return withReason(receipt, reasonForError(err)), err
 		}
 	}
+	// ActionReleaseAbsent is the only path that mutates the durable anchor
+	// state without touching the filesystem. verifyAnchors would otherwise
+	// reject a request whose path happens to still exist (the absence is
+	// proven via the inventory, not via Lstat). Skip the anchor Lstat
+	// comparison and let the inventory prove the absence instead.
+	if normalized.Action == ActionReleaseAbsent {
+		if err := s.verifyAbsentTargetRelease(normalized, snapshot); err != nil {
+			return withReason(receipt, reasonForError(err)), err
+		}
+		return s.executeUnavailable(ctx, normalized, receipt)
+	}
 	if s.root.protects(normalized.Resource) {
 		return withReason(receipt, DenialProtected), ErrProtectedResource
 	}
@@ -92,6 +103,100 @@ func (s *Service) Execute(ctx context.Context, request Request) (Receipt, error)
 		return withReason(receipt, DenialProtected), ErrProtectedResource
 	}
 	return s.executeUnavailable(ctx, normalized, receipt)
+}
+
+// verifyAbsentTargetRelease proves the requested release target binds to
+// exactly one validated retained anchor in the writer-DB inventory, AND the
+// target's path is absent from every non-anchor inventory source. Any
+// overlap, drift, unknown anchor state, or identity mismatch fails closed.
+func (s *Service) verifyAbsentTargetRelease(normalized Request, snapshot inventorySnapshot) error {
+	if len(normalized.Children) != 0 {
+		return fmt.Errorf("%w: release admission has no children", ErrInvalidRequest)
+	}
+	if normalized.AnchorIdentity.OperationID == "" {
+		return fmt.Errorf("%w: release admission requires anchor identity", ErrInvalidRequest)
+	}
+	anchor, err := findRetainedReleaseAnchor(normalized, snapshot)
+	if err != nil {
+		return err
+	}
+	if anchor.Path != normalized.Resource.Path {
+		return fmt.Errorf("%w: anchor path does not match release request", ErrProtectedResource)
+	}
+	if anchor.SnapshotVersion != normalized.AnchorIdentity.SnapshotVersion {
+		return fmt.Errorf("%w: anchor snapshot version drift", ErrProtectedResource)
+	}
+	// Walk every non-anchor inventory source independently. Deduplication
+	// in compactPaths collapses duplicate paths to one entry, which would
+	// hide a remaining reference sharing the anchor's path; iterate the
+	// per-source slices to ensure each source is empty for this path.
+	for _, r := range snapshot.inventory.EnvironmentRepositories {
+		if r.Path == anchor.Path {
+			return ErrProtectedResource
+		}
+	}
+	for _, r := range snapshot.inventory.ExecutorWorktrees {
+		if r.Path == anchor.Path {
+			return ErrProtectedResource
+		}
+	}
+	for _, r := range snapshot.inventory.TaskEnvironments {
+		if r.Path == anchor.Path {
+			return ErrProtectedResource
+		}
+	}
+	for _, r := range snapshot.inventory.WorkspaceGroups {
+		if r.Path == anchor.Path {
+			return ErrProtectedResource
+		}
+	}
+	for _, r := range snapshot.inventory.QuarantineEntries {
+		if r.Path == anchor.Path || r.RootPath == anchor.Path {
+			return ErrProtectedResource
+		}
+	}
+	for _, c := range snapshot.commonDirs {
+		if normalized.Resource.CommonDir != "" && normalized.Resource.CommonDir == c {
+			return ErrProtectedResource
+		}
+	}
+	return nil
+}
+
+// findRetainedReleaseAnchor locates the unique validated retained anchor
+// whose canonical identity matches the release request. Every identity field
+// in AnchorIdentity must match the decoded snapshot; any drift, missing
+// row, unknown state, or unknown version fails the admission closed.
+func findRetainedReleaseAnchor(normalized Request, snapshot inventorySnapshot) (CleanupAnchor, error) {
+	want := normalized.AnchorIdentity
+	if want.SnapshotVersion != 2 && want.SnapshotVersion != 3 {
+		return CleanupAnchor{}, fmt.Errorf("%w: release admission only binds v2/v3 anchors", ErrInvalidRequest)
+	}
+	for _, anchor := range snapshot.anchors {
+		if !anchor.validated {
+			continue
+		}
+		if anchor.OperationID != want.OperationID {
+			continue
+		}
+		if anchor.SnapshotDigest != want.SnapshotDigest {
+			return CleanupAnchor{}, fmt.Errorf("%w: anchor snapshot digest drift", ErrProtectedResource)
+		}
+		if anchor.State != "retained" {
+			return CleanupAnchor{}, fmt.Errorf("%w: anchor %q is in state %q, not retained", ErrProtectedResource, anchor.OperationID, anchor.State)
+		}
+		if anchor.SnapshotVersion != want.SnapshotVersion {
+			return CleanupAnchor{}, fmt.Errorf("%w: anchor %q version drift", ErrProtectedResource, anchor.OperationID)
+		}
+		if anchor.ResourceKind != want.ResourceKind ||
+			anchor.ResourceID != want.ResourceID ||
+			anchor.TaskID != want.TaskID ||
+			anchor.ManagedRootKey != want.ManagedRootKey {
+			return CleanupAnchor{}, fmt.Errorf("%w: anchor %q identity drift", ErrProtectedResource, anchor.OperationID)
+		}
+		return anchor, nil
+	}
+	return CleanupAnchor{}, ErrProtectedResource
 }
 
 func rootPolicy(policy *RootPolicy) RootPolicy {
