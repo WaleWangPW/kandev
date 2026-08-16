@@ -117,7 +117,7 @@ func NewTestServer(t *testing.T) *TestServer {
 	taskhandlers.RegisterWorkspaceRoutes(router, gateway.Dispatcher, taskSvc, log)
 	taskhandlers.RegisterWorkflowRoutes(router, gateway.Dispatcher, taskSvc, workflowSvc, log)
 	planService := taskservice.NewPlanService(taskRepo, eventBus, log)
-	taskhandlers.RegisterTaskRoutes(router, gateway.Dispatcher, taskSvc, nil, taskRepo, planService, log)
+	taskhandlers.RegisterTaskRoutes(router, gateway.Dispatcher, taskSvc, nil, taskRepo, planService, log, false)
 	taskhandlers.RegisterRepositoryRoutes(router, gateway.Dispatcher, taskSvc, log)
 	taskhandlers.RegisterExecutorRoutes(router, gateway.Dispatcher, taskSvc, log)
 	taskhandlers.RegisterEnvironmentRoutes(router, gateway.Dispatcher, taskSvc, log)

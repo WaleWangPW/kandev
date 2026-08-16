@@ -662,10 +662,14 @@ func (s *HandoffService) UnarchiveTaskTree(ctx context.Context, rootID string) (
 	// Unarchive shallow→deep so the root's restored state is visible
 	// before children are queried by anyone watching the bus.
 	for _, id := range all {
-		if err := s.cancelArchiveResourceCleanup(ctx, id); err != nil {
-			return out, fmt.Errorf("cancel archive cleanup %s: %w", id, err)
+		task, taskErr := s.tasks.GetTask(ctx, id)
+		if taskErr != nil {
+			return out, fmt.Errorf("read archive generation %s: %w", id, taskErr)
 		}
-		ok, err := s.tasks.UnarchiveTaskByCascade(ctx, id, cascadeID)
+		if task == nil || task.ArchivedAt == nil || task.ArchivedByCascadeID != cascadeID {
+			return out, fmt.Errorf("unarchive %s: archived task generation is unavailable", id)
+		}
+		ok, err := s.unarchiveArchivedResourceTask(ctx, id, *task.ArchivedAt, cascadeID)
 		if err != nil {
 			return out, fmt.Errorf("unarchive %s: %w", id, err)
 		}
@@ -715,12 +719,9 @@ func (s *HandoffService) unarchiveManualRoot(ctx context.Context, root *models.T
 		return nil, errors.New("task is not archived")
 	}
 	out := &CascadeOutcome{}
-	if err := s.cancelArchiveResourceCleanup(ctx, root.ID); err != nil {
-		return out, fmt.Errorf("cancel archive cleanup %s: %w", root.ID, err)
-	}
-	ok, err := s.tasks.UnarchiveTask(ctx, root.ID)
-	if err != nil {
-		return out, fmt.Errorf("unarchive %s: %w", root.ID, err)
+	ok, unarchiveErr := s.unarchiveArchivedResourceTask(ctx, root.ID, *root.ArchivedAt, "")
+	if unarchiveErr != nil {
+		return out, fmt.Errorf("unarchive %s: %w", root.ID, unarchiveErr)
 	}
 	if !ok {
 		out.SkippedTaskIDs = append(out.SkippedTaskIDs, root.ID)
@@ -744,6 +745,20 @@ func (s *HandoffService) unarchiveManualRoot(ctx context.Context, root *models.T
 		}
 	}
 	return out, nil
+}
+
+func (s *HandoffService) unarchiveArchivedResourceTask(
+	ctx context.Context,
+	taskID string,
+	expectedArchivedAt time.Time,
+	expectedCascadeID string,
+) (bool, error) {
+	if coordinator, ok := s.resourceCleaner.(taskResourceUnarchiveCoordinator); ok {
+		return coordinator.UnarchiveArchivedResourceTask(
+			ctx, taskID, expectedArchivedAt, expectedCascadeID,
+		)
+	}
+	return false, errors.New("atomic archived-resource unarchive coordinator is unavailable")
 }
 
 func (s *HandoffService) cancelArchiveResourceCleanup(ctx context.Context, taskID string) error {

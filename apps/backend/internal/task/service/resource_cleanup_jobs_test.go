@@ -308,7 +308,7 @@ func (c *cancellableCleanupBarrier) CleanupWorktrees(ctx context.Context, _ []*w
 	}
 }
 
-func TestUnarchiveCancelsAndJoinsClaimedArchiveCleanup(t *testing.T) {
+func TestUnarchiveFailsClosedWhileArchiveCleanupClaimed(t *testing.T) {
 	taskSvc, repo := setupOfficeTest(t)
 	ctx := context.Background()
 	coordinator := activity.NewCoordinator(activity.Options{})
@@ -337,7 +337,7 @@ func TestUnarchiveCancelsAndJoinsClaimedArchiveCleanup(t *testing.T) {
 	if err := repo.CreateTaskResourceCleanupJob(ctx, job); err != nil {
 		t.Fatalf("CreateTaskResourceCleanupJob: %v", err)
 	}
-	barrier := newJoinCleanupBarrier()
+	barrier := newCancellableCleanupBarrier()
 	taskSvc.SetWorktreeCleanup(barrier)
 	processDone := make(chan error, 1)
 	go func() { processDone <- taskSvc.processTaskResourceCleanupJob(ctx, job.ID) }()
@@ -349,24 +349,16 @@ func TestUnarchiveCancelsAndJoinsClaimedArchiveCleanup(t *testing.T) {
 
 	handoff := NewHandoffService(repo, repo, nil, nil, nil, nil)
 	handoff.SetTaskResourceCleaner(taskSvc)
-	type unarchiveResult struct {
-		outcome *CascadeOutcome
-		err     error
+	if _, err := handoff.UnarchiveTaskTree(ctx, task.ID); !errors.Is(err, ErrArchivedResourceReconcileConflict) {
+		t.Fatalf("unarchive error = %v, want running-cleanup conflict", err)
 	}
-	unarchiveDone := make(chan unarchiveResult, 1)
-	go func() {
-		outcome, err := handoff.UnarchiveTaskTree(ctx, task.ID)
-		unarchiveDone <- unarchiveResult{outcome: outcome, err: err}
-	}()
-	select {
-	case <-barrier.cancelled:
-	case <-time.After(time.Second):
-		t.Fatal("cleanup did not observe unarchive cancellation")
+	archived, err := repo.GetTask(ctx, task.ID)
+	if err != nil || archived.ArchivedAt == nil {
+		t.Fatalf("task generation changed after rejected unarchive: %#v, %v", archived, err)
 	}
-	select {
-	case result := <-unarchiveDone:
-		t.Fatalf("unarchive returned before claimed cleanup joined: outcome=%#v err=%v", result.outcome, result.err)
-	case <-time.After(100 * time.Millisecond):
+	running, err := repo.GetTaskResourceCleanupJob(ctx, job.ID)
+	if err != nil || running.State != models.TaskResourceCleanupStateRunning {
+		t.Fatalf("cleanup changed after rejected unarchive: %#v, %v", running, err)
 	}
 	close(barrier.release)
 	select {
@@ -374,34 +366,14 @@ func TestUnarchiveCancelsAndJoinsClaimedArchiveCleanup(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("cleanup did not stop after release")
 	}
-	var unarchiveErr error
-	select {
-	case result := <-unarchiveDone:
-		unarchiveErr = result.err
-	case <-time.After(time.Second):
-		t.Fatal("unarchive did not return after cleanup joined")
-	}
-	if unarchiveErr != nil {
-		t.Fatalf("UnarchiveTaskTree: %v", unarchiveErr)
-	}
 	var processErr error
 	select {
 	case processErr = <-processDone:
 	case <-time.After(time.Second):
 		t.Fatal("cleanup processor did not return after release")
 	}
-	if processErr != nil && !errors.Is(processErr, context.Canceled) {
-		t.Fatalf("cleanup worker error = %v, want nil or context cancellation", processErr)
-	}
-	got, err := repo.GetTaskResourceCleanupJob(ctx, job.ID)
-	if err != nil {
-		t.Fatalf("GetTaskResourceCleanupJob: %v", err)
-	}
-	if got.State != models.TaskResourceCleanupStateCancelled {
-		t.Fatalf("cleanup state = %q, want cancelled", got.State)
-	}
-	if got.Attempts != 1 {
-		t.Fatalf("cleanup attempts = %d, want claimed generation 1 preserved", got.Attempts)
+	if processErr != nil {
+		t.Fatalf("cleanup worker error = %v", processErr)
 	}
 	lease, _, err := coordinator.TryAcquireMaintenance(ctx, 0)
 	if err != nil {
@@ -458,8 +430,10 @@ func TestUnarchiveCancellationPreservesCleanupResourcesAfterBlockedCleaner(t *te
 	}
 	barrier := newCancellableCleanupBarrier()
 	taskSvc.SetWorktreeCleanup(barrier)
+	processCtx, cancelProcess := context.WithCancel(ctx)
+	defer cancelProcess()
 	processDone := make(chan error, 1)
-	go func() { processDone <- taskSvc.processTaskResourceCleanupJob(ctx, job.ID) }()
+	go func() { processDone <- taskSvc.processTaskResourceCleanupJob(processCtx, job.ID) }()
 	select {
 	case <-barrier.started:
 	case <-time.After(time.Second):
@@ -468,9 +442,10 @@ func TestUnarchiveCancellationPreservesCleanupResourcesAfterBlockedCleaner(t *te
 
 	handoff := NewHandoffService(repo, repo, nil, nil, nil, nil)
 	handoff.SetTaskResourceCleaner(taskSvc)
-	if _, err := handoff.UnarchiveTaskTree(ctx, task.ID); err != nil {
-		t.Fatalf("UnarchiveTaskTree: %v", err)
+	if _, err := handoff.UnarchiveTaskTree(ctx, task.ID); !errors.Is(err, ErrArchivedResourceReconcileConflict) {
+		t.Fatalf("unarchive error = %v, want running-cleanup conflict", err)
 	}
+	cancelProcess()
 	if err := <-processDone; err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("cleanup worker error = %v, want nil or context cancellation", err)
 	}
@@ -484,8 +459,8 @@ func TestUnarchiveCancellationPreservesCleanupResourcesAfterBlockedCleaner(t *te
 	if err != nil {
 		t.Fatalf("GetTaskResourceCleanupJob: %v", err)
 	}
-	if got.State != models.TaskResourceCleanupStateCancelled {
-		t.Fatalf("cleanup state = %q, want cancelled", got.State)
+	if got.State == models.TaskResourceCleanupStateCancelled {
+		t.Fatalf("rejected unarchive must not cancel cleanup: %#v", got)
 	}
 }
 

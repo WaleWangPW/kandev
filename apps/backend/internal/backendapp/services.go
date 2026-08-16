@@ -112,6 +112,12 @@ func provideServices(cfg *config.Config, log *logger.Logger, repos *Repositories
 	if deleter, ok := userSecretStore.(taskservice.WorkspaceSecretDeleter); ok {
 		taskSvc.SetWorkspaceSecretDeleter(deleter)
 	}
+	taskSvc.SetArchivedResourceFeatures(cfg.Features.ArchivedResourceReconcile, cfg.Features.ArchivedResourcePhysicalRelease)
+	if cfg.Features.ArchivedResourceReconcile {
+		if err := taskSvc.StartArchivedResourceReconcileWorker(context.Background()); err != nil {
+			log.Warn("archived resource reconcile worker startup failed", zap.Error(err))
+		}
+	}
 
 	// Wire workflow step creator to task service for board creation
 	taskSvc.SetWorkflowStepCreator(workflowSvc)

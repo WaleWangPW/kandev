@@ -15,8 +15,9 @@ import (
 )
 
 const taskResourceCleanupColumns = `
-	id, operation_id, task_id, trigger, state, resource_snapshot, attempts,
-	next_attempt_at, last_error, created_at, updated_at, completed_at`
+	id, operation_id, task_id, trigger, state, resource_snapshot, snapshot_version,
+	snapshot_digest, resource_kind, resource_id, managed_root_key, anchor_revision,
+	active_scope_key, attempts, next_attempt_at, last_error, created_at, updated_at, completed_at`
 
 func (r *Repository) CreateTaskResourceCleanupJob(ctx context.Context, job *models.TaskResourceCleanupJob) error {
 	if job == nil {
@@ -89,10 +90,12 @@ func (r *Repository) CreateTaskResourceCleanupJob(ctx context.Context, job *mode
 
 	result, err := tx.ExecContext(ctx, r.db.Rebind(`
 		INSERT INTO task_resource_cleanup_jobs (`+taskResourceCleanupColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(operation_id) DO NOTHING
 	`), job.ID, job.OperationID, job.TaskID, job.Trigger, job.State,
-		job.ResourceSnapshot, job.Attempts, job.NextAttemptAt, job.LastError,
+		job.ResourceSnapshot, job.SnapshotVersion, job.SnapshotDigest,
+		job.ResourceKind, job.ResourceID, job.ManagedRootKey, job.AnchorRevision,
+		job.ActiveScopeKey, job.Attempts, job.NextAttemptAt, job.LastError,
 		job.CreatedAt, job.UpdatedAt, job.CompletedAt)
 	if err != nil {
 		return err
@@ -237,7 +240,9 @@ func (r *Repository) ListPreparedTaskResourceCleanupJobs(ctx context.Context) ([
 func scanTaskResourceCleanupJob(row interface{ Scan(...any) error }) (*models.TaskResourceCleanupJob, error) {
 	job := &models.TaskResourceCleanupJob{}
 	err := row.Scan(&job.ID, &job.OperationID, &job.TaskID, &job.Trigger, &job.State,
-		&job.ResourceSnapshot, &job.Attempts, &job.NextAttemptAt, &job.LastError,
+		&job.ResourceSnapshot, &job.SnapshotVersion, &job.SnapshotDigest,
+		&job.ResourceKind, &job.ResourceID, &job.ManagedRootKey, &job.AnchorRevision,
+		&job.ActiveScopeKey, &job.Attempts, &job.NextAttemptAt, &job.LastError,
 		&job.CreatedAt, &job.UpdatedAt, &job.CompletedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("task resource cleanup job not found")

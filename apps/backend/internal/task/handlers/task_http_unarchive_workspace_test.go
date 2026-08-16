@@ -35,6 +35,27 @@ func (r *unarchiveWorkspaceRepo) UnarchiveTask(context.Context, string) (bool, e
 	return true, nil
 }
 
+type unarchiveWorkspaceCoordinator struct {
+	repo *unarchiveWorkspaceRepo
+}
+
+func (*unarchiveWorkspaceCoordinator) CleanupTaskResources(context.Context, string, bool) {}
+
+func (c *unarchiveWorkspaceCoordinator) UnarchiveArchivedResourceTask(
+	ctx context.Context,
+	taskID string,
+	_ time.Time,
+	_ string,
+) (bool, error) {
+	return c.repo.UnarchiveTask(ctx, taskID)
+}
+
+func newUnarchiveWorkspaceHandoff(repo *unarchiveWorkspaceRepo) *service.HandoffService {
+	handoff := service.NewHandoffService(repo, nil, nil, nil, nil, nil)
+	handoff.SetTaskResourceCleaner(&unarchiveWorkspaceCoordinator{repo: repo})
+	return handoff
+}
+
 type recordingWorkspaceRestorer struct {
 	calls  []string
 	result storageworkspaces.WorkspaceRecovery
@@ -89,7 +110,7 @@ func TestHTTPUnarchiveReportsWorkspaceRestoreFailureWithoutBlocking(t *testing.T
 	repo := &unarchiveWorkspaceRepo{archived: true}
 	taskSvc := service.NewService(service.Repos{}, nil, newTestLogger(t), service.RepositoryDiscoveryConfig{})
 	handler := &TaskHandlers{
-		service: taskSvc, handoffSvc: service.NewHandoffService(repo, nil, nil, nil, nil, nil),
+		service: taskSvc, handoffSvc: newUnarchiveWorkspaceHandoff(repo),
 		logger: newTestLogger(t),
 	}
 	restorer := &recordingWorkspaceRestorer{result: storageworkspaces.WorkspaceRecovery{
@@ -125,7 +146,7 @@ func TestHTTPUnarchiveBoundsDetachedWorkspaceRecovery(t *testing.T) {
 	repo := &unarchiveWorkspaceRepo{archived: true}
 	taskSvc := service.NewService(service.Repos{}, nil, newTestLogger(t), service.RepositoryDiscoveryConfig{})
 	handler := &TaskHandlers{
-		service: taskSvc, handoffSvc: service.NewHandoffService(repo, nil, nil, nil, nil, nil),
+		service: taskSvc, handoffSvc: newUnarchiveWorkspaceHandoff(repo),
 		logger: newTestLogger(t), unarchiveRecoveryTimeout: 20 * time.Millisecond,
 	}
 	restorer := &blockingWorkspaceRestorer{contextErr: make(chan error, 1)}
@@ -166,7 +187,7 @@ func TestHTTPUnarchiveRecoversBranchesBeforeWorkspaceIO(t *testing.T) {
 	taskSvc.SetWorktreeCleanup(branchCleanup)
 	restorer := &orderingWorkspaceRestorer{branchCalled: branchCleanup.called}
 	handler := &TaskHandlers{
-		service: taskSvc, handoffSvc: service.NewHandoffService(repo, nil, nil, nil, nil, nil),
+		service: taskSvc, handoffSvc: newUnarchiveWorkspaceHandoff(repo),
 		logger: newTestLogger(t),
 	}
 	handler.SetWorkspaceQuarantineRestorer(restorer)

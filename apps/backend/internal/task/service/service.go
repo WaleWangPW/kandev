@@ -322,6 +322,14 @@ type Service struct {
 	baseBranchPusher       AgentBaseBranchPusher
 	runtimeOverridesMu     sync.Mutex
 
+	archivedResourceFeatureMu         sync.Mutex
+	archivedResourceReconcileOn       bool
+	archivedResourcePhysicalReleaseOn bool
+	archivedResourceLocksMu           sync.Mutex
+	archivedResourceLocks             map[string]*sync.Mutex
+	archivedResourceWorkerMu          sync.Mutex
+	archivedResourceWorker            *archivedResourceReconcileWorker
+
 	workspaceSourceProviderRefresher WorkspaceSourceProviderRefresher
 
 	workspaceDefaultsInitializer WorkspaceDefaultsInitializer
@@ -417,6 +425,7 @@ func NewService(repos Repos, eventBus bus.EventBus, log *logger.Logger, discover
 		branchFetcher:         newBranchFetcher(log.Zap()),
 		lastTaskActivity:      make(map[string]v1.ForegroundActivity),
 		lastTaskSubagentCount: make(map[string]int),
+		archivedResourceLocks: make(map[string]*sync.Mutex),
 	}
 }
 

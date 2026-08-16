@@ -33,3 +33,8 @@ var ErrExternalIDConflict = errors.New("external_id already claimed by another t
 // task. Creation races resolve by rejecting the late comer; the cleanup
 // inventory was captured under the same barrier.
 var ErrTaskCleanupInProgress = errors.New("task cleanup in progress")
+
+// ErrTransactionOutcomeUnknown reports a commit error after the database may
+// already have made the transaction durable. Callers must read back the exact
+// generations before deciding whether another mutation is safe.
+var ErrTransactionOutcomeUnknown = errors.New("transaction outcome is unknown")

@@ -21,6 +21,8 @@ const (
 	TaskResourceCleanupStatePending   TaskResourceCleanupState = "pending"
 	TaskResourceCleanupStateRunning   TaskResourceCleanupState = "running"
 	TaskResourceCleanupStateRetryWait TaskResourceCleanupState = "retry_wait"
+	TaskResourceCleanupStateRetained  TaskResourceCleanupState = "retained"
+	TaskResourceCleanupStateBlocked   TaskResourceCleanupState = "blocked"
 	TaskResourceCleanupStateSucceeded TaskResourceCleanupState = "succeeded"
 	TaskResourceCleanupStateFailed    TaskResourceCleanupState = "failed"
 	TaskResourceCleanupStateCancelled TaskResourceCleanupState = "cancelled"
@@ -36,6 +38,13 @@ type TaskResourceCleanupJob struct {
 	Trigger          TaskResourceCleanupTrigger
 	State            TaskResourceCleanupState
 	ResourceSnapshot string
+	SnapshotVersion  int
+	SnapshotDigest   string
+	ResourceKind     string
+	ResourceID       string
+	ManagedRootKey   string
+	AnchorRevision   int64
+	ActiveScopeKey   *string
 	Attempts         int
 	NextAttemptAt    *time.Time
 	LastError        string

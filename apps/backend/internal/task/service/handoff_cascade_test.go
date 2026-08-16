@@ -116,6 +116,31 @@ func (f *fakeWSGroupRepoCascade) ReleaseWorkspaceGroupMember(_ context.Context, 
 	return nil
 }
 
+type fakeTaskUnarchiveCoordinator struct {
+	repo *fakeCascadeRepo
+}
+
+func (*fakeTaskUnarchiveCoordinator) CleanupTaskResources(context.Context, string, bool) {}
+
+func (c *fakeTaskUnarchiveCoordinator) UnarchiveArchivedResourceTask(
+	_ context.Context,
+	taskID string,
+	expectedArchivedAt time.Time,
+	expectedCascadeID string,
+) (bool, error) {
+	c.repo.base.mu.Lock()
+	defer c.repo.base.mu.Unlock()
+	task := c.repo.base.tasks[taskID]
+	if task == nil || task.ArchivedAt == nil ||
+		!task.ArchivedAt.UTC().Equal(expectedArchivedAt.UTC()) ||
+		task.ArchivedByCascadeID != expectedCascadeID {
+		return false, errors.New("archive generation drifted")
+	}
+	task.ArchivedAt = nil
+	task.ArchivedByCascadeID = ""
+	return true, nil
+}
+
 type recordingCleanupCoordinator struct {
 	mu                    sync.Mutex
 	prepareErr            error
@@ -267,7 +292,9 @@ func (f *fakeTaskRepo) addArchivedTask(id, parentID, ws, cascadeID string) {
 func newCascadeService(t *testing.T, tasks *fakeTaskRepo, ws *fakeWSGroupRepoCascade) *HandoffService {
 	t.Helper()
 	tr := newCascadeRepo(tasks)
-	return NewHandoffService(tr, nil, nil, nil, ws, nil)
+	svc := NewHandoffService(tr, nil, nil, nil, ws, nil)
+	svc.SetTaskResourceCleaner(&fakeTaskUnarchiveCoordinator{repo: tr})
+	return svc
 }
 
 func TestArchiveTaskTree_StampsCascadeAcrossDescendants(t *testing.T) {

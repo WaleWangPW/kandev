@@ -338,10 +338,181 @@ func (r *Repository) runMigrations() error {
 		CREATE INDEX IF NOT EXISTS idx_task_status_summaries_workspace
 			ON task_status_summaries(workspace_id)`)
 
+	// Archived resource reconciliation v2/v3 stores redundant typed headers next
+	// to the strict resource_snapshot. These columns are additive for both
+	// SQLite and PostgreSQL; legacy cleanup jobs retain their zero values.
+	r.migrate.Apply("task_resource_cleanup_jobs.snapshot_version", `ALTER TABLE task_resource_cleanup_jobs ADD COLUMN snapshot_version INTEGER NOT NULL DEFAULT 0`)
+	r.migrate.Apply("task_resource_cleanup_jobs.snapshot_digest", `ALTER TABLE task_resource_cleanup_jobs ADD COLUMN snapshot_digest TEXT NOT NULL DEFAULT ''`)
+	r.migrate.Apply("task_resource_cleanup_jobs.resource_kind", `ALTER TABLE task_resource_cleanup_jobs ADD COLUMN resource_kind TEXT NOT NULL DEFAULT ''`)
+	r.migrate.Apply("task_resource_cleanup_jobs.resource_id", `ALTER TABLE task_resource_cleanup_jobs ADD COLUMN resource_id TEXT NOT NULL DEFAULT ''`)
+	r.migrate.Apply("task_resource_cleanup_jobs.managed_root_key", `ALTER TABLE task_resource_cleanup_jobs ADD COLUMN managed_root_key TEXT NOT NULL DEFAULT ''`)
+	r.migrate.Apply("task_resource_cleanup_jobs.anchor_revision", `ALTER TABLE task_resource_cleanup_jobs ADD COLUMN anchor_revision BIGINT NOT NULL DEFAULT 0`)
+	r.migrate.Apply("task_resource_cleanup_jobs.active_scope_key", `ALTER TABLE task_resource_cleanup_jobs ADD COLUMN active_scope_key TEXT`)
+	if err := r.ensureArchivedResourceCleanupSchema(); err != nil {
+		return err
+	}
+
 	if err := r.clearRecoveredAgentErrors(); err != nil {
 		return err
 	}
 
+	return nil
+}
+
+// ensureArchivedResourceCleanupSchema creates and verifies the safety-critical
+// reconcile indexes after all additive columns exist. Unlike MigrateLogger it
+// propagates every unexpected error; startup must not continue with a missing
+// or weakened active-scope uniqueness constraint.
+func (r *Repository) ensureArchivedResourceCleanupSchema() error {
+	if err := r.verifyArchivedResourceCleanupColumns(); err != nil {
+		return err
+	}
+	statements := []string{
+		`CREATE INDEX IF NOT EXISTS idx_task_resource_cleanup_jobs_trigger_state ON task_resource_cleanup_jobs(trigger, state)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uniq_task_resource_cleanup_jobs_active_scope ON task_resource_cleanup_jobs(active_scope_key) WHERE active_scope_key IS NOT NULL`,
+	}
+	for _, statement := range statements {
+		if _, err := r.db.Exec(statement); err != nil {
+			return fmt.Errorf("create archived resource cleanup constraint: %w", err)
+		}
+	}
+	if dialect.IsPostgres(r.db.DriverName()) {
+		var unique, valid bool
+		var predicate, indexDefinition string
+		if err := r.db.QueryRow(archivedResourceCleanupPostgresIndexVerificationSQL).Scan(
+			&unique, &valid, &predicate, &indexDefinition,
+		); err != nil {
+			return fmt.Errorf("verify archived resource cleanup postgres index: %w", err)
+		}
+		if !unique || !valid || normalizeArchivedResourceIndexPredicate(predicate) != "active_scope_key is not null" ||
+			!strings.Contains(indexDefinition, "(active_scope_key)") {
+			return fmt.Errorf("archived resource cleanup postgres index is not the required partial unique constraint")
+		}
+		return nil
+	}
+	var unique int
+	var partial int
+	if err := r.db.QueryRow(`
+		SELECT "unique", partial FROM pragma_index_list('task_resource_cleanup_jobs')
+		WHERE name = 'uniq_task_resource_cleanup_jobs_active_scope'
+	`).Scan(&unique, &partial); err != nil {
+		return fmt.Errorf("verify archived resource cleanup sqlite index: %w", err)
+	}
+	var indexSQL string
+	if err := r.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='index' AND name='uniq_task_resource_cleanup_jobs_active_scope'`).Scan(&indexSQL); err != nil {
+		return fmt.Errorf("read archived resource cleanup sqlite index: %w", err)
+	}
+	var indexedColumn string
+	if err := r.db.QueryRow(`
+		SELECT name FROM pragma_index_info('uniq_task_resource_cleanup_jobs_active_scope')
+		WHERE seqno = 0
+	`).Scan(&indexedColumn); err != nil {
+		return fmt.Errorf("read archived resource cleanup sqlite index column: %w", err)
+	}
+	if unique != 1 || partial != 1 || indexedColumn != "active_scope_key" ||
+		normalizeArchivedResourceSQLiteIndex(indexSQL) != "create unique index uniq_task_resource_cleanup_jobs_active_scope on task_resource_cleanup_jobs(active_scope_key) where active_scope_key is not null" {
+		return fmt.Errorf("archived resource cleanup sqlite index is not the required partial unique constraint")
+	}
+	return nil
+}
+
+const archivedResourceCleanupPostgresIndexVerificationSQL = `
+	SELECT idx.indisunique, idx.indisvalid,
+		pg_get_expr(idx.indpred, idx.indrelid) AS predicate,
+		pg_get_indexdef(idx.indexrelid) AS definition
+	FROM pg_class cls
+	INNER JOIN pg_index idx ON idx.indexrelid = cls.oid
+	INNER JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+	WHERE cls.relname = 'uniq_task_resource_cleanup_jobs_active_scope'
+	  AND ns.nspname = current_schema()
+	LIMIT 1`
+
+func normalizeArchivedResourceIndexPredicate(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	for len(value) >= 2 && value[0] == '(' && value[len(value)-1] == ')' {
+		value = strings.TrimSpace(value[1 : len(value)-1])
+	}
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func normalizeArchivedResourceSQLiteIndex(value string) string {
+	value = strings.TrimSuffix(strings.TrimSpace(strings.ToLower(value)), ";")
+	value = strings.NewReplacer("\"", "", "`", "", "[", "", "]", "").Replace(value)
+	value = strings.Join(strings.Fields(value), " ")
+	value = strings.ReplaceAll(value, " (", "(")
+	value = strings.ReplaceAll(value, " )", ")")
+	return value
+}
+
+func (r *Repository) verifyArchivedResourceCleanupColumns() error {
+	type expectedColumn struct {
+		name       string
+		typeName   string
+		notNull    bool
+		defaultTag string
+	}
+	expected := []expectedColumn{
+		{name: "snapshot_version", typeName: "INTEGER", notNull: true, defaultTag: "0"},
+		{name: "snapshot_digest", typeName: "TEXT", notNull: true, defaultTag: "''"},
+		{name: "resource_kind", typeName: "TEXT", notNull: true, defaultTag: "''"},
+		{name: "resource_id", typeName: "TEXT", notNull: true, defaultTag: "''"},
+		{name: "managed_root_key", typeName: "TEXT", notNull: true, defaultTag: "''"},
+		{name: "anchor_revision", typeName: "BIGINT", notNull: true, defaultTag: "0"},
+		{name: "active_scope_key", typeName: "TEXT", notNull: false},
+	}
+	if dialect.IsPostgres(r.db.DriverName()) {
+		for _, column := range expected {
+			var dataType, nullable string
+			var defaultValue sql.NullString
+			if err := r.db.QueryRow(`
+				SELECT data_type, is_nullable, column_default
+				FROM information_schema.columns
+				WHERE table_schema = current_schema()
+				  AND table_name = 'task_resource_cleanup_jobs'
+				  AND column_name = $1
+			`, column.name).Scan(&dataType, &nullable, &defaultValue); err != nil {
+				return fmt.Errorf("verify archived resource cleanup postgres column %s: %w", column.name, err)
+			}
+			expectedType := strings.ToLower(column.typeName)
+			if dataType != expectedType || (nullable == "NO") != column.notNull ||
+				(column.defaultTag != "" && (!defaultValue.Valid || !strings.Contains(defaultValue.String, column.defaultTag))) ||
+				(column.defaultTag == "" && defaultValue.Valid) {
+				return fmt.Errorf("archived resource cleanup postgres column %s has unsafe definition", column.name)
+			}
+		}
+		return nil
+	}
+	type sqliteColumn struct {
+		typeName     string
+		notNull      int
+		defaultValue sql.NullString
+	}
+	actual := make(map[string]sqliteColumn)
+	rows, err := r.db.Query(`PRAGMA table_info('task_resource_cleanup_jobs')`)
+	if err != nil {
+		return fmt.Errorf("read archived resource cleanup sqlite columns: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, typeName string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typeName, &notNull, &defaultValue, &primaryKey); err != nil {
+			return fmt.Errorf("scan archived resource cleanup sqlite column: %w", err)
+		}
+		actual[name] = sqliteColumn{typeName: strings.ToUpper(typeName), notNull: notNull, defaultValue: defaultValue}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read archived resource cleanup sqlite columns: %w", err)
+	}
+	for _, column := range expected {
+		got, ok := actual[column.name]
+		if !ok || got.typeName != column.typeName || (got.notNull == 1) != column.notNull ||
+			(column.defaultTag != "" && (!got.defaultValue.Valid || got.defaultValue.String != column.defaultTag)) ||
+			(column.defaultTag == "" && got.defaultValue.Valid) {
+			return fmt.Errorf("archived resource cleanup sqlite column %s has unsafe definition", column.name)
+		}
+	}
 	return nil
 }
 

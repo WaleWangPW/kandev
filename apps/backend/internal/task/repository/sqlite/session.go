@@ -2140,6 +2140,34 @@ func (r *Repository) ListTaskSessionWorktrees(ctx context.Context, sessionID str
 	return repos, rows.Err()
 }
 
+// ListTaskSessionWorktreesIncludingInactive returns every environment-
+// repository row of the session's task environment, including tombstoned
+// rows. Reconcile admission needs the complete durable history so a replay
+// after an unrelated association change still observes the exact generations.
+func (r *Repository) ListTaskSessionWorktreesIncludingInactive(ctx context.Context, sessionID string) ([]*models.TaskEnvironmentRepo, error) {
+	rows, err := r.ro.QueryContext(ctx, r.ro.Rebind(`
+		SELECT `+envRepoSelectCols+`
+		FROM task_environment_repos ter
+		INNER JOIN task_sessions ts ON ts.task_environment_id = ter.task_environment_id
+		WHERE ts.id = ?
+		ORDER BY ter.position ASC, ter.created_at ASC
+	`), sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var repos []*models.TaskEnvironmentRepo
+	for rows.Next() {
+		row, err := scanEnvRepoRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		repos = append(repos, row)
+	}
+	return repos, rows.Err()
+}
+
 // UpdateTaskSessionWorktreeBranch updates the cached worktree_branch for all
 // repository rows of the session's task environment. Called when a branch
 // switch or rename is detected in the live workspace so downstream consumers

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -2187,4 +2188,145 @@ func (h *TaskHandlers) launchConfigChatAgent(
 		zap.String("task_id", taskID),
 		zap.String("session_id", launchResp.SessionID),
 		zap.String("execution_id", launchResp.AgentExecutionID))
+}
+
+const archivedResourceReconcileMaxBodyBytes = 64 * 1024
+
+func (h *TaskHandlers) httpReconcileArchivedResource(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, archivedResourceReconcileMaxBodyBytes)
+	raw, err := io.ReadAll(c.Request.Body)
+	if err != nil || rejectDuplicateArchivedResourceJSONKeys(raw) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid reconcile request"})
+		return
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var body service.ArchivedResourceReconcileRequest
+	if err := decoder.Decode(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid reconcile request"})
+		return
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "request must contain exactly one JSON object"})
+		return
+	}
+	result, err := h.service.ReconcileArchivedResource(c.Request.Context(), c.Param("id"), body)
+	if err != nil {
+		status := archivedResourceReconcileHTTPStatus(err)
+		if status >= http.StatusInternalServerError {
+			h.logger.Error("archived resource reconcile failed", zap.Error(err))
+			c.JSON(status, gin.H{"error": "reconcile request failed"})
+			return
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *TaskHandlers) httpReconcileArchivedResourceGroup(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, archivedResourceReconcileMaxBodyBytes)
+	raw, err := io.ReadAll(c.Request.Body)
+	if err != nil || rejectDuplicateArchivedResourceJSONKeys(raw) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid group reconcile request"})
+		return
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var body service.ArchivedResourceGroupReconcileRequest
+	if err := decoder.Decode(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid group reconcile request"})
+		return
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "request must contain exactly one JSON object"})
+		return
+	}
+	result, err := h.service.ReconcileArchivedResourceGroup(c.Request.Context(), body)
+	if err != nil {
+		status := archivedResourceReconcileHTTPStatus(err)
+		if status >= http.StatusInternalServerError {
+			h.logger.Error("archived resource group reconcile failed", zap.Error(err))
+			c.JSON(status, gin.H{"error": "group reconcile request failed"})
+			return
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func rejectDuplicateArchivedResourceJSONKeys(raw []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if err := walkArchivedResourceJSONValue(decoder); err != nil {
+		return err
+	}
+	_, err := decoder.Token()
+	if err != io.EOF {
+		return errors.New("trailing JSON value")
+	}
+	return nil
+}
+
+func walkArchivedResourceJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("JSON object key is not a string")
+			}
+			if _, exists := seen[key]; exists {
+				return fmt.Errorf("duplicate JSON key %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := walkArchivedResourceJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		_, err := decoder.Token()
+		return err
+	case '[':
+		for decoder.More() {
+			if err := walkArchivedResourceJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		_, err := decoder.Token()
+		return err
+	default:
+		return errors.New("invalid JSON delimiter")
+	}
+}
+
+func archivedResourceReconcileHTTPStatus(err error) int {
+	switch {
+	case errors.Is(err, taskrepository.ErrTaskNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, service.ErrArchivedResourceReconcileInvalid):
+		return http.StatusBadRequest
+	case errors.Is(err, service.ErrArchivedResourceReconcileConflict):
+		return http.StatusConflict
+	case errors.Is(err, service.ErrArchivedResourceReconcileDisabled):
+		return http.StatusNotFound
+	case errors.Is(err, service.ErrArchivedResourceReconcileUnavailable):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
 }

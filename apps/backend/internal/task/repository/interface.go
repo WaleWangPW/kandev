@@ -20,6 +20,7 @@ var ErrRepositoryNotFound = repoerrors.ErrRepositoryNotFound
 var ErrTaskEnvironmentNotFound = repoerrors.ErrTaskEnvironmentNotFound
 var ErrWIPLimitExceeded = wfmodels.ErrWIPLimitExceeded
 var ErrExternalIDConflict = repoerrors.ErrExternalIDConflict
+var ErrTransactionOutcomeUnknown = repoerrors.ErrTransactionOutcomeUnknown
 
 // WorkspaceRepository handles workspace CRUD.
 type WorkspaceRepository interface {
@@ -301,6 +302,32 @@ type TaskResourceCleanupRepository interface {
 	CompleteTaskResourceCleanupJob(ctx context.Context, id string, state models.TaskResourceCleanupState, lastError string, nextAttemptAt *time.Time) error
 	CancelArchiveTaskResourceCleanupJobs(ctx context.Context, taskID string) error
 	ResetRunningTaskResourceCleanupJobs(ctx context.Context) error
+}
+
+// ArchivedResourceReconcileRepository exposes only the strict DB-only
+// reconcile transitions. Keeping it separate prevents generic cleanup workers
+// and their test doubles from gaining retention-anchor mutation authority.
+type ArchivedResourceReconcileRepository interface {
+	AdmitArchivedResourceReconcile(ctx context.Context, job *models.TaskResourceCleanupJob) (*models.ArchivedResourceReconcileAdmission, error)
+	ClaimArchivedResourceReconcileJob(ctx context.Context, id string) (*models.TaskResourceCleanupJob, bool, error)
+	CompleteArchivedResourceReconcileRetention(ctx context.Context, id string, attempt int) (*models.ArchivedResourceReconcileCompletion, error)
+	CancelNeverClaimedArchivedResourceReconcile(ctx context.Context, expected *models.TaskResourceCleanupJob) (bool, error)
+	ListArchivedResourceReconcileJobsByTaskID(ctx context.Context, taskID string) ([]*models.TaskResourceCleanupJob, error)
+	ListDueArchivedResourceReconcileJobs(ctx context.Context, now time.Time, limit int) ([]*models.TaskResourceCleanupJob, error)
+	ListRunningArchivedResourceReconcileJobs(ctx context.Context) ([]*models.TaskResourceCleanupJob, error)
+	GetRunningArchivedResourceReconcileJob(ctx context.Context, id string) (*models.TaskResourceCleanupJob, error)
+	RestoreArchivedResourceReconcileRetention(ctx context.Context, taskID string) (bool, error)
+	AdmitArchivedResourceGroupReconcile(ctx context.Context, job *models.TaskResourceCleanupJob) (*models.ArchivedResourceReconcileAdmission, error)
+	CompleteArchivedResourceGroupReconcileRetention(ctx context.Context, id string, attempt int) (*models.ArchivedResourceReconcileCompletion, error)
+	RestoreArchivedResourceGroupReconcileRetention(ctx context.Context, participantTaskID string) (bool, error)
+	ListArchivedResourceGroupReconcileJobsByParticipant(ctx context.Context, participantTaskID string) ([]*models.TaskResourceCleanupJob, error)
+	ResolveArchivedResourceReconcileUnarchive(
+		ctx context.Context,
+		participantTaskID string,
+		expectedArchivedAt time.Time,
+		expectedCascadeID string,
+		reconcileEnabled bool,
+	) (bool, error)
 }
 
 // GitSnapshotRepository handles git snapshots and session commit records.

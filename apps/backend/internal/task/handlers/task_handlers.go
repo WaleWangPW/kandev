@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/kandev/kandev/internal/auth/authn"
 	"github.com/kandev/kandev/internal/common/logger"
 	"github.com/kandev/kandev/internal/orchestrator"
 	storageworkspaces "github.com/kandev/kandev/internal/system/storage/workspaces"
@@ -42,6 +43,7 @@ type TaskHandlers struct {
 	unarchiveRecoveryTimeout   time.Duration
 	taskCreateLastUsedRecorder taskCreateLastUsedRecorder
 	onTaskCreatedWithPR        func(ctx context.Context, taskID, sessionID, prURL, branch string)
+	archivedResourceReconcile  bool
 	logger                     *logger.Logger
 }
 
@@ -127,8 +129,9 @@ func NewTaskHandlers(svc *service.Service, orchestrator OrchestratorStarter, rep
 	return h
 }
 
-func RegisterTaskRoutes(router *gin.Engine, dispatcher *ws.Dispatcher, svc *service.Service, orchestrator OrchestratorStarter, repo handlerRepo, planService *service.PlanService, log *logger.Logger) *TaskHandlers {
+func RegisterTaskRoutes(router *gin.Engine, dispatcher *ws.Dispatcher, svc *service.Service, orchestrator OrchestratorStarter, repo handlerRepo, planService *service.PlanService, log *logger.Logger, archivedResourceReconcile bool) *TaskHandlers {
 	handlers := NewTaskHandlers(svc, orchestrator, repo, planService, log)
+	handlers.archivedResourceReconcile = archivedResourceReconcile
 	handlers.registerHTTP(router)
 	handlers.registerWS(dispatcher)
 	return handlers
@@ -164,6 +167,11 @@ func (h *TaskHandlers) registerHTTP(router *gin.Engine) {
 	api.DELETE("/tasks/:id", h.httpDeleteTask)
 	api.POST("/tasks/:id/archive", h.httpArchiveTask)
 	api.POST("/tasks/:id/unarchive", h.httpUnarchiveTask)
+	if h.archivedResourceReconcile {
+		reconcile := api.Group("", authn.RequireRealIdentity(), authn.RequireAdmin())
+		reconcile.POST("/tasks/:id/resource-cleanup/reconcile", h.httpReconcileArchivedResource)
+		reconcile.POST("/system/resource-cleanup/reconcile-group", h.httpReconcileArchivedResourceGroup)
+	}
 	api.GET("/tasks/:id/subtask-count", h.httpTaskSubtaskCount)
 
 	// Task dependencies ("this task is blocked by that one"). Task-scoped
