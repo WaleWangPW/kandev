@@ -165,3 +165,81 @@ the governing flag is disabled or the inventory is missing.
     The new release route is registered only when the physical-release flag
     is enabled; the cancel / retirement routes are registered only when the
     reconcile flag is enabled.
+
+### Fix receipt (counterexample response)
+
+The first candidate (`0fc8f491`) routed `ReleaseAbsentArchivedResourceTarget`
+straight to the release repository writer. The sealed central admission
+(`physicaldelete.ActionReleaseAbsent` / `releaseExecutor`) was unreachable
+from the production service path, so the retained anchor could transition
+to released without the central lock, inventory, or root-policy gate.
+
+The successor commit closes that gap end-to-end:
+
+- **Service** (`apps/backend/internal/task/service`)
+  - `Service.physicalDeleteAdmission` field plus
+    `SetPhysicalDeleteAdmission` setter, threaded from
+    `backendapp.provideWorktreeManager` so the task service and the worktree
+    manager share the same `physicaldelete.Service` instance and lock domain.
+  - `ReleaseAbsentArchivedResourceTarget` now invokes the sealed
+    `ActionReleaseAbsent` admission BEFORE any repository read/mutation,
+    requires `receipt.Mutated == false`, `receipt.Executor == ExecutorNone`,
+    `receipt.Action == ActionReleaseAbsent`, and a matching
+    `ResourceKind/ResourceID`. Any drift fails closed with one of three new
+    typed errors (`ErrArchivedResourceReleaseAdmissionUnavailable`,
+    `ErrArchivedResourceReleaseAdmissionDenied`,
+    `ErrArchivedResourceReleaseAdmissionMutated`).
+  - Nil admission fails closed before any repo call
+    (`ErrArchivedResourceReleaseAdmissionUnavailable`).
+
+- **Composition** (`apps/backend/internal/backendapp/worktree.go`)
+  - The same `physicaldelete.New` instance that the worktree manager consumes
+    is now wired into the task service via `taskSvc.SetPhysicalDeleteAdmission`.
+
+- **Tests** (`apps/backend/internal/task/service/resource_cleanup_terminal_actions_admission_test.go`)
+  - `admissionOrderSpy` records the exact admission request and call order;
+    `releaseRepoSpy` enforces zero repo reads on every fail-closed scenario.
+  - `TestTerminalReleaseRunsAdmissionBeforeAnyRepositoryCall` — admission
+    request shape (`ActionReleaseAbsent`, `AuthorityAdmin`, `ExecutorNone`,
+    `ResourceKindEnvironmentRepo`, exact path + id) plus one-and-only-one
+    repo call.
+  - `TestTerminalReleaseFailsClosedWhenAdmissionIsNil` — zero repo calls.
+  - `TestTerminalReleaseFailsClosedWhenAdmissionDeny` /
+    `…InventoryIncomplete` / `…LockedOut` — every denial path produces
+    `ErrArchivedResourceReleaseAdmissionDenied` and zero repo calls.
+  - `TestTerminalReleaseFailsClosedWhenAdmissionUnavailable` — typed
+    "unavailable" error, zero repo calls.
+  - `TestTerminalReleaseFailsClosedWhenAdmissionReturnsMutatedReceipt` /
+    `…WrongExecutor` / `…WrongAction` — every receipt-validation failure
+    produces `ErrArchivedResourceReleaseAdmissionMutated` and zero repo calls.
+  - `TestTerminalReleaseReceiptContractHoldsOnSuccess` — `physical_retained`
+    true, `physical_removed` false, terminal `released` state, single target.
+
+### Re-verification (all `env -u KANDEV_TEST_POSTGRES_DSN`, from `apps/backend`)
+
+```text
+$ go test ./internal/task/models ./internal/task/repository/sqlite \
+        ./internal/task/service ./internal/task/handlers ./internal/physicaldelete \
+        -run 'PendingMove|ReleaseAbsent|EnvironmentRetirement|Inventory' -count=1
+ok  internal/task/models             0.272s
+ok  internal/task/repository/sqlite   0.657s
+ok  internal/task/service            0.980s
+ok  internal/task/handlers           0.985s
+ok  internal/physicaldelete          1.308s
+
+$ go test -race ./internal/task/repository/sqlite ./internal/task/service \
+        -run 'PendingMove|ReleaseAbsent|EnvironmentRetirement' -count=1
+ok  internal/task/repository/sqlite   2.018s
+ok  internal/task/service            1.921s
+
+$ go vet ./internal/task/... ./internal/physicaldelete
+(no output)
+
+$ go build ./...
+(no output)
+```
+
+PostgreSQL runtime remains `NOT_RUN`; no new dependency was installed; the
+shipped `archivedResourceReconcile` / `archivedResourcePhysicalRelease` flags
+remain default-off; no route, runtime, or live action was started; no live DB,
+API, or remote server was contacted.

@@ -80,6 +80,11 @@ func provideWorktreeManager(dbPool *db.Pool, cfg *config.Config, log *logger.Log
 		return nil, nil, nil, fmt.Errorf("physical-delete admission: %w", err)
 	}
 	manager.SetAdmission(admission)
+	// Share the same physicaldelete admission with the task service so the
+	// Task06 terminal release path runs through the sealed authority before
+	// any repository read or mutation. The shared lock domain guarantees
+	// concurrent admission paths serialize correctly.
+	taskSvc.SetPhysicalDeleteAdmission(admission)
 
 	if lifecycleMgr != nil {
 		lifecycleMgr.SetWorktreeManager(manager)

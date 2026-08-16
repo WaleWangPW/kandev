@@ -12,6 +12,7 @@ import (
 
 	"github.com/kandev/kandev/internal/common/logger"
 	"github.com/kandev/kandev/internal/events/bus"
+	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/secrets"
 	"github.com/kandev/kandev/internal/task/models"
 	"github.com/kandev/kandev/internal/task/repository"
@@ -289,6 +290,7 @@ type Service struct {
 	logger                      *logger.Logger
 	discoveryConfig             RepositoryDiscoveryConfig
 	worktreeCleanup             WorktreeCleanup
+	physicalDeleteAdmission     physicaldelete.Admission
 	executionStopper            TaskExecutionStopper
 	rowLivenessProber           TaskRowLivenessProber
 	contextWindowResetter       func(context.Context, string) error
@@ -432,6 +434,15 @@ func NewService(repos Repos, eventBus bus.EventBus, log *logger.Logger, discover
 // SetWorktreeCleanup sets the worktree cleanup handler for task deletion.
 func (s *Service) SetWorktreeCleanup(cleanup WorktreeCleanup) {
 	s.worktreeCleanup = cleanup
+}
+
+// SetPhysicalDeleteAdmission wires the sealed central admission gate that
+// Task06's terminal actions must invoke before any repository read or
+// mutation. Optional in tests; production backendapp wires this with the
+// same physicaldelete.New instance given to the worktree manager so the
+// entire managed-root authority shares one lock domain.
+func (s *Service) SetPhysicalDeleteAdmission(admission physicaldelete.Admission) {
+	s.physicalDeleteAdmission = admission
 }
 
 func (s *Service) setCleanupDoneForTestHook(ch chan struct{}) {

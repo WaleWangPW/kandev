@@ -6,15 +6,19 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/task/models"
 	"github.com/kandev/kandev/internal/task/repository"
 )
 
 var (
-	ErrArchivedResourceReleaseDisabled    = errors.New("archived resource release is disabled")
-	ErrArchivedResourceReleaseInvalid     = errors.New("invalid archived resource release request")
-	ErrArchivedResourceReleaseUnavailable = errors.New("archived resource release is unavailable")
-	ErrArchivedResourceReleaseUnknown     = errors.New("archived resource release target is unknown")
+	ErrArchivedResourceReleaseDisabled             = errors.New("archived resource release is disabled")
+	ErrArchivedResourceReleaseInvalid              = errors.New("invalid archived resource release request")
+	ErrArchivedResourceReleaseUnavailable          = errors.New("archived resource release is unavailable")
+	ErrArchivedResourceReleaseUnknown              = errors.New("archived resource release target is unknown")
+	ErrArchivedResourceReleaseAdmissionUnavailable = errors.New("archived resource release admission is unavailable")
+	ErrArchivedResourceReleaseAdmissionDenied      = errors.New("archived resource release admission was denied")
+	ErrArchivedResourceReleaseAdmissionMutated     = errors.New("archived resource release admission produced a non-noop receipt")
 
 	ErrArchivedResourceEnvironmentRetirementDisabled    = errors.New("archived resource environment retirement is disabled")
 	ErrArchivedResourceEnvironmentRetirementInvalid     = errors.New("invalid archived resource environment retirement request")
@@ -258,6 +262,15 @@ func (s *Service) ReleaseAbsentArchivedResourceTarget(
 	if err := validateArchivedResourceReleaseRequest(req); err != nil {
 		return nil, err
 	}
+	// The release admission must run through the sealed central physicaldelete
+	// admission BEFORE any terminal repository read or mutation. A nil or
+	// unavailable admission is fail-closed — zero repo reads, zero repo writes.
+	if s.physicalDeleteAdmission == nil {
+		return nil, ErrArchivedResourceReleaseAdmissionUnavailable
+	}
+	if err := s.invokeAbsentTargetAdmission(ctx, req); err != nil {
+		return nil, err
+	}
 	repo, err := s.archivedResourceTerminalRepoFor(ErrArchivedResourceReleaseUnavailable)
 	if err != nil {
 		return nil, err
@@ -280,6 +293,53 @@ func (s *Service) ReleaseAbsentArchivedResourceTarget(
 		PhysicalRetained: true,
 		PhysicalRemoved:  false,
 	}, nil
+}
+
+// invokeAbsentTargetAdmission runs the sealed ActionReleaseAbsent admission
+// and validates the receipt. The receipt is the only authoritative proof that
+// the targeted retained anchor's path and Git registration are absent from
+// the writer-DB inventory and root policy. A denied, mutated, or non-noop
+// receipt fails closed before any repository access.
+func (s *Service) invokeAbsentTargetAdmission(
+	ctx context.Context,
+	req ArchivedResourceReleaseRequest,
+) error {
+	physicalRequest := physicaldelete.Request{
+		Action:    physicaldelete.ActionReleaseAbsent,
+		Authority: physicaldelete.AuthorityAdmin,
+		Executor:  physicaldelete.ExecutorNone,
+		Force:     false,
+		Resource: physicaldelete.Resource{
+			Kind: physicaldelete.ResourceKindEnvironmentRepo,
+			ID:   req.AnchorWorktreeID,
+			Path: req.AnchorWorktreePath,
+		},
+	}
+	receipt, err := s.physicalDeleteAdmission.Execute(ctx, physicalRequest)
+	if err != nil {
+		if errors.Is(err, physicaldelete.ErrInvalidRequest) ||
+			errors.Is(err, physicaldelete.ErrInventoryIncomplete) ||
+			errors.Is(err, physicaldelete.ErrProtectedResource) ||
+			errors.Is(err, physicaldelete.ErrLockUnavailable) ||
+			errors.Is(err, physicaldelete.ErrReleaseNotAdmitted) {
+			return ErrArchivedResourceReleaseAdmissionDenied
+		}
+		return ErrArchivedResourceReleaseAdmissionUnavailable
+	}
+	if receipt.Mutated {
+		return ErrArchivedResourceReleaseAdmissionMutated
+	}
+	if receipt.Executor != physicaldelete.ExecutorNone {
+		return ErrArchivedResourceReleaseAdmissionMutated
+	}
+	if receipt.Action != physicaldelete.ActionReleaseAbsent {
+		return ErrArchivedResourceReleaseAdmissionMutated
+	}
+	if receipt.ResourceKind != physicaldelete.ResourceKindEnvironmentRepo ||
+		receipt.ResourceID != req.AnchorWorktreeID {
+		return ErrArchivedResourceReleaseAdmissionMutated
+	}
+	return nil
 }
 
 func (s *Service) archivedResourcePhysicalReleaseFlagOn() bool {
