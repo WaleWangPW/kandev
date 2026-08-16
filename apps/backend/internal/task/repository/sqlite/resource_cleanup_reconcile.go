@@ -361,6 +361,57 @@ func (r *Repository) CancelNeverClaimedArchivedResourceReconcile(
 	return count == 1, nil
 }
 
+// CancelStaleArchivedResourcePendingMove cancels exactly one pristine pending
+// reconcile operation bound to a historical terminal session. The cancellation
+// is exact-generation: only the targeted pending row disappears, and the
+// retained anchor, association, task, Git, and filesystem state are byte-
+// equivalent before and after. The seven-field pending-row generation is the
+// CAS predicate (id, operation_id, trigger, task_id, snapshot_version,
+// snapshot_digest, resource_snapshot) plus the redundant typed headers
+// (resource_kind, resource_id, managed_root_key, active_scope_key, anchor_revision).
+//
+// The historical-terminal-session precheck lives in the service layer so the
+// repository stays a single CAS: callers pass a fully-pristine expected job.
+func (r *Repository) CancelStaleArchivedResourcePendingMove(
+	ctx context.Context,
+	expected *models.TaskResourceCleanupJob,
+) (bool, error) {
+	if !isPristineArchivedResourceJob(expected) {
+		return false, fmt.Errorf("%w: cancellation target is not pristine pending", ErrArchivedResourceReconcileConflict)
+	}
+	if _, err := models.ValidateArchivedResourceAnyReconcileJobHeaders(expected); err != nil {
+		return false, err
+	}
+	if expected.Trigger != models.TaskResourceCleanupTriggerReconcile {
+		return false, fmt.Errorf("%w: cancellation target trigger is not reconcile", ErrArchivedResourceReconcileConflict)
+	}
+	now := time.Now().UTC()
+	result, err := r.db.ExecContext(ctx, r.db.Rebind(`
+		UPDATE task_resource_cleanup_jobs
+		SET state = ?, active_scope_key = NULL, completed_at = ?, updated_at = ?, last_error = ''
+		WHERE id = ? AND operation_id = ? AND trigger = ? AND state = ?
+		  AND task_id = ? AND attempts = 0 AND next_attempt_at IS NULL
+		  AND completed_at IS NULL AND last_error = ''
+		  AND snapshot_version = ? AND snapshot_digest = ?
+		  AND resource_kind = ? AND resource_id = ? AND managed_root_key = ?
+		  AND anchor_revision = 0 AND active_scope_key = ?
+		  AND resource_snapshot = ?
+	`), models.TaskResourceCleanupStateCancelled, now, now,
+		expected.ID, expected.OperationID, models.TaskResourceCleanupTriggerReconcile,
+		models.TaskResourceCleanupStatePending, expected.TaskID,
+		expected.SnapshotVersion, expected.SnapshotDigest,
+		expected.ResourceKind, expected.ResourceID, expected.ManagedRootKey,
+		expected.ActiveScopeKey, expected.ResourceSnapshot)
+	if err != nil {
+		return false, err
+	}
+	count, rowsErr := result.RowsAffected()
+	if rowsErr != nil {
+		return false, fmt.Errorf("read cancelled stale pending move affected rows: %w", rowsErr)
+	}
+	return count == 1, nil
+}
+
 // ListArchivedResourceReconcileJobsByTaskID returns only the durable reconcile
 // anchors for one task. It intentionally excludes generic cleanup rows so the
 // disabled unarchive exception never needs to inspect an unrelated snapshot.

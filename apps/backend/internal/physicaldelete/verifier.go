@@ -214,6 +214,7 @@ var actionSpecs = map[Action]actionSpec{
 	ActionRestore:                  {executor: ExecutorFilesystem},
 	ActionPurge:                    {executor: ExecutorFilesystem},
 	ActionParentRemove:             {executor: ExecutorFilesystem},
+	ActionReleaseAbsent:            {executor: ExecutorNone},
 }
 
 func knownAuthority(authority Authority) bool {
@@ -227,7 +228,7 @@ func knownAuthority(authority Authority) bool {
 }
 
 func knownExecutor(executor Executor) bool {
-	return executor == ExecutorFilesystem || executor == ExecutorGit
+	return executor == ExecutorFilesystem || executor == ExecutorGit || executor == ExecutorNone
 }
 
 func resourcesOverlap(resource Resource, protected []string) bool {

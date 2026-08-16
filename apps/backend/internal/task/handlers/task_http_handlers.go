@@ -2330,3 +2330,145 @@ func archivedResourceReconcileHTTPStatus(err error) int {
 		return http.StatusInternalServerError
 	}
 }
+
+func archivedResourceReleaseHTTPStatus(err error) int {
+	switch {
+	case errors.Is(err, service.ErrArchivedResourceReleaseInvalid):
+		return http.StatusBadRequest
+	case errors.Is(err, service.ErrArchivedResourceReleaseUnknown):
+		return http.StatusNotFound
+	case errors.Is(err, service.ErrArchivedResourceReleaseDisabled):
+		return http.StatusNotFound
+	case errors.Is(err, service.ErrArchivedResourceReleaseUnavailable):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func archivedResourceEnvironmentRetirementHTTPStatus(err error) int {
+	switch {
+	case errors.Is(err, service.ErrArchivedResourceEnvironmentRetirementInvalid):
+		return http.StatusBadRequest
+	case errors.Is(err, service.ErrArchivedResourceEnvironmentRetirementDisabled):
+		return http.StatusNotFound
+	case errors.Is(err, service.ErrArchivedResourceEnvironmentRetirementUnavailable):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func archivedResourcePendingMoveHTTPStatus(err error) int {
+	switch {
+	case errors.Is(err, service.ErrArchivedResourcePendingMoveInvalid):
+		return http.StatusBadRequest
+	case errors.Is(err, service.ErrArchivedResourcePendingMoveSessionActive):
+		return http.StatusConflict
+	case errors.Is(err, service.ErrArchivedResourcePendingMoveDisabled):
+		return http.StatusNotFound
+	case errors.Is(err, service.ErrArchivedResourcePendingMoveUnavailable):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func (h *TaskHandlers) httpCancelStaleArchivedResourcePendingMove(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, archivedResourceReconcileMaxBodyBytes)
+	raw, err := io.ReadAll(c.Request.Body)
+	if err != nil || rejectDuplicateArchivedResourceJSONKeys(raw) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid cancel stale pending move request"})
+		return
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var body service.ArchivedResourcePendingMoveCancelRequest
+	if err := decoder.Decode(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid cancel stale pending move request"})
+		return
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "request must contain exactly one JSON object"})
+		return
+	}
+	result, err := h.service.CancelStaleArchivedResourcePendingMove(c.Request.Context(), body)
+	if err != nil {
+		status := archivedResourcePendingMoveHTTPStatus(err)
+		if status >= http.StatusInternalServerError {
+			h.logger.Error("cancel stale archived resource pending move failed", zap.Error(err))
+			c.JSON(status, gin.H{"error": "cancel stale pending move request failed"})
+			return
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *TaskHandlers) httpReleaseAbsentArchivedResourceTarget(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, archivedResourceReconcileMaxBodyBytes)
+	raw, err := io.ReadAll(c.Request.Body)
+	if err != nil || rejectDuplicateArchivedResourceJSONKeys(raw) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid release absent request"})
+		return
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var body service.ArchivedResourceReleaseRequest
+	if err := decoder.Decode(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid release absent request"})
+		return
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "request must contain exactly one JSON object"})
+		return
+	}
+	result, err := h.service.ReleaseAbsentArchivedResourceTarget(c.Request.Context(), body)
+	if err != nil {
+		status := archivedResourceReleaseHTTPStatus(err)
+		if status >= http.StatusInternalServerError {
+			h.logger.Error("release absent archived resource target failed", zap.Error(err))
+			c.JSON(status, gin.H{"error": "release absent request failed"})
+			return
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *TaskHandlers) httpRetireStaleArchivedResourceEnvironmentReference(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, archivedResourceReconcileMaxBodyBytes)
+	raw, err := io.ReadAll(c.Request.Body)
+	if err != nil || rejectDuplicateArchivedResourceJSONKeys(raw) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid environment retirement request"})
+		return
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var body service.ArchivedResourceEnvironmentRetirementRequest
+	if err := decoder.Decode(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid environment retirement request"})
+		return
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "request must contain exactly one JSON object"})
+		return
+	}
+	result, err := h.service.RetireStaleArchivedResourceEnvironmentReference(c.Request.Context(), body)
+	if err != nil {
+		status := archivedResourceEnvironmentRetirementHTTPStatus(err)
+		if status >= http.StatusInternalServerError {
+			h.logger.Error("retire stale archived resource environment failed", zap.Error(err))
+			c.JSON(status, gin.H{"error": "environment retirement request failed"})
+			return
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}

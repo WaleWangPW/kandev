@@ -23,6 +23,10 @@ var (
 	ErrProvisionalTarget       = errors.New("physicaldelete: provisional target already exists")
 	ErrProvisionalLeaseUsed    = errors.New("physicaldelete: provisional lease is already bound")
 	ErrProvisionalTargetExists = ErrProvisionalTarget
+	// ErrReleaseNotAdmitted is returned when the absent-target release cannot
+	// prove that the targeted retained anchor exists, the physical path is
+	// absent from inventory, and the Git worktree registration is absent.
+	ErrReleaseNotAdmitted = errors.New("physicaldelete: absent-target release was not admitted")
 )
 
 type Action string
@@ -36,6 +40,10 @@ const (
 	ActionRestore                  Action = "restore"
 	ActionPurge                    Action = "purge"
 	ActionParentRemove             Action = "parent_remove"
+	// ActionReleaseAbsent is the metadata-only release admission for a
+	// retained target whose physical path and Git worktree registration are
+	// already absent. It produces no physical or Git mutation.
+	ActionReleaseAbsent Action = "release_absent"
 
 	ActionRegisteredWorktreeRemoval Action = ActionRegisteredWorktreeRemove
 	ActionBranchRemoval             Action = ActionBranchDelete
@@ -81,6 +89,10 @@ type Executor string
 const (
 	ExecutorFilesystem Executor = "filesystem"
 	ExecutorGit        Executor = "git"
+	// ExecutorNone marks an admission that produces no physical or Git
+	// mutation. The release admission routes through this executor so the
+	// sealed absence proof in inventory is the only authoritative signal.
+	ExecutorNone Executor = "none"
 )
 
 type Decision string
@@ -99,6 +111,7 @@ const (
 	DenialProtected           DenialReason = "protected_resource"
 	DenialExecutorUnavailable DenialReason = "executor_unavailable"
 	DenialLockUnavailable     DenialReason = "lock_unavailable"
+	DenialReleaseNotAdmitted  DenialReason = "release_not_admitted"
 )
 
 // Anchor retains the exact Lstat identity observed before the final gate. The

@@ -312,6 +312,11 @@ type ArchivedResourceReconcileRepository interface {
 	ClaimArchivedResourceReconcileJob(ctx context.Context, id string) (*models.TaskResourceCleanupJob, bool, error)
 	CompleteArchivedResourceReconcileRetention(ctx context.Context, id string, attempt int) (*models.ArchivedResourceReconcileCompletion, error)
 	CancelNeverClaimedArchivedResourceReconcile(ctx context.Context, expected *models.TaskResourceCleanupJob) (bool, error)
+	// CancelStaleArchivedResourcePendingMove is the exact-generation stale
+	// pending move cancellation: it only removes the exact pending row and
+	// never touches any other row, association, anchor, task, Git, or
+	// filesystem state.
+	CancelStaleArchivedResourcePendingMove(ctx context.Context, expected *models.TaskResourceCleanupJob) (bool, error)
 	ListArchivedResourceReconcileJobsByTaskID(ctx context.Context, taskID string) ([]*models.TaskResourceCleanupJob, error)
 	ListDueArchivedResourceReconcileJobs(ctx context.Context, now time.Time, limit int) ([]*models.TaskResourceCleanupJob, error)
 	ListRunningArchivedResourceReconcileJobs(ctx context.Context) ([]*models.TaskResourceCleanupJob, error)
@@ -328,6 +333,24 @@ type ArchivedResourceReconcileRepository interface {
 		expectedCascadeID string,
 		reconcileEnabled bool,
 	) (bool, error)
+	// ReleaseAbsentArchivedResourceAnchor performs the sealed absent-target
+	// admission: the targeted retained v2 anchor must be the only candidate
+	// that matches every generation field, the physical path must be absent
+	// from the writer-DB inventory, the Git worktree registration must be
+	// absent, and the anchor must transition retained -> released in a
+	// single atomic CAS with no filesystem, Git, or runtime mutation.
+	ReleaseAbsentArchivedResourceAnchor(ctx context.Context, job *models.TaskResourceCleanupJob) (*models.ArchivedResourceReleaseAdmission, error)
+	// RetireStaleArchivedResourceEnvironmentReference performs the exact-set
+	// environment retirement transaction. It deletes only the exact stopped
+	// or failed task_environment_repos rows captured by admission and only
+	// when every active v2/v3 anchor confirms the environment is not a
+	// participant and the workspace-group inventory is one of the four
+	// accepted known states. Any malformed/unknown inventory or non-
+	// coordinator v3 participant causes fail-closed zero mutation.
+	RetireStaleArchivedResourceEnvironmentReference(
+		ctx context.Context,
+		job *models.TaskResourceCleanupJob,
+	) (*models.ArchivedResourceEnvironmentRetirementIdentity, error)
 }
 
 // GitSnapshotRepository handles git snapshots and session commit records.

@@ -15,6 +15,7 @@ type Service struct {
 	now       func() time.Time
 	fs        filesystemExecutor
 	git       gitExecutor
+	release   releaseExecutor
 }
 
 func New(config Config) (*Service, error) {
@@ -129,6 +130,8 @@ func (s *Service) executeUnavailable(ctx context.Context, request Request, recei
 		return s.fs.execute(ctx, request, receipt)
 	case ExecutorGit:
 		return s.git.execute(ctx, request, receipt)
+	case ExecutorNone:
+		return s.release.execute(ctx, request, receipt)
 	default:
 		return withReason(receipt, DenialInvalidRequest), fmt.Errorf("%w: unknown executor", ErrInvalidRequest)
 	}

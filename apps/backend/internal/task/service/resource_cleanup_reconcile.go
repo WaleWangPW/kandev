@@ -75,6 +75,14 @@ func (s *Service) SetArchivedResourceFeatures(reconcileEnabled, physicalReleaseE
 	s.archivedResourceFeatureMu.Unlock()
 }
 
+// ArchivedResourcePhysicalReleaseEnabled is the public projection of the
+// physical-release flag used by route registration.
+func (s *Service) ArchivedResourcePhysicalReleaseEnabled() bool {
+	s.archivedResourceFeatureMu.Lock()
+	defer s.archivedResourceFeatureMu.Unlock()
+	return s.archivedResourcePhysicalReleaseOn
+}
+
 func (s *Service) archivedResourceReconcileEnabled() bool {
 	s.archivedResourceFeatureMu.Lock()
 	defer s.archivedResourceFeatureMu.Unlock()

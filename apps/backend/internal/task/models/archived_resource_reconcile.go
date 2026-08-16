@@ -180,8 +180,25 @@ func IsActiveArchivedResourceReconcileState(state TaskResourceCleanupState) bool
 	}
 }
 
+// IsTerminalArchivedResourceReconcileState reports whether the state is a
+// durable terminal phase for a v2/v3 anchor: Succeeded/Failed/Cancelled never
+// apply to a versioned anchor (rejected by the validator above); Retained and
+// Released are durable anchor phases (Blocked is not terminal). Released keeps
+// the same revision and CompletedAt fields as Retained because the absent-target
+// release is metadata-only and never widens the anchor's durable contract.
+func IsTerminalArchivedResourceReconcileState(state TaskResourceCleanupState) bool {
+	switch state {
+	case TaskResourceCleanupStateRetained,
+		TaskResourceCleanupStateReleased:
+		return true
+	default:
+		return false
+	}
+}
+
 func validateArchivedResourceAnchorLifecycle(job *TaskResourceCleanupJob) error {
-	if !IsActiveArchivedResourceReconcileState(job.State) {
+	if !IsActiveArchivedResourceReconcileState(job.State) &&
+		!IsTerminalArchivedResourceReconcileState(job.State) {
 		return fmt.Errorf("%w: reconcile job state %q is not an active anchor", ErrArchivedResourceSnapshotInvalid, job.State)
 	}
 	switch job.State {
@@ -192,9 +209,9 @@ func validateArchivedResourceAnchorLifecycle(job *TaskResourceCleanupJob) error 
 		if job.AnchorRevision != 0 || job.CompletedAt != nil {
 			return fmt.Errorf("%w: pre-retention state has terminal anchor fields", ErrArchivedResourceSnapshotInvalid)
 		}
-	case TaskResourceCleanupStateRetained:
+	case TaskResourceCleanupStateRetained, TaskResourceCleanupStateReleased:
 		if job.AnchorRevision != ArchivedResourceRetentionAnchorVersion || job.CompletedAt == nil || job.CompletedAt.IsZero() {
-			return fmt.Errorf("%w: retained state requires revision one and completion time", ErrArchivedResourceSnapshotInvalid)
+			return fmt.Errorf("%w: %s state requires revision one and completion time", ErrArchivedResourceSnapshotInvalid, job.State)
 		}
 	case TaskResourceCleanupStateBlocked:
 		if job.AnchorRevision < 0 || job.AnchorRevision > ArchivedResourceRetentionAnchorVersion ||

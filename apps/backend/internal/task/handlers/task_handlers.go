@@ -32,19 +32,20 @@ type handlerRepo interface {
 }
 
 type TaskHandlers struct {
-	service                    *service.Service
-	orchestrator               OrchestratorStarter
-	foregroundActivity         dto.ForegroundActivityProvider
-	cancellationPending        dto.CancellationPendingProvider
-	repo                       handlerRepo
-	planService                *service.PlanService
-	handoffSvc                 *service.HandoffService
-	workspaceRestorer          WorkspaceQuarantineRestorer
-	unarchiveRecoveryTimeout   time.Duration
-	taskCreateLastUsedRecorder taskCreateLastUsedRecorder
-	onTaskCreatedWithPR        func(ctx context.Context, taskID, sessionID, prURL, branch string)
-	archivedResourceReconcile  bool
-	logger                     *logger.Logger
+	service                         *service.Service
+	orchestrator                    OrchestratorStarter
+	foregroundActivity              dto.ForegroundActivityProvider
+	cancellationPending             dto.CancellationPendingProvider
+	repo                            handlerRepo
+	planService                     *service.PlanService
+	handoffSvc                      *service.HandoffService
+	workspaceRestorer               WorkspaceQuarantineRestorer
+	unarchiveRecoveryTimeout        time.Duration
+	taskCreateLastUsedRecorder      taskCreateLastUsedRecorder
+	onTaskCreatedWithPR             func(ctx context.Context, taskID, sessionID, prURL, branch string)
+	archivedResourceReconcile       bool
+	archivedResourcePhysicalRelease bool
+	logger                          *logger.Logger
 }
 
 const defaultUnarchiveRecoveryTimeout = 30 * time.Second
@@ -132,6 +133,7 @@ func NewTaskHandlers(svc *service.Service, orchestrator OrchestratorStarter, rep
 func RegisterTaskRoutes(router *gin.Engine, dispatcher *ws.Dispatcher, svc *service.Service, orchestrator OrchestratorStarter, repo handlerRepo, planService *service.PlanService, log *logger.Logger, archivedResourceReconcile bool) *TaskHandlers {
 	handlers := NewTaskHandlers(svc, orchestrator, repo, planService, log)
 	handlers.archivedResourceReconcile = archivedResourceReconcile
+	handlers.archivedResourcePhysicalRelease = svc.ArchivedResourcePhysicalReleaseEnabled()
 	handlers.registerHTTP(router)
 	handlers.registerWS(dispatcher)
 	return handlers
@@ -171,6 +173,12 @@ func (h *TaskHandlers) registerHTTP(router *gin.Engine) {
 		reconcile := api.Group("", authn.RequireRealIdentity(), authn.RequireAdmin())
 		reconcile.POST("/tasks/:id/resource-cleanup/reconcile", h.httpReconcileArchivedResource)
 		reconcile.POST("/system/resource-cleanup/reconcile-group", h.httpReconcileArchivedResourceGroup)
+		reconcile.POST("/system/resource-cleanup/cancel-stale-pending-move", h.httpCancelStaleArchivedResourcePendingMove)
+		reconcile.POST("/system/resource-cleanup/retire-stale-environment-reference", h.httpRetireStaleArchivedResourceEnvironmentReference)
+	}
+	if h.archivedResourcePhysicalRelease {
+		release := api.Group("", authn.RequireRealIdentity(), authn.RequireAdmin())
+		release.POST("/system/resource-cleanup/release-absent-retained-target", h.httpReleaseAbsentArchivedResourceTarget)
 	}
 	api.GET("/tasks/:id/subtask-count", h.httpTaskSubtaskCount)
 

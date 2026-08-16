@@ -22,6 +22,7 @@ const (
 	TaskResourceCleanupStateRunning   TaskResourceCleanupState = "running"
 	TaskResourceCleanupStateRetryWait TaskResourceCleanupState = "retry_wait"
 	TaskResourceCleanupStateRetained  TaskResourceCleanupState = "retained"
+	TaskResourceCleanupStateReleased  TaskResourceCleanupState = "released"
 	TaskResourceCleanupStateBlocked   TaskResourceCleanupState = "blocked"
 	TaskResourceCleanupStateSucceeded TaskResourceCleanupState = "succeeded"
 	TaskResourceCleanupStateFailed    TaskResourceCleanupState = "failed"
