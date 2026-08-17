@@ -11,8 +11,40 @@ import (
 
 	"github.com/kandev/kandev/internal/agent/executor"
 	"github.com/kandev/kandev/internal/common/logger"
+	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/worktree"
 )
+
+// permissivePreparerAdmission is deliberately test-only.  It models a
+// successful, already-authorized managed-root operation so the preparer tests
+// can continue asserting their rollback behaviour.  Production wiring always
+// uses the sealed physicaldelete.Service; the fail-closed boundary is covered
+// by the worktree admission tests.
+type permissivePreparerAdmission struct {
+	leases *physicaldelete.Service
+}
+
+func (p permissivePreparerAdmission) BeginProvisional(ctx context.Context, req physicaldelete.CreateRequest) (physicaldelete.ProvisionalLease, error) {
+	return p.leases.BeginProvisional(ctx, req)
+}
+
+func (permissivePreparerAdmission) Execute(_ context.Context, req physicaldelete.Request) (physicaldelete.Receipt, error) {
+	return physicaldelete.Receipt{
+		Action: req.Action, ResourceKind: req.Resource.Kind, ResourceID: req.Resource.ID,
+	}, nil
+}
+
+func newPermissiveAdmissionForPreparer() (physicaldelete.Admission, error) {
+	leases, err := physicaldelete.New(physicaldelete.Config{
+		Inventory: physicaldelete.InventorySourceFunc(func(context.Context) (physicaldelete.Inventory, error) {
+			return physicaldelete.Inventory{Complete: true}, nil
+		}),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return permissivePreparerAdmission{leases: leases}, nil
+}
 
 // fakeRepoProvider returns canned Repository values per ID.
 type fakeRepoProvider struct {
@@ -78,6 +110,11 @@ func newPreparerWithScriptHandler(t *testing.T, repos map[string]*worktree.Repos
 	if err != nil {
 		t.Fatalf("worktree manager: %v", err)
 	}
+	admission, err := newPermissiveAdmissionForPreparer()
+	if err != nil {
+		t.Fatalf("preparer admission: %v", err)
+	}
+	mgr.SetAdmission(admission)
 	handler := &recordingScriptHandler{}
 	mgr.SetScriptMessageHandler(handler)
 	mgr.SetRepositoryProvider(&fakeRepoProvider{repos: repos})

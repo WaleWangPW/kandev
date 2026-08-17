@@ -23,4 +23,40 @@ spec: "../../specs/tasks/archived-resource-safety/spec.md"
 
 ## Results
 
-Pending.
+2026-08-17 local verification receipt (no runtime, database, or physical
+action):
+
+- SQLite cleanup-schema adversarial matrix: PASS. New fixtures cover a v0.88
+  legacy table, a half-migrated table, idempotent replay, malformed
+  active-scope index rejection, and byte-preserving replay of an existing
+  retained v2 anchor. The existing task-environment release-generation test
+  also verifies that environment deletion preserves the authoritative row.
+- Managed-root regression matrix: PASS. Worktree preparer rollback fixtures
+  now use a test-only authorized admission wrapper; production remains wired
+  to the sealed executor. macOS temporary-directory aliases are canonicalized
+  only after root/path validation, while a symlinked workspace root is still
+  rejected.
+- Targeted ordinary tests: PASS for physicaldelete, worktree, task SQLite
+  repository, task service, task handlers, lifecycle, executor, and
+  backendapp. The backendapp route harness now matches production's
+  resource-cleanup/unarchive composition.
+- Targeted race suite: PASS for physicaldelete, worktree, task SQLite
+  repository, task service, task handlers, lifecycle, and executor.
+- Full backend compile gate (`go test ./... -run '^$'`): PASS. Full vet:
+  PASS. `git diff --check`: PASS. Every changed Go file is gofmt-clean; the
+  repository-wide `gofmt -l internal` gate still reports four unchanged
+  inherited files (`orchestrator/queue_purge_status_test.go`, task SQLite
+  `base.go`, and two task status-summary projector files), so that global
+  formatting receipt is classified FAIL rather than PASS.
+- Full ordinary backend suite (`go test ./... -count=1`): classified FAIL in
+  two inherited host-fixture tests outside this task's source scope:
+  `internal/agentctl/server/api` expects a bundled VS Code remote CLI below
+  the Go test binary, and `internal/agentctl/server/config` assumes a login
+  shell preserves the generated GitHub CLI shim ahead of the host `gh`.
+  Both reproduce in isolation on this host. They are not counted as PASS and
+  need a dedicated agentctl fixture/environment repair.
+- PostgreSQL: NOT_RUN. `KANDEV_TEST_POSTGRES_DSN` was explicitly unset; no
+  PostgreSQL instance was contacted.
+- Frontend focused tests: `FRONTEND_NOT_RUN_DEPENDENCIES_ABSENT`; no
+  dependencies were installed. The dependency-free backend feature-contract
+  test passed.

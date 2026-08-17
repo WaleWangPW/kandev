@@ -83,6 +83,9 @@ func TestRegisterTaskRoutesWiresProductionWorkspaceRestorer(t *testing.T) {
 		harness.taskRepo, harness.taskRepo,
 		taskservice.NewDocumentService(harness.taskRepo, log), nil, nil, log,
 	)
+	// Match production composition: archived-resource unarchive is sealed by
+	// the task service rather than falling back to a non-transactional callback.
+	handoff.SetTaskResourceCleaner(harness.taskSvc)
 	registerTaskRoutes(routeParams{
 		router: router, gateway: gateway, taskSvc: harness.taskSvc, taskRepo: harness.taskRepo,
 		services: &Services{Workflow: harness.workflowSvc}, workspaceRestorer: composition.workspaceRestorer, log: log,
@@ -1978,6 +1981,7 @@ func newBootStateTestHarness(t *testing.T) bootStateTestHarness {
 			Executors:        taskRepo,
 			Environments:     taskRepo,
 			TaskEnvironments: taskRepo,
+			ResourceCleanups: taskRepo,
 			Reviews:          taskRepo,
 			StatusSummaries:  taskRepo,
 		},

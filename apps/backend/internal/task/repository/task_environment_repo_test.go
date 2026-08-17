@@ -178,7 +178,7 @@ func TestTaskEnvironmentRepo_CreateWithEmbeddedRepos(t *testing.T) {
 	}
 }
 
-func TestTaskEnvironmentRepo_CascadeDeleteOnEnvDelete(t *testing.T) {
+func TestTaskEnvironmentRepo_PreservesReleaseGenerationOnEnvDelete(t *testing.T) {
 	repo, cleanup := createTestSQLiteRepo(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -196,8 +196,13 @@ func TestTaskEnvironmentRepo_CascadeDeleteOnEnvDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list after delete: %v", err)
 	}
-	if len(list) != 0 {
-		t.Errorf("expected cascade delete to remove per-repo rows, got %d", len(list))
+	if len(list) != 1 {
+		t.Fatalf("environment deletion must preserve one durable release generation, got %d", len(list))
+	}
+	got := list[0]
+	if got.ID != er.ID || got.TaskEnvironmentID != env.ID || got.RepositoryID != er.RepositoryID ||
+		got.Status != "active" || got.DeletedAt != nil {
+		t.Fatalf("preserved release generation = %#v, want active unchanged row %#v", got, er)
 	}
 }
 

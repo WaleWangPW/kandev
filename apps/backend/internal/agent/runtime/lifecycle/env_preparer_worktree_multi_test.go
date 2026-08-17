@@ -245,6 +245,11 @@ func newPreparerForTestWithStore(t *testing.T) (*WorktreePreparer, *worktree.Man
 	if err != nil {
 		t.Fatalf("worktree manager: %v", err)
 	}
+	admission, err := newPermissiveAdmissionForPreparer()
+	if err != nil {
+		t.Fatalf("preparer admission: %v", err)
+	}
+	mgr.SetAdmission(admission)
 	return NewWorktreePreparer(mgr, log), mgr, store
 }
 

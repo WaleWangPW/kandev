@@ -48,3 +48,22 @@ func TestRemoveDependencyDirectoryDoesNotFollowWorkspaceReplacement(t *testing.T
 		t.Fatalf("original dependency directory still exists: %v", err)
 	}
 }
+
+func TestRemoveDependencyDirectoryRejectsSymlinkedWorkspaceRoot(t *testing.T) {
+	parent := t.TempDir()
+	realRoot := filepath.Join(parent, "workspace-real")
+	root := filepath.Join(parent, "workspace")
+	if err := os.MkdirAll(filepath.Join(realRoot, "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realRoot, root); err != nil {
+		t.Fatal(err)
+	}
+	err := removeDependencyDirectory(context.Background(), root, filepath.Join(root, "node_modules"))
+	if err == nil {
+		t.Fatal("removeDependencyDirectory accepted a symlinked workspace root")
+	}
+	if _, err := os.Stat(filepath.Join(realRoot, "node_modules")); err != nil {
+		t.Fatalf("symlink target changed: %v", err)
+	}
+}

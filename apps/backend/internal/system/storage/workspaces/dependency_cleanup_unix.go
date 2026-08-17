@@ -93,11 +93,28 @@ func openDependencyDirectoryPath(path string) (int, error) {
 	if !filepath.IsAbs(path) {
 		return -1, fmt.Errorf("dependency workspace root must be absolute")
 	}
+	// Callers validate the workspace beneath their owned root before entering
+	// this descriptor-level primitive. macOS exposes its temporary hierarchy
+	// through the conventional /var symlink, so opening the lexical path from
+	// / with O_NOFOLLOW would reject every otherwise-validated workspace. After
+	// rejecting a symlinked workspace root, canonicalize those platform aliases
+	// before opening every resulting component with O_NOFOLLOW.
+	info, err := os.Lstat(path)
+	if err != nil {
+		return -1, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return -1, fmt.Errorf("dependency workspace root must be a real directory")
+	}
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return -1, fmt.Errorf("resolve dependency workspace root: %w", err)
+	}
 	fd, err := unix.Open(string(filepath.Separator), dependencyDirectoryOpenFlags, 0)
 	if err != nil {
 		return -1, err
 	}
-	for _, part := range dependencyAbsolutePathComponents(path) {
+	for _, part := range dependencyAbsolutePathComponents(canonical) {
 		next, err := unix.Openat(fd, part, dependencyDirectoryOpenFlags, 0)
 		if err != nil {
 			_ = unix.Close(fd)
