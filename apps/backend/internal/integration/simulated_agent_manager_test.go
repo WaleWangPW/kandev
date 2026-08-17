@@ -474,6 +474,10 @@ func (s *SimulatedAgentManagerClient) ResolveAgentProfile(ctx context.Context, p
 		ProfileName: "Simulated Profile",
 		AgentID:     "augment-agent",
 		AgentName:   "Augment Agent",
+		// Production resolvers now attach a durable launch binding. Keep the
+		// integration simulator production-shaped so launch-path tests exercise
+		// their intended behavior instead of being rejected as malformed input.
+		Fingerprint: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
 		Model:       "claude-sonnet-4-20250514",
 	}, nil
 }
