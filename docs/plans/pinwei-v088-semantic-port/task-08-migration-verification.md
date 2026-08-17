@@ -1,7 +1,7 @@
 ---
 id: "08-migration-verification"
 title: "Verify migrations and adversarial safety matrix"
-status: pending
+status: completed
 wave: 7
 depends_on: ["01-profile-launch-binding", "07-consumer-integration"]
 plan: "plan.md"
@@ -60,3 +60,24 @@ action):
 - Frontend focused tests: `FRONTEND_NOT_RUN_DEPENDENCIES_ABSENT`; no
   dependencies were installed. The dependency-free backend feature-contract
   test passed.
+
+2026-08-17 successor verification receipt (no runtime, database, or physical
+action):
+
+- Integration launch fixtures now provide the same valid, durable profile
+  fingerprint shape as production resolvers. `go test` and `go test -race`
+  for `internal/integration` both PASS; this preserves the profile-drift
+  fail-closed contract rather than weakening it for tests.
+- Full backend compile (`go test ./... -run '^$'`) and `go vet ./...`: PASS.
+  Targeted ordinary and race suites for physicaldelete, worktree, task SQLite
+  repository, task service, task handlers, lifecycle, executor, and backendapp:
+  PASS. `git diff --check`: PASS.
+- Full ordinary backend results remain classified rather than treated as PASS:
+  the agentctl API and config fixture failures reproduce from the Task07 parent;
+  an intermittent process/repoclone pair passes in isolated reruns. No failure
+  is attributed to this Task08 successor. PostgreSQL remains NOT_RUN because
+  `KANDEV_TEST_POSTGRES_DSN` was explicitly unset.
+- The existing workspace package-manager wrapper requested a dependency purge,
+  which is prohibited. No install or purge was performed. The already-present
+  Web Vitest binary ran the four required feature-contract files directly:
+  4 files / 12 tests PASS.
