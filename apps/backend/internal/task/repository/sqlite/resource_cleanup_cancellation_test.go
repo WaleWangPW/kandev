@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/kandev/kandev/internal/task/models"
 	"github.com/kandev/kandev/internal/task/repository/repoerrors"
@@ -18,7 +19,7 @@ func TestCancelRetryableArchiveCleanupBindsArchiveGeneration(t *testing.T) {
 	if err != nil || cancelled != 1 {
 		t.Fatalf("cancel = %d, %v; want 1, nil", cancelled, err)
 	}
-	job, err := repo.GetTaskResourceCleanupJobByOperationID(ctx, "cascade_archive:cancel-exact")
+	job, err := repo.GetTaskResourceCleanupJobByOperationID(ctx, expected.OperationID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,12 +32,44 @@ func TestCancelRetryableArchiveCleanupBindsArchiveGeneration(t *testing.T) {
 	}
 }
 
+func TestCancelRetryableArchiveCleanupLeavesHistoricalOperationUntouched(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepoForHealTests(t)
+	expected := seedRetryableArchivedCleanup(t, repo, "cancel-history", "cascade-current")
+	historicalOperationID := "cascade_archive:cascade-historical:cancel-history"
+	now := time.Now().UTC()
+	// Simulate a legacy retained retry row from an older archive generation.
+	// The normal reservation gate prevents this shape today, but cancellation
+	// must still not broaden its exact operation binding when it encounters one.
+	if _, err := repo.db.ExecContext(ctx, repo.db.Rebind(`
+		INSERT INTO task_resource_cleanup_jobs
+		(id, operation_id, task_id, trigger, state, resource_snapshot, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
+		"cleanup-history", historicalOperationID, expected.TaskID,
+		models.TaskResourceCleanupTriggerCascadeArchive,
+		models.TaskResourceCleanupStateRetryWait, `{}`, now, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if cancelled, err := repo.CancelRetryableArchiveTaskResourceCleanupJobs(ctx, []models.ArchiveTaskCleanupCancellationExpectation{expected}); err != nil || cancelled != 1 {
+		t.Fatalf("cancel = %d, %v; want 1, nil", cancelled, err)
+	}
+	current, err := repo.GetTaskResourceCleanupJobByOperationID(ctx, expected.OperationID)
+	if err != nil || current.State != models.TaskResourceCleanupStateCancelled {
+		t.Fatalf("current operation = %#v, %v", current, err)
+	}
+	untouched, err := repo.GetTaskResourceCleanupJobByOperationID(ctx, historicalOperationID)
+	if err != nil || untouched.State != models.TaskResourceCleanupStateRetryWait || untouched.CompletedAt != nil {
+		t.Fatalf("historical operation mutated = %#v, %v", untouched, err)
+	}
+}
+
 func TestCancelRetryableArchiveCleanupRejectsRunningWithoutPartialMutation(t *testing.T) {
 	ctx := context.Background()
 	repo := newRepoForHealTests(t)
 	first := seedRetryableArchivedCleanup(t, repo, "cancel-first", "cascade-pair")
 	second := seedRetryableArchivedCleanup(t, repo, "cancel-running", "cascade-pair")
-	job, err := repo.GetTaskResourceCleanupJobByOperationID(ctx, "cascade_archive:cancel-running")
+	job, err := repo.GetTaskResourceCleanupJobByOperationID(ctx, second.OperationID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +81,7 @@ func TestCancelRetryableArchiveCleanupRejectsRunningWithoutPartialMutation(t *te
 	if !errors.Is(err, repoerrors.ErrTaskCleanupInProgress) {
 		t.Fatalf("cancel error = %v, want ErrTaskCleanupInProgress", err)
 	}
-	firstJob, err := repo.GetTaskResourceCleanupJobByOperationID(ctx, "cascade_archive:cancel-first")
+	firstJob, err := repo.GetTaskResourceCleanupJobByOperationID(ctx, first.OperationID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +98,7 @@ func TestCancelRetryableArchiveCleanupRejectsArchiveGenerationDrift(t *testing.T
 	if _, err := repo.CancelRetryableArchiveTaskResourceCleanupJobs(ctx, []models.ArchiveTaskCleanupCancellationExpectation{expected}); err == nil {
 		t.Fatal("cancellation accepted a cascade generation drift")
 	}
-	job, err := repo.GetTaskResourceCleanupJobByOperationID(ctx, "cascade_archive:cancel-drift")
+	job, err := repo.GetTaskResourceCleanupJobByOperationID(ctx, expected.OperationID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,8 +119,9 @@ func seedRetryableArchivedCleanup(t *testing.T, repo *Repository, taskID, cascad
 	if err != nil || task.ArchivedAt == nil {
 		t.Fatalf("load archived task %s: %#v, %v", taskID, task, err)
 	}
+	operationID := "cascade_archive:" + cascadeID + ":" + taskID
 	job := &models.TaskResourceCleanupJob{
-		ID: "cleanup-" + taskID, OperationID: "cascade_archive:" + taskID,
+		ID: "cleanup-" + taskID, OperationID: operationID,
 		TaskID: taskID, Trigger: models.TaskResourceCleanupTriggerCascadeArchive,
 		State: models.TaskResourceCleanupStateRetryWait, ResourceSnapshot: `{}`,
 	}
@@ -95,6 +129,6 @@ func seedRetryableArchivedCleanup(t *testing.T, repo *Repository, taskID, cascad
 		t.Fatalf("create cleanup %s: %v", taskID, err)
 	}
 	return models.ArchiveTaskCleanupCancellationExpectation{
-		TaskID: taskID, ArchivedAt: *task.ArchivedAt, CascadeID: cascadeID,
+		TaskID: taskID, ArchivedAt: *task.ArchivedAt, CascadeID: cascadeID, OperationID: operationID,
 	}
 }

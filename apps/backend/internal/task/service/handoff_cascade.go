@@ -769,6 +769,7 @@ func (s *HandoffService) archiveCleanupCancellationExpectations(
 		}
 		expected = append(expected, models.ArchiveTaskCleanupCancellationExpectation{
 			TaskID: id, ArchivedAt: *task.ArchivedAt, CascadeID: cascadeID,
+			OperationID: string(models.TaskResourceCleanupTriggerCascadeArchive) + ":" + cascadeID + ":" + id,
 		})
 	}
 	return expected, nil

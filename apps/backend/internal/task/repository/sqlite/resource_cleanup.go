@@ -404,7 +404,7 @@ func (r *Repository) verifyArchiveCleanupCancellationTaskLocked(
 	tx *sqlx.Tx,
 	expected models.ArchiveTaskCleanupCancellationExpectation,
 ) error {
-	if expected.TaskID == "" || expected.CascadeID == "" || expected.ArchivedAt.IsZero() {
+	if expected.TaskID == "" || expected.CascadeID == "" || expected.OperationID == "" || expected.ArchivedAt.IsZero() {
 		return fmt.Errorf("archive cleanup cancellation expectation is incomplete")
 	}
 	if err := r.lockTaskCleanupDomainLocked(ctx, tx, expected.TaskID); err != nil {
@@ -420,7 +420,7 @@ func (r *Repository) verifyArchiveCleanupCancellationTaskLocked(
 		return fmt.Errorf("archive cleanup generation drifted for task %s", expected.TaskID)
 	}
 	rows, err := tx.QueryContext(ctx, r.db.Rebind(`
-		SELECT state FROM task_resource_cleanup_jobs
+		SELECT operation_id, state FROM task_resource_cleanup_jobs
 		WHERE task_id = ? AND trigger IN (?, ?) AND state IN (?, ?, ?, ?)`+reconcileForUpdate(r.db.DriverName())), expected.TaskID,
 		models.TaskResourceCleanupTriggerArchive,
 		models.TaskResourceCleanupTriggerCascadeArchive,
@@ -433,17 +433,25 @@ func (r *Repository) verifyArchiveCleanupCancellationTaskLocked(
 		return fmt.Errorf("lock archive cleanup jobs: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
+	foundExpected := false
 	for rows.Next() {
+		var operationID string
 		var state models.TaskResourceCleanupState
-		if err := rows.Scan(&state); err != nil {
+		if err := rows.Scan(&operationID, &state); err != nil {
 			return fmt.Errorf("scan archive cleanup state: %w", err)
 		}
 		if state == models.TaskResourceCleanupStateRunning {
 			return fmt.Errorf("%w: archive cleanup is running for task %s", repoerrors.ErrTaskCleanupInProgress, expected.TaskID)
 		}
+		if operationID == expected.OperationID {
+			foundExpected = true
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate archive cleanup states: %w", err)
+	}
+	if !foundExpected {
+		return fmt.Errorf("archive cleanup operation drifted for task %s", expected.TaskID)
 	}
 	return nil
 }
@@ -459,9 +467,8 @@ func (r *Repository) cancelRetryableArchiveCleanupLocked(
 		result, err := tx.ExecContext(ctx, r.db.Rebind(`
 			UPDATE task_resource_cleanup_jobs
 			SET state = ?, completed_at = ?, updated_at = ?
-			WHERE task_id = ? AND trigger IN (?, ?) AND state IN (?, ?, ?)
-		`), models.TaskResourceCleanupStateCancelled, now, now, item.TaskID,
-			models.TaskResourceCleanupTriggerArchive,
+			WHERE operation_id = ? AND task_id = ? AND trigger = ? AND state IN (?, ?, ?)
+		`), models.TaskResourceCleanupStateCancelled, now, now, item.OperationID, item.TaskID,
 			models.TaskResourceCleanupTriggerCascadeArchive,
 			models.TaskResourceCleanupStatePrepared,
 			models.TaskResourceCleanupStatePending,
@@ -473,6 +480,9 @@ func (r *Repository) cancelRetryableArchiveCleanupLocked(
 		rows, err := result.RowsAffected()
 		if err != nil {
 			return 0, fmt.Errorf("read archive cleanup cancellation result: %w", err)
+		}
+		if rows != 1 {
+			return 0, fmt.Errorf("archive cleanup operation drifted for task %s", item.TaskID)
 		}
 		cancelled += int(rows)
 	}

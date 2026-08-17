@@ -24,7 +24,7 @@ func TestPostgresCancelRetryableArchiveCleanupLocksAndPreservesArchive(t *testin
 		t.Fatalf("load archived task: %#v, %v", task, err)
 	}
 	job := &models.TaskResourceCleanupJob{
-		ID: "cleanup-pg", OperationID: "cascade_archive:cancel-archive-pg",
+		ID: "cleanup-pg", OperationID: "cascade_archive:cascade-pg:cancel-archive-pg",
 		TaskID: task.ID, Trigger: models.TaskResourceCleanupTriggerCascadeArchive,
 		State: models.TaskResourceCleanupStateRetryWait, ResourceSnapshot: `{}`,
 	}
@@ -33,6 +33,7 @@ func TestPostgresCancelRetryableArchiveCleanupLocksAndPreservesArchive(t *testin
 	}
 	cancelled, err := repo.CancelRetryableArchiveTaskResourceCleanupJobs(ctx, []models.ArchiveTaskCleanupCancellationExpectation{{
 		TaskID: task.ID, ArchivedAt: *task.ArchivedAt, CascadeID: task.ArchivedByCascadeID,
+		OperationID: job.OperationID,
 	}})
 	if err != nil || cancelled != 1 {
 		t.Fatalf("cancel = %d, %v", cancelled, err)

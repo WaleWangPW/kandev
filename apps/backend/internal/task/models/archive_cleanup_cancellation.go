@@ -6,7 +6,8 @@ import "time"
 // the exact archive generation that created a cascade cleanup intent. It keeps
 // a later unarchive/rearchive from being mistaken for the original operation.
 type ArchiveTaskCleanupCancellationExpectation struct {
-	TaskID     string
-	ArchivedAt time.Time
-	CascadeID  string
+	TaskID      string
+	ArchivedAt  time.Time
+	CascadeID   string
+	OperationID string
 }
