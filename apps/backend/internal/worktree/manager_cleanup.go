@@ -13,6 +13,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/system/storage"
 	storageworkspaces "github.com/kandev/kandev/internal/system/storage/workspaces"
 )
@@ -41,6 +42,31 @@ func (m *Manager) PruneQuarantinedWorkspace(ctx context.Context, entry storage.Q
 }
 
 func (m *Manager) pruneQuarantinedWorktree(ctx context.Context, wt *Worktree) error {
+	if wt == nil {
+		return fmt.Errorf("worktree manager: pruneQuarantinedWorktree called with nil worktree")
+	}
+	// Quarantine-driven prune is still a managed-root physical mutation: it
+	// touches the Git worktree registration. Gate through the sealed central
+	// admission before acquiring the repo lock so an unavailable executor
+	// short-circuits the operation cleanly.
+	commonDir := ""
+	if wt.RepositoryPath != "" {
+		if resolved, dirErr := m.gitCommonDir(ctx, wt.RepositoryPath); dirErr == nil {
+			commonDir = resolved
+		}
+	}
+	if _, err := m.gateManagedRootDeletion(
+		ctx,
+		physicaldelete.AuthorityStorage,
+		physicaldelete.ExecutorGit,
+		physicaldelete.ActionRegisteredWorktreeRemove,
+		physicaldelete.ResourceKindRegisteredWorktree,
+		wt.ID,
+		wt.Path,
+		commonDir,
+	); err != nil {
+		return fmt.Errorf("admission denied quarantine prune for worktree %s: %w", wt.ID, err)
+	}
 	repoLock := m.getRepoLock(wt.RepositoryPath)
 	repoLock.Lock()
 	defer func() {
@@ -173,6 +199,32 @@ func (m *Manager) RemoveByID(ctx context.Context, worktreeID string, removeBranc
 
 // removeWorktree performs the actual removal of a worktree.
 func (m *Manager) removeWorktree(ctx context.Context, wt *Worktree, removeBranch bool) error {
+	if wt == nil {
+		return fmt.Errorf("worktree manager: removeWorktree called with nil worktree")
+	}
+	// Gate the destructive operation behind the sealed central admission.
+	// Missing admission or the deliberately sealed executor denies before any
+	// Git, filesystem, or runtime mutation. Branch removal shares the same
+	// admission call so the optional `git branch -D` cannot escape the gate.
+	commonDir := ""
+	if wt.RepositoryPath != "" {
+		if resolved, dirErr := m.gitCommonDir(ctx, wt.RepositoryPath); dirErr == nil {
+			commonDir = resolved
+		}
+	}
+	action := physicaldelete.ActionRegisteredWorktreeRemove
+	if _, err := m.gateManagedRootDeletion(
+		ctx,
+		physicaldelete.AuthorityWorktree,
+		physicaldelete.ExecutorGit,
+		action,
+		physicaldelete.ResourceKindRegisteredWorktree,
+		wt.ID,
+		wt.Path,
+		commonDir,
+	); err != nil {
+		return fmt.Errorf("admission denied %s for worktree %s: %w", action, wt.ID, err)
+	}
 	// Get repository lock
 	repoLock := m.getRepoLock(wt.RepositoryPath)
 	repoLock.Lock()

@@ -9,8 +9,47 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/system/storage"
 )
+
+// fakeAdmission is a controllable physicaldelete.Admission used by the
+// workspace quarantine provider tests. Task 07 binds every destructive
+// quarantine step behind the sealed central gate; tests that exercise the
+// physical removal flow opt in via admitAll, while tests that assert the
+// fail-closed contract use denyExecution to confirm the gate denies before
+// any filesystem mutation.
+type fakeAdmission struct {
+	admitAll    bool
+	executeErr  error
+	receipt     physicaldelete.Receipt
+	executions  []physicaldelete.Request
+	provisional []physicaldelete.CreateRequest
+}
+
+func (f *fakeAdmission) BeginProvisional(_ context.Context, req physicaldelete.CreateRequest) (physicaldelete.ProvisionalLease, error) {
+	f.provisional = append(f.provisional, req)
+	return physicaldelete.ProvisionalLease{}, nil
+}
+
+func (f *fakeAdmission) Execute(_ context.Context, req physicaldelete.Request) (physicaldelete.Receipt, error) {
+	f.executions = append(f.executions, req)
+	if f.admitAll {
+		f.receipt.Action = req.Action
+		f.receipt.ResourceKind = req.Resource.Kind
+		f.receipt.ResourceID = req.Resource.ID
+		f.receipt.Mutated = false
+		return f.receipt, nil
+	}
+	f.receipt.Action = req.Action
+	f.receipt.ResourceKind = req.Resource.Kind
+	f.receipt.ResourceID = req.Resource.ID
+	f.receipt.Reason = physicaldelete.DenialExecutorUnavailable
+	if f.executeErr != nil {
+		return f.receipt, f.executeErr
+	}
+	return f.receipt, physicaldelete.ErrExecutorUnavailable
+}
 
 type fakeInventorySource struct {
 	inventory Inventory
@@ -789,6 +828,10 @@ func newProviderFixture(
 			nextID++
 			return fmt.Sprintf("entry-%d", nextID)
 		},
+		// Default: a working admission so the pre-existing physical-removal
+		// contract still drives these tests. Tests that want the sealed
+		// fail-closed behavior override provider.config.Admission.
+		Admission: &fakeAdmission{admitAll: true},
 	})
 	return provider, tasksRoot, store
 }

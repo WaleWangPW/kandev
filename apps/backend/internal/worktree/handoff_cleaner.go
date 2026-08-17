@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kandev/kandev/internal/common/logger"
+	"github.com/kandev/kandev/internal/physicaldelete"
 )
 
 // HandoffCleaner is the office task-handoffs cleanup adapter that
@@ -28,6 +29,9 @@ type HandoffCleaner struct {
 	// plain folder root). Worktree paths are validated separately
 	// against the manager's TasksBasePath.
 	extraRoots []string
+	// admission is the sealed central gate that every destructive
+	// handoff cleanup step must funnel through. nil is fail-closed.
+	admission physicaldelete.Admission
 }
 
 // NewHandoffCleaner constructs the cleaner. extraRoots is appended to
@@ -41,13 +45,87 @@ func NewHandoffCleaner(mgr *Manager, log *logger.Logger, extraRoots ...string) *
 	}
 }
 
+// SetAdmission wires the sealed central admission gate that every
+// destructive handoff cleanup step must funnel through. Production
+// wiring in backendapp provides the shared physicaldelete.Service.
+func (c *HandoffCleaner) SetAdmission(admission physicaldelete.Admission) {
+	c.admission = admission
+}
+
+// gateManagedRootDeletion submits one sealed admission request for a
+// managed-root physical action. Missing admission or the deliberately
+// sealed executor returns a typed denial so the caller short-circuits
+// before any filesystem mutation.
+func (c *HandoffCleaner) gateManagedRootDeletion(
+	ctx context.Context,
+	authority physicaldelete.Authority,
+	action physicaldelete.Action,
+	resourceKind physicaldelete.ResourceKind,
+	resourceID, path string,
+) (physicaldelete.Receipt, error) {
+	if c.admission == nil {
+		return physicaldelete.Receipt{}, fmt.Errorf(
+			"handoff cleaner: physical-delete admission is not configured")
+	}
+	if path == "" {
+		return physicaldelete.Receipt{}, fmt.Errorf(
+			"handoff cleaner: %s requires a managed-root path", action)
+	}
+	absPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return physicaldelete.Receipt{}, fmt.Errorf(
+			"handoff cleaner: canonicalize %s path %s: %w", action, path, err)
+	}
+	anchor, anchorErr := physicaldelete.CaptureAnchor(absPath)
+	resource := physicaldelete.Resource{
+		Kind:     resourceKind,
+		ID:       resourceID,
+		Path:     absPath,
+		RootPath: absPath,
+	}
+	if anchorErr == nil {
+		resource.Anchor = &anchor
+	}
+	request := physicaldelete.Request{
+		Action:    action,
+		Authority: authority,
+		Resource:  resource,
+	}
+	receipt, err := c.admission.Execute(ctx, request)
+	if err == nil {
+		return receipt, nil
+	}
+	switch {
+	case errors.Is(err, physicaldelete.ErrExecutorUnavailable),
+		errors.Is(err, physicaldelete.ErrInvalidRequest),
+		errors.Is(err, physicaldelete.ErrInventoryIncomplete),
+		errors.Is(err, physicaldelete.ErrLockUnavailable),
+		errors.Is(err, physicaldelete.ErrProtectedResource),
+		errors.Is(err, physicaldelete.ErrAnchorMismatch):
+		return receipt, err
+	default:
+		return receipt, err
+	}
+}
+
 // CleanupPlainFolder removes a Kandev-owned plain folder. The path
 // MUST resolve to a location under one of the configured managed
 // roots; anything else is rejected up front so a corrupted
-// materialized_path can never delete arbitrary user files.
-func (c *HandoffCleaner) CleanupPlainFolder(_ context.Context, path string) error {
+// materialized_path can never delete arbitrary user files. Task 07
+// binds the destructive step behind the sealed central admission.
+func (c *HandoffCleaner) CleanupPlainFolder(ctx context.Context, path string) error {
 	if err := c.requireManagedRoot(path); err != nil {
 		return err
+	}
+	if _, err := c.gateManagedRootDeletion(
+		ctx,
+		physicaldelete.AuthorityHandoff,
+		physicaldelete.ActionRecursiveRootRemove,
+		physicaldelete.ResourceKindManagedRoot,
+		path,
+		path,
+	); err != nil {
+		return fmt.Errorf("admission denied handoff cleanup of %s: %w", path, err)
 	}
 	c.logger.Info("cleanup plain folder", zap.String("path", path))
 	if err := os.RemoveAll(path); err != nil {
@@ -78,7 +156,8 @@ func (c *HandoffCleaner) CleanupSingleRepoWorktree(ctx context.Context, worktree
 // CleanupMultiRepoRoot removes every per-repo worktree under a
 // multi-repo task root, then removes the root directory itself. The
 // root path is validated against the managed-roots set first; if the
-// guard fails the per-repo removals are also skipped.
+// guard fails the per-repo removals are also skipped. Task 07 binds
+// the destructive root removal behind the sealed central admission.
 func (c *HandoffCleaner) CleanupMultiRepoRoot(ctx context.Context, rootPath string, worktreeIDs []string) error {
 	if rootPath == "" {
 		return errors.New("multi-repo root path is required")
@@ -98,6 +177,16 @@ func (c *HandoffCleaner) CleanupMultiRepoRoot(ctx context.Context, rootPath stri
 			// abort: a partial cleanup is preferable to leaving the
 			// whole tree behind.
 		}
+	}
+	if _, err := c.gateManagedRootDeletion(
+		ctx,
+		physicaldelete.AuthorityHandoff,
+		physicaldelete.ActionRecursiveRootRemove,
+		physicaldelete.ResourceKindManagedRoot,
+		rootPath,
+		rootPath,
+	); err != nil {
+		return fmt.Errorf("admission denied handoff cleanup of %s: %w", rootPath, err)
 	}
 	if err := os.RemoveAll(rootPath); err != nil {
 		return fmt.Errorf("remove multi-repo root %s: %w", rootPath, err)

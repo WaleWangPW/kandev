@@ -1100,10 +1100,34 @@ func (m *Manager) copyConfiguredFiles(ctx context.Context, req CreateRequest, wt
 
 // recreate recreates a worktree from stored metadata.
 func (m *Manager) recreate(ctx context.Context, existing *Worktree, req CreateRequest) (*Worktree, error) {
-	// Clean up existing directory if present
+	if existing == nil {
+		return nil, fmt.Errorf("worktree manager: recreate called with nil existing worktree")
+	}
+	// Recreate path may delete the existing on-disk directory and then re-add
+	// the worktree to Git. Gate the destructive prelude through the sealed
+	// central admission so an unavailable executor keeps the original tree in
+	// place rather than partially removing and failing the rebuild.
+	commonDir := ""
+	if req.RepositoryPath != "" {
+		if resolved, dirErr := m.gitCommonDir(ctx, req.RepositoryPath); dirErr == nil {
+			commonDir = resolved
+		}
+	}
 	if existing.Path != "" {
-		if err := os.RemoveAll(existing.Path); err != nil {
-			m.logger.Debug("failed to remove existing worktree path", zap.Error(err))
+		if _, err := m.gateManagedRootDeletion(
+			ctx,
+			physicaldelete.AuthorityWorktree,
+			physicaldelete.ExecutorFilesystem,
+			physicaldelete.ActionRecursiveRootRemove,
+			physicaldelete.ResourceKindRegisteredWorktree,
+			existing.ID,
+			existing.Path,
+			commonDir,
+		); err != nil {
+			return nil, fmt.Errorf("admission denied recreate of worktree %s: %w", existing.ID, err)
+		}
+		if rmErr := os.RemoveAll(existing.Path); rmErr != nil {
+			m.logger.Debug("failed to remove existing worktree path", zap.Error(rmErr))
 		}
 	}
 

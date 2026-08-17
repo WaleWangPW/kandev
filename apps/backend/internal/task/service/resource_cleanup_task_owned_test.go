@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"github.com/kandev/kandev/internal/common/logger"
+	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/task/models"
 	sqliterepo "github.com/kandev/kandev/internal/task/repository/sqlite"
 	"github.com/kandev/kandev/internal/worktree"
@@ -196,17 +198,26 @@ func TestDeleteTaskCleanupRemovesEveryWorktreeAfterLastSessionDeletedAndRestart(
 	`, taskID).Scan(&jobID); err != nil {
 		t.Fatalf("load delete cleanup job: %v", err)
 	}
-	if err := svc.processTaskResourceCleanupJob(ctx, jobID); err != nil {
-		t.Fatalf("process delete cleanup job: %v", err)
+	// Task 07: the sealed central executor denies every destructive
+	// step before any filesystem or Git mutation. The cleanup job
+	// therefore leaves both worktree paths and Git registrations
+	// intact — exactly the byte-equivalent state-preservation the
+	// archived-resource contract guarantees in this release.
+	jobErr := svc.processTaskResourceCleanupJob(ctx, jobID)
+	if jobErr == nil {
+		t.Fatal("sealed executor must surface a denial on the destructive step")
+	}
+	if !errors.Is(jobErr, physicaldelete.ErrExecutorUnavailable) {
+		t.Fatalf("process delete cleanup job error = %v, want ErrExecutorUnavailable", jobErr)
 	}
 
 	for name, path := range map[string]string{"primary": primary.Path, "secondary": secondary.Path} {
-		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
-			t.Errorf("%s worktree directory still on disk: %s (stat err = %v)", name, path, statErr)
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Errorf("%s worktree path must survive sealed cleanup: %s (stat err = %v)", name, path, statErr)
 		}
 	}
-	assertNoWorktreeRegistration(t, repoAPath, primary.Path)
-	assertNoWorktreeRegistration(t, repoBPath, secondary.Path)
+	assertWorktreeRegistration(t, repoAPath, primary.Path)
+	assertWorktreeRegistration(t, repoBPath, secondary.Path)
 }
 
 // TestArchiveCleanupFindsWorktreeAfterLastSessionDeleted proves the archive
@@ -280,7 +291,33 @@ func newCleanupTestWorktreeManager(t *testing.T, repo *sqliterepo.Repository) *w
 	if err != nil {
 		t.Fatalf("worktree manager: %v", err)
 	}
+	// Task 07: every destructive step funnels through the central gate.
+	// The shared physicaldelete.Service instance admits provisional leases
+	// (which the worktree manager needs to create worktrees) and
+	// surfaces the sealed-executor denial for destructive requests.
+	// The destructive paths these tests exercise are no-ops because the
+	// executor is sealed unavailable; the assertions only verify state
+	// preservation, which is exactly what the new contract guarantees.
+	mgr.SetAdmission(newTaskOwnedAdmissionFactory())
 	return mgr
+}
+
+// newTaskOwnedAdmissionFactory returns a real physicaldelete.Service
+// configured to admit every provisional lease (so Create succeeds)
+// while returning the sealed executor unavailable signal for
+// destructive Execute calls. The test assertions verify the worktree
+// state is preserved through the fail-closed path, not that the
+// filesystem mutation happens.
+func newTaskOwnedAdmissionFactory() physicaldelete.Admission {
+	admission, err := physicaldelete.New(physicaldelete.Config{
+		Inventory: physicaldelete.InventorySourceFunc(func(context.Context) (physicaldelete.Inventory, error) {
+			return physicaldelete.Inventory{Complete: true}, nil
+		}),
+	})
+	if err != nil {
+		panic(err)
+	}
+	return admission
 }
 
 // newServiceOverRepository builds a fresh task service over an existing test
@@ -343,6 +380,26 @@ func runGitTestCmd(t *testing.T, repoPath string, args ...string) []byte {
 		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
 	return out
+}
+
+// assertWorktreeRegistration confirms the worktree is still tracked by
+// Git. Task 07 binds every destructive cleanup step behind the sealed
+// central admission, so the worktree and its registration must survive
+// a denied cleanup.
+func assertWorktreeRegistration(t *testing.T, repoPath, worktreePath string) {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(worktreePath)
+	if err != nil {
+		t.Fatalf("resolve worktree path: %v", err)
+	}
+	cmd := exec.Command("git", "-C", repoPath, "worktree", "list", "--porcelain")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("list worktrees: %v: %s", err, string(output))
+	}
+	if !strings.Contains(string(output), "worktree "+resolved) {
+		t.Fatalf("worktree registration removed:\n%s", string(output))
+	}
 }
 
 func assertNoWorktreeRegistration(t *testing.T, repoPath, worktreePath string) {

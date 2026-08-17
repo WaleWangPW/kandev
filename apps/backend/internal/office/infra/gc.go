@@ -5,6 +5,7 @@ package infra
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/kandev/kandev/internal/common/logger"
 	"github.com/kandev/kandev/internal/office/repository/sqlite"
+	"github.com/kandev/kandev/internal/physicaldelete"
 )
 
 // DefaultGCInterval is the default interval between GC sweeps.
@@ -71,6 +73,10 @@ type GarbageCollector struct {
 	dockerClient DockerClient
 	interval     time.Duration
 	logger       *logger.Logger
+	// admission is the sealed central gate for every managed-root deletion
+	// the GC performs. nil is deliberately fail-closed; the office services
+	// wiring in backendapp provides the shared physicaldelete.Service.
+	admission physicaldelete.Admission
 }
 
 // NewGarbageCollector creates a new GarbageCollector.
@@ -95,6 +101,67 @@ func NewGarbageCollector(
 		dockerClient: dockerClient,
 		interval:     interval,
 		logger:       log.WithFields(zap.String("component", "office-gc")),
+	}
+}
+
+// SetAdmission wires the sealed central admission gate that every managed-
+// root removal must funnel through. Optional in tests; production wiring in
+// backendapp provides the shared physicaldelete.Service.
+func (gc *GarbageCollector) SetAdmission(admission physicaldelete.Admission) {
+	gc.admission = admission
+}
+
+// gateManagedRootDeletion submits one sealed admission request for a
+// managed-root physical action. Missing admission or the deliberately
+// sealed executor returns a typed denial so the caller short-circuits
+// before any filesystem mutation.
+func (gc *GarbageCollector) gateManagedRootDeletion(
+	ctx context.Context,
+	action physicaldelete.Action,
+	resourceID, path string,
+) (physicaldelete.Receipt, error) {
+	if gc.admission == nil {
+		return physicaldelete.Receipt{}, fmt.Errorf(
+			"office gc: physical-delete admission is not configured")
+	}
+	if path == "" {
+		return physicaldelete.Receipt{}, fmt.Errorf(
+			"office gc: %s requires a managed-root path", action)
+	}
+	absPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return physicaldelete.Receipt{}, fmt.Errorf(
+			"office gc: canonicalize %s path %s: %w", action, path, err)
+	}
+	anchor, anchorErr := physicaldelete.CaptureAnchor(absPath)
+	resource := physicaldelete.Resource{
+		Kind:     physicaldelete.ResourceKindManagedRoot,
+		ID:       resourceID,
+		Path:     absPath,
+		RootPath: absPath,
+	}
+	if anchorErr == nil {
+		resource.Anchor = &anchor
+	}
+	request := physicaldelete.Request{
+		Action:    action,
+		Authority: physicaldelete.AuthorityOffice,
+		Resource:  resource,
+	}
+	receipt, err := gc.admission.Execute(ctx, request)
+	if err == nil {
+		return receipt, nil
+	}
+	switch {
+	case errors.Is(err, physicaldelete.ErrExecutorUnavailable),
+		errors.Is(err, physicaldelete.ErrInvalidRequest),
+		errors.Is(err, physicaldelete.ErrInventoryIncomplete),
+		errors.Is(err, physicaldelete.ErrLockUnavailable),
+		errors.Is(err, physicaldelete.ErrProtectedResource),
+		errors.Is(err, physicaldelete.ErrAnchorMismatch):
+		return receipt, err
+	default:
+		return receipt, err
 	}
 }
 
@@ -250,6 +317,19 @@ func buildLiveAndAncestorSets(base string, livePaths []string) (map[string]struc
 // deleteWorktreeDir removes a worktree directory and logs the action.
 func (gc *GarbageCollector) deleteWorktreeDir(absPath string, result *GCSweepResult) {
 	gc.logger.Info("removing orphaned worktree directory", zap.String("path", absPath))
+	// Task 07: route the managed-root physical removal through the sealed
+	// central admission. Missing admission or the deliberately sealed
+	// executor denies before any filesystem mutation so the orphan stays
+	// on disk until an authorized executor is wired.
+	if _, err := gc.gateManagedRootDeletion(
+		context.Background(),
+		physicaldelete.ActionRecursiveRootRemove,
+		absPath,
+		absPath,
+	); err != nil {
+		result.Errors = append(result.Errors, "admission denied orphan "+absPath+": "+err.Error())
+		return
+	}
 	if err := os.RemoveAll(absPath); err != nil {
 		result.Errors = append(result.Errors, "remove worktree "+absPath+": "+err.Error())
 		return

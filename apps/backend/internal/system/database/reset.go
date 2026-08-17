@@ -11,6 +11,8 @@ import (
 
 	"github.com/jmoiron/sqlx"
 	"go.uber.org/zap"
+
+	"github.com/kandev/kandev/internal/physicaldelete"
 )
 
 // resetConfirmToken is the literal value the client must POST as
@@ -145,7 +147,10 @@ func dropUserTables(writer *sqlx.DB) (int, error) {
 
 // wipeSubdirs removes the worktrees/repos/sessions/tasks/quick-chat
 // subdirs configured at construction. Empty paths are skipped so partial
-// wiring is harmless in tests.
+// wiring is harmless in tests. Task 07 binds every destructive step behind
+// the sealed central admission; missing admission or the deliberately sealed
+// executor denies before any filesystem mutation, leaving the directories
+// intact for the user to inspect after the reset aborts.
 func (s *Service) wipeSubdirs() error {
 	targets := []string{
 		s.dirs.Worktrees,
@@ -154,9 +159,33 @@ func (s *Service) wipeSubdirs() error {
 		s.dirs.Tasks,
 		s.dirs.QuickChat,
 	}
+	if s.Admission == nil {
+		return fmt.Errorf("factory reset: physical-delete admission is not configured")
+	}
 	for _, t := range targets {
 		if t == "" {
 			continue
+		}
+		absPath, err := filepath.Abs(filepath.Clean(t))
+		if err != nil {
+			return fmt.Errorf("canonicalize factory-reset path %s: %w", t, err)
+		}
+		anchor, anchorErr := physicaldelete.CaptureAnchor(absPath)
+		resource := physicaldelete.Resource{
+			Kind:     physicaldelete.ResourceKindManagedRoot,
+			ID:       absPath,
+			Path:     absPath,
+			RootPath: absPath,
+		}
+		if anchorErr == nil {
+			resource.Anchor = &anchor
+		}
+		if _, err := s.Admission.Execute(context.Background(), physicaldelete.Request{
+			Action:    physicaldelete.ActionRecursiveRootRemove,
+			Authority: physicaldelete.AuthorityFactoryReset,
+			Resource:  resource,
+		}); err != nil {
+			return fmt.Errorf("admission denied factory-reset wipe of %s: %w", absPath, err)
 		}
 		if err := os.RemoveAll(t); err != nil {
 			return fmt.Errorf("remove %s: %w", t, err)

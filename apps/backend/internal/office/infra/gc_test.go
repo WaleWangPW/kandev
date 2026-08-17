@@ -14,7 +14,36 @@ import (
 	"github.com/kandev/kandev/internal/common/logger"
 	"github.com/kandev/kandev/internal/office/infra"
 	"github.com/kandev/kandev/internal/office/repository/sqlite"
+	"github.com/kandev/kandev/internal/physicaldelete"
 )
+
+// fakeAdmission is a controllable physicaldelete.Admission for the office
+// GC tests. Task 07 binds every managed-root deletion behind the sealed
+// central gate; tests opt into a working executor with admitAll, or assert
+// the fail-closed contract with denyExecution.
+type fakeAdmission struct {
+	admitAll   bool
+	executions []physicaldelete.Request
+}
+
+func (f *fakeAdmission) BeginProvisional(_ context.Context, _ physicaldelete.CreateRequest) (physicaldelete.ProvisionalLease, error) {
+	return physicaldelete.ProvisionalLease{}, nil
+}
+
+func (f *fakeAdmission) Execute(_ context.Context, req physicaldelete.Request) (physicaldelete.Receipt, error) {
+	f.executions = append(f.executions, req)
+	if f.admitAll {
+		return physicaldelete.Receipt{
+			Action: req.Action, ResourceKind: req.Resource.Kind,
+			ResourceID: req.Resource.ID, Mutated: false,
+		}, nil
+	}
+	return physicaldelete.Receipt{
+		Action: req.Action, ResourceKind: req.Resource.Kind,
+		ResourceID: req.Resource.ID,
+		Reason:     physicaldelete.DenialExecutorUnavailable,
+	}, physicaldelete.ErrExecutorUnavailable
+}
 
 // mockDockerClient implements infra.DockerClient for testing.
 type mockDockerClient struct {
@@ -125,6 +154,9 @@ func newTestGC(
 
 	log := logger.Default()
 	gc := infra.NewGarbageCollector(repo, inv, log, worktreeBase, docker, 0)
+	// Task 07: route every managed-root removal through a working admission
+	// so the existing physical-removal contract still drives these tests.
+	gc.SetAdmission(&fakeAdmission{admitAll: true})
 
 	execSQL := func(query string, args ...interface{}) {
 		t.Helper()

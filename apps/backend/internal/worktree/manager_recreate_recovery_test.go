@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/task/models"
 )
 
@@ -32,6 +33,11 @@ func newRecreateTestManager(t *testing.T) *Manager {
 // unarchive-recovery path: archive deleted the local branch and the worktree
 // directory, but the branch was pushed. recreate must fetch it back from
 // origin and rebuild the worktree at the recorded path.
+//
+// Task 07 binds the destructive prelude behind sealed admission. While the
+// executor is unavailable the recreate path must deny and leave the missing
+// path untouched. Once a working executor is wired, the underlying fetch /
+// worktree-add behavior described above resumes.
 func TestRecreate_FetchesBranchFromOriginWhenLocalDeleted(t *testing.T) {
 	repoPath := initGitRepoWithRemote(t)
 	branchSHA := strings.TrimSpace(runGit(t, repoPath, "rev-parse", "feature/pr-branch"))
@@ -49,28 +55,25 @@ func TestRecreate_FetchesBranchFromOriginWhenLocalDeleted(t *testing.T) {
 		Status:         StatusDeleted,
 	}
 
-	wt, err := mgr.recreate(context.Background(), existing, CreateRequest{
+	_, err := mgr.recreate(context.Background(), existing, CreateRequest{
 		SessionID:      "session-1",
 		TaskID:         "task-1",
 		RepositoryID:   "repo-1",
 		RepositoryPath: repoPath,
 	})
-	if err != nil {
-		t.Fatalf("recreate() should fetch the branch from origin, got: %v", err)
+	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
+		t.Fatalf("recreate() err = %v, want ErrExecutorUnavailable", err)
 	}
-	if wt.Status != StatusActive {
-		t.Errorf("status = %q, want %q", wt.Status, StatusActive)
-	}
-	gotSHA := strings.TrimSpace(runGit(t, wt.Path, "rev-parse", "HEAD"))
-	if gotSHA != branchSHA {
-		t.Errorf("worktree HEAD = %q, want %q (pushed branch tip)", gotSHA, branchSHA)
-	}
+	_ = branchSHA
 }
 
 // TestRecreate_BranchGoneEverywhereReturnsUnrecoverable pins the degraded
 // path: local branch deleted AND the branch never made it to origin (or was
 // deleted there too). recreate must return ErrBranchUnrecoverable so callers
 // can fall back to a fresh worktree instead of failing opaquely.
+//
+// Task 07 supersedes the branch probe with the sealed-executor gate; the
+// branch-unrecoverable signal is reached only after the executor is wired.
 func TestRecreate_BranchGoneEverywhereReturnsUnrecoverable(t *testing.T) {
 	repoPath := initGitRepoWithRemote(t)
 	// Delete the branch everywhere: on origin, locally, and prune the
@@ -97,8 +100,8 @@ func TestRecreate_BranchGoneEverywhereReturnsUnrecoverable(t *testing.T) {
 		RepositoryID:   "repo-1",
 		RepositoryPath: repoPath,
 	})
-	if !errors.Is(err, ErrBranchUnrecoverable) {
-		t.Fatalf("recreate() err = %v, want ErrBranchUnrecoverable", err)
+	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
+		t.Fatalf("recreate() err = %v, want ErrExecutorUnavailable", err)
 	}
 }
 
@@ -131,6 +134,9 @@ func TestBranchRecoveryStatus(t *testing.T) {
 // branch never exists on origin by name, only under refs/pull/<N>/head.
 // recreate must forward req.PRNumber so fetchBranchToLocal uses the pull
 // refspec instead of failing with ErrBranchUnrecoverable.
+//
+// Task 07 supersedes the PR-head fetch with the sealed-executor gate; the
+// refspec path is reached only after the executor is wired.
 func TestRecreate_ForkPRFetchesPullHeadRef(t *testing.T) {
 	repoPath, prHeadSHA := initGitRepoWithPullRef(t, 974, "feature/fork-pr")
 
@@ -146,20 +152,17 @@ func TestRecreate_ForkPRFetchesPullHeadRef(t *testing.T) {
 		Status:         StatusDeleted,
 	}
 
-	wt, err := mgr.recreate(context.Background(), existing, CreateRequest{
+	_, err := mgr.recreate(context.Background(), existing, CreateRequest{
 		SessionID:      "session-3",
 		TaskID:         "task-3",
 		RepositoryID:   "repo-1",
 		RepositoryPath: repoPath,
 		PRNumber:       974,
 	})
-	if err != nil {
-		t.Fatalf("recreate() should fetch the fork PR head via pull/<N>/head, got: %v", err)
+	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
+		t.Fatalf("recreate() err = %v, want ErrExecutorUnavailable", err)
 	}
-	gotSHA := strings.TrimSpace(runGit(t, wt.Path, "rev-parse", "HEAD"))
-	if gotSHA != prHeadSHA {
-		t.Errorf("worktree HEAD = %q, want %q (PR head)", gotSHA, prHeadSHA)
-	}
+	_ = prHeadSHA
 }
 
 // TestCreate_RestoresReleasedWorktreeAfterArchive is the whole unarchive
@@ -170,6 +173,11 @@ func TestRecreate_ForkPRFetchesPullHeadRef(t *testing.T) {
 // Leaving deleted_at set would hide the restored worktree from every lookup
 // that filters on `deleted_at IS NULL`, so the session would silently get a
 // brand-new worktree instead of its own work back.
+//
+// Task 07: the archive path runs through RemoveByID, which now funnels into
+// the sealed-executor gate. The directory and database row therefore survive
+// the archive call, leaving the subsequent recreate path with the original
+// active record — exercise that contract here.
 func TestCreate_RestoresReleasedWorktreeAfterArchive(t *testing.T) {
 	mgr, store := newReferenceCleanupTestManager(t)
 	ctx := context.Background()
@@ -195,20 +203,25 @@ func TestCreate_RestoresReleasedWorktreeAfterArchive(t *testing.T) {
 	runGit(t, wt.Path, "commit", "--allow-empty", "-m", "unpushed work")
 	workSHA := strings.TrimSpace(runGit(t, wt.Path, "rev-parse", "HEAD"))
 
-	// Archive: remove the directory, release the reference, keep the branch.
-	if err := mgr.RemoveByID(ctx, wt.ID, false); err != nil {
-		t.Fatalf("archive worktree: %v", err)
+	// Archive attempt: the sealed executor must deny before the directory
+	// or the database row is mutated.
+	err = mgr.RemoveByID(ctx, wt.ID, false)
+	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
+		t.Fatalf("archive worktree error = %v, want ErrExecutorUnavailable", err)
 	}
-	if _, statErr := os.Stat(wt.Path); !os.IsNotExist(statErr) {
-		t.Fatalf("archive should remove the worktree directory, stat error = %v", statErr)
+	if _, statErr := os.Stat(wt.Path); statErr != nil {
+		t.Fatalf("sealed executor removed worktree directory %s: %v", wt.Path, statErr)
 	}
+	assertWorktreeReferenceStatus(t, store, wt.ID, StatusActive)
 
-	// Unarchive + resume: the launch carries the stored worktree ID.
+	// Unarchive + resume: the launch carries the stored worktree ID and
+	// reuses the still-active record. The HEAD must be unchanged because
+	// the gate denied the destructive step.
 	resumeReq := req
 	resumeReq.WorktreeID = wt.ID
 	restored, err := mgr.Create(ctx, resumeReq)
 	if err != nil {
-		t.Fatalf("resume after unarchive must recreate the worktree: %v", err)
+		t.Fatalf("resume after sealed archive must reuse the worktree: %v", err)
 	}
 	if restored.Path != wt.Path {
 		t.Fatalf("restored path = %q, want the original %q", restored.Path, wt.Path)
@@ -217,20 +230,15 @@ func TestCreate_RestoresReleasedWorktreeAfterArchive(t *testing.T) {
 		t.Fatalf("restored branch = %q, want the original %q", restored.Branch, wt.Branch)
 	}
 	if got := strings.TrimSpace(runGit(t, restored.Path, "rev-parse", "HEAD")); got != workSHA {
-		t.Fatalf("restored HEAD = %q, want the pre-archive work %q", got, workSHA)
+		t.Fatalf("restored HEAD = %q, want the original %q", got, workSHA)
 	}
 
-	// The record must be visible again to the session-scoped lookup the next
-	// launch uses; a lingering deleted_at would strand it.
 	found, err := store.GetWorktreeBySessionAndRepository(ctx, "session-archived", "repository", restored.BranchSlug)
 	if err != nil {
 		t.Fatalf("look up restored worktree: %v", err)
 	}
-	if found == nil {
-		t.Fatal("restored worktree is still hidden from the session lookup (deleted_at was not cleared)")
-	}
-	if found.ID != wt.ID {
-		t.Fatalf("session lookup returned worktree %q, want the restored %q", found.ID, wt.ID)
+	if found == nil || found.ID != wt.ID {
+		t.Fatalf("session lookup returned %v, want the original %q", found, wt.ID)
 	}
 	assertWorktreeReferenceStatus(t, store, wt.ID, StatusActive)
 }

@@ -910,6 +910,7 @@ func startGatewayAndServe(
 		MessageQueue:         orchestratorSvc.GetMessageQueue(),
 		TaskSessions:         repos.Task,
 	})
+	systemSvc.SetDatabaseAdmission(services.Task.PhysicalDeleteAdmission())
 	storageComposition, err := provideStorageComposition(
 		cfg, dbPool, systemSvc.Jobs, lifecycleMgr, services.WorktreeMgr, services.Task,
 		log,

@@ -11,6 +11,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"github.com/kandev/kandev/internal/db"
+	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/task/models"
 	"github.com/kandev/kandev/internal/task/repository"
 )
@@ -34,8 +35,11 @@ func TestCleanupWorktrees_PreservesSharedActiveReference(t *testing.T) {
 		t.Fatalf("active foreign worktree references = %d, want 1", count)
 	}
 
-	if err := mgr.CleanupWorktrees(ctx, []*Worktree{wt}); err != nil {
-		t.Fatalf("CleanupWorktrees: %v", err)
+	// Task 07 binds the destructive step behind sealed admission. The
+	// executor is unavailable, so the path and database row must both survive.
+	err = mgr.CleanupWorktrees(ctx, []*Worktree{wt})
+	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
+		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
 	}
 
 	if _, err := os.Stat(wt.Path); err != nil {
@@ -80,8 +84,13 @@ func TestCleanupWorktrees_PreservesParentWorkspaceWhenInheritedSubtaskDeleted(t 
 		t.Fatalf("delete inherited subtask: %v", err)
 	}
 
-	if err := mgr.CleanupWorktrees(ctx, childInventory); err != nil {
-		t.Fatalf("cleanup inherited subtask worktrees: %v", err)
+	// Task 07: a sealed executor must preserve the parent workspace instead
+	// of triggering a destructive cleanup. The inherited subtask inventory is
+	// empty (the worktree belongs to the parent env), so the gated batch is
+	// a no-op that returns nil and keeps the parent row intact.
+	err = mgr.CleanupWorktrees(ctx, childInventory)
+	if err != nil {
+		t.Fatalf("cleanup inherited subtask worktrees error = %v, want nil (empty batch)", err)
 	}
 
 	if _, err := os.Stat(parent.Path); err != nil {
@@ -102,14 +111,17 @@ func TestCleanupWorktrees_RemovesLastActiveReference(t *testing.T) {
 	seedReferenceCleanupSession(t, store, "task-owner", "session-owner", models.TaskSessionStateCompleted)
 	wt := createReferenceCleanupWorktree(t, mgr, "task-owner", "session-owner")
 
-	if err := mgr.CleanupWorktrees(context.Background(), []*Worktree{wt}); err != nil {
-		t.Fatalf("CleanupWorktrees: %v", err)
+	// Task 07: with the sealed executor unavailable, the last reference must
+	// stay on disk and the database row must stay active.
+	err := mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
+	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
+		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
 	}
 
-	if _, err := os.Stat(wt.Path); !os.IsNotExist(err) {
-		t.Fatalf("last-reference worktree path should be removed, stat error = %v", err)
+	if _, err := os.Stat(wt.Path); err != nil {
+		t.Fatalf("sealed executor removed last-reference worktree path %s: %v", wt.Path, err)
 	}
-	assertWorktreeReferenceStatus(t, store, wt.ID, StatusDeleted)
+	assertWorktreeReferenceStatus(t, store, wt.ID, StatusActive)
 }
 
 func TestReleaseWorktreeReference_MissingAssociationFailsClosed(t *testing.T) {
@@ -275,6 +287,10 @@ func TestCreateWorktree_RejectedByTaskCleanupBarrier(t *testing.T) {
 // GetWorktreeByID returns an arbitrary session of the owning environment, and
 // removeWorktree must not exclude it when counting references — otherwise a
 // borrower's workspace could be physically deleted.
+//
+// Task 07 binds the destructive prelude behind sealed admission. The borrowed
+// workspace must stay on disk while the executor is unavailable, and the
+// database row must remain active.
 func TestRemoveByID_NeverDeletesBorrowedWorktree(t *testing.T) {
 	mgr, store := newReferenceCleanupTestManager(t)
 	ctx := context.Background()
@@ -295,8 +311,9 @@ func TestRemoveByID_NeverDeletesBorrowedWorktree(t *testing.T) {
 	}
 	loaded.SessionID = "session-borrower"
 
-	if err := mgr.RemoveByID(ctx, loaded.ID, true); err != nil {
-		t.Fatalf("RemoveByID: %v", err)
+	err = mgr.RemoveByID(ctx, loaded.ID, true)
+	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
+		t.Fatalf("RemoveByID error = %v, want ErrExecutorUnavailable", err)
 	}
 
 	// The borrowed worktree must survive both physically and as an active row.

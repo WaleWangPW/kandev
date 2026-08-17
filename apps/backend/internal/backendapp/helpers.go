@@ -599,7 +599,14 @@ func registerRoutes(p routeParams) {
 	handoffSvc.SetSessionReader(p.taskRepo)
 	if p.lifecycleMgr != nil {
 		if wtMgr := p.lifecycleMgr.WorktreeManager(); wtMgr != nil {
-			handoffSvc.SetWorkspaceCleaner(worktree.NewHandoffCleaner(wtMgr, p.log))
+			cleaner := worktree.NewHandoffCleaner(wtMgr, p.log)
+			// Task 07: every destructive handoff cleanup step must funnel
+			// through the shared central admission so an unavailable
+			// executor keeps the plain folder / multi-repo root in place.
+			if admission := wtMgr.Admission(); admission != nil {
+				cleaner.SetAdmission(admission)
+			}
+			handoffSvc.SetWorkspaceCleaner(cleaner)
 		}
 	}
 	handoffSvc.SetRunCanceller(p.orchestratorSvc)

@@ -206,6 +206,10 @@ func newTestService(t *testing.T) (*Service, *jobs.Tracker, *stubBus, string) {
 		}
 	}
 	svc := NewService(pool, dataDir, dirs, tracker, log)
+	// Task 07: every destructive step must funnel through the sealed central
+	// admission. Tests opt in with a permissive admission; the
+	// fail-closed contract is covered in a dedicated test below.
+	svc.Admission = newPermissiveAdmissionForReset()
 	return svc, tracker, stub, dataDir
 }
 

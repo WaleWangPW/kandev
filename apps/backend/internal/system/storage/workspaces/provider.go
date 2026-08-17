@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/system/storage"
 )
 
@@ -39,6 +41,61 @@ func New(config Config) *Provider {
 		config.Retention = 7 * 24 * time.Hour
 	}
 	return &Provider{config: config}
+}
+
+// gateManagedRootDeletion submits one sealed admission request for a
+// managed-root destructive action. Missing admission or the deliberately
+// sealed executor returns a typed denial so the caller short-circuits
+// before any prune or filesystem mutation.
+func (p *Provider) gateManagedRootDeletion(
+	ctx context.Context,
+	authority physicaldelete.Authority,
+	action physicaldelete.Action,
+	resourceID, path string,
+) (physicaldelete.Receipt, error) {
+	if p.config.Admission == nil {
+		return physicaldelete.Receipt{}, fmt.Errorf(
+			"workspace quarantine: physical-delete admission is not configured")
+	}
+	if path == "" {
+		return physicaldelete.Receipt{}, fmt.Errorf(
+			"workspace quarantine: %s requires a managed-root path", action)
+	}
+	absPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return physicaldelete.Receipt{}, fmt.Errorf(
+			"workspace quarantine: canonicalize %s path %s: %w", action, path, err)
+	}
+	anchor, anchorErr := physicaldelete.CaptureAnchor(absPath)
+	resource := physicaldelete.Resource{
+		Kind:     physicaldelete.ResourceKindQuarantineEntry,
+		ID:       resourceID,
+		Path:     absPath,
+		RootPath: absPath,
+	}
+	if anchorErr == nil {
+		resource.Anchor = &anchor
+	}
+	request := physicaldelete.Request{
+		Action:    action,
+		Authority: authority,
+		Resource:  resource,
+	}
+	receipt, err := p.config.Admission.Execute(ctx, request)
+	if err == nil {
+		return receipt, nil
+	}
+	switch {
+	case errors.Is(err, physicaldelete.ErrExecutorUnavailable),
+		errors.Is(err, physicaldelete.ErrInvalidRequest),
+		errors.Is(err, physicaldelete.ErrInventoryIncomplete),
+		errors.Is(err, physicaldelete.ErrLockUnavailable),
+		errors.Is(err, physicaldelete.ErrProtectedResource),
+		errors.Is(err, physicaldelete.ErrAnchorMismatch):
+		return receipt, err
+	default:
+		return receipt, err
+	}
 }
 
 type candidate struct {
@@ -373,6 +430,19 @@ func (p *Provider) permanentDelete(
 	}
 	if _, err := directorySizeNoFollow(entry.QuarantinePath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return entry, fmt.Errorf("validate quarantined workspace: %w", err)
+	}
+	// Task 07: route both the optional worktree prune and the filesystem
+	// removal through the sealed central admission. A missing admission or
+	// the deliberately sealed executor denies the destructive step before
+	// any Git registration mutation or directory deletion.
+	if _, err := p.gateManagedRootDeletion(
+		ctx,
+		physicaldelete.AuthorityStorage,
+		physicaldelete.ActionPurge,
+		id,
+		entry.QuarantinePath,
+	); err != nil {
+		return entry, fmt.Errorf("admission denied quarantine purge for %s: %w", id, err)
 	}
 	if p.config.Pruner != nil {
 		if err := p.config.Pruner.PruneQuarantinedWorkspace(ctx, entry); err != nil {

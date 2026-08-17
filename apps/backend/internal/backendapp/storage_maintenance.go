@@ -15,6 +15,7 @@ import (
 	"github.com/kandev/kandev/internal/common/config"
 	"github.com/kandev/kandev/internal/common/logger"
 	"github.com/kandev/kandev/internal/db"
+	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/system/jobs"
 	systemmetrics "github.com/kandev/kandev/internal/system/metrics"
 	systemsettings "github.com/kandev/kandev/internal/system/settings"
@@ -61,13 +62,6 @@ func provideStorageComposition(
 	if err := tempArtifacts.Reconcile(context.Background()); err != nil {
 		logError("reconcile temporary artifact registry", err)
 	}
-	tempProvider := tempartifacts.NewProvider(tempartifacts.ProviderConfig{
-		Registry: tempArtifacts, Store: store, HomeDir: cfg.ResolvedHomeDir(),
-		TrashDir: filepath.Join(cfg.ResolvedHomeDir(), "trash"),
-	})
-	if err := tempProvider.Reconcile(context.Background()); err != nil {
-		logError("reconcile temporary artifact quarantine", err)
-	}
 	coordinator := activity.NewCoordinator(activity.Options{})
 	taskSvc.SetTaskResourceCleanupActivityGate(&taskCleanupActivityGate{coordinator: coordinator})
 	goCache := gocache.New(gocache.Config{
@@ -81,7 +75,25 @@ func provideStorageComposition(
 	}
 
 	inventory := &storageInventory{reader: pool.Reader(), worktrees: worktreeMgr, lifecycle: lifecycleMgr}
-	workspaceFactory := newWorkspaceFactory(cfg, store, inventory, worktreeMgr)
+	// Task 07: route every destructive storage/quarantine step through the
+	// shared central admission. The worktree manager and the task service
+	// own the same physicaldelete.Service instance; taskSvc exposes it.
+	var quarantineAdmission physicaldelete.Admission
+	if taskSvc != nil {
+		quarantineAdmission = taskSvc.PhysicalDeleteAdmission()
+	}
+	tempProvider := tempartifacts.NewProvider(tempartifacts.ProviderConfig{
+		Registry: tempArtifacts, Store: store, HomeDir: cfg.ResolvedHomeDir(),
+		TrashDir: filepath.Join(cfg.ResolvedHomeDir(), "trash"),
+		// Task 07: route every destructive temp-artifact quarantine step
+		// through the shared central admission so an unavailable executor
+		// denies before any filesystem mutation.
+		Admission: quarantineAdmission,
+	})
+	if err := tempProvider.Reconcile(context.Background()); err != nil {
+		logError("reconcile temporary artifact quarantine", err)
+	}
+	workspaceFactory := newWorkspaceFactory(cfg, store, inventory, worktreeMgr, quarantineAdmission)
 	dockerClient := &lazyStorageDocker{provider: lifecycleMgr.DockerClientProvider(), activity: coordinator}
 	dockerProvider := dockerstore.NewProvider(
 		dockerClient, &containerInventory{reader: pool.Reader()}, settings,
@@ -172,12 +184,14 @@ func newWorkspaceFactory(
 	store *storagepkg.Store,
 	inventory workspaces.InventorySource,
 	pruner workspaces.WorktreePruner,
+	admission physicaldelete.Admission,
 ) workspaceFactory {
 	return func(current storagepkg.StorageMaintenanceSettings) *workspaces.Provider {
 		return workspaces.New(workspaces.Config{
 			TasksRoot: filepath.Join(cfg.ResolvedHomeDir(), "tasks"),
 			TrashRoot: filepath.Join(cfg.ResolvedHomeDir(), "trash"),
 			Inventory: inventory, Store: store, Pruner: pruner,
+			Admission:   admission,
 			GracePeriod: time.Duration(current.OrphanGraceHours) * time.Hour,
 			Retention:   time.Duration(current.QuarantineRetentionHours) * time.Hour,
 		})

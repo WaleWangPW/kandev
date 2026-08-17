@@ -446,6 +446,14 @@ func (s *Service) SetPhysicalDeleteAdmission(admission physicaldelete.Admission)
 	s.physicalDeleteAdmission = admission
 }
 
+// PhysicalDeleteAdmission exposes the shared admission so adjacent managed-
+// root consumers (storage quarantine, Office GC, factory reset, handoff
+// cleanup) can route through the same sealed gate. Returns nil when the
+// service has not been wired with the central authority.
+func (s *Service) PhysicalDeleteAdmission() physicaldelete.Admission {
+	return s.physicalDeleteAdmission
+}
+
 // SetArchivedResourceTerminalRepository wires the strict DB-only terminal
 // repository used by the three Task06 actions. Optional in tests; production
 // backendapp wires this through the same TaskResourceCleanupRepository the

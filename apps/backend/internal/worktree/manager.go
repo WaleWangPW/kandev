@@ -200,6 +200,13 @@ func (m *Manager) SetAdmission(admission physicaldelete.Admission) {
 	m.admission = admission
 }
 
+// Admission exposes the sealed central admission so adjacent managed-root
+// consumers (handoff cleanup, Office GC, factory reset) can route through
+// the same gate. Returns nil when no admission has been wired.
+func (m *Manager) Admission() physicaldelete.Admission {
+	return m.admission
+}
+
 // ListActiveWorktreePaths returns the absolute on-disk paths of all
 // currently active, non-deleted worktrees. Used by the office GC as the
 // authoritative inventory of paths that must not be swept.

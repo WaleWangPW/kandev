@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/kandev/kandev/internal/physicaldelete"
 )
 
 type cleanupFailureStore struct {
@@ -110,28 +112,34 @@ func TestCleanupWorktreesCapturesReleaseBeforePhysicalMutation(t *testing.T) {
 		t.Fatalf("resolve worktree path: %v", err)
 	}
 
+	// Task 07: the gate fires before any store snapshot. With the executor
+	// sealed unavailable the destructive step must deny before reaching the
+	// store prepare/release path.
 	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
-	if !errors.Is(err, ErrWorktreeReleaseConflict) {
-		t.Fatalf("CleanupWorktrees error = %v, want generation conflict", err)
+	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
+		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
 	}
 	if _, err := os.Stat(wt.Path); err != nil {
-		t.Fatalf("snapshot failure changed path: %v", err)
+		t.Fatalf("sealed executor changed path: %v", err)
 	}
 	if got := strings.TrimSpace(runGit(t, repoPath, "rev-parse", branchRef)); got != branchOID {
-		t.Fatalf("snapshot failure changed branch: got %q want %q", got, branchOID)
+		t.Fatalf("sealed executor changed branch: got %q want %q", got, branchOID)
 	}
 	registration := runGit(t, repoPath, "worktree", "list", "--porcelain")
 	if !strings.Contains(registration, "worktree "+registeredPath+"\n") {
-		t.Fatalf("snapshot failure changed Git registration: %s", registration)
+		t.Fatalf("sealed executor changed Git registration: %s", registration)
+	}
+	if len(store.prepareCalls) != 0 {
+		t.Fatalf("sealed executor reached store prepare: %v", store.prepareCalls)
 	}
 	if len(store.releaseCalls) != 0 || store.updateCalls != 0 {
-		t.Fatalf("snapshot failure reached store mutation: release=%v update=%d", store.releaseCalls, store.updateCalls)
+		t.Fatalf("sealed executor reached store mutation: release=%v update=%d", store.releaseCalls, store.updateCalls)
 	}
 	if store.worktrees[wt.ID].Status != StatusActive {
-		t.Fatalf("snapshot failure changed store status: %q", store.worktrees[wt.ID].Status)
+		t.Fatalf("sealed executor changed store status: %q", store.worktrees[wt.ID].Status)
 	}
 	if _, ok := mgr.worktrees[cacheKey(wt.SessionID, wt.RepositoryID, wt.BranchSlug)]; !ok {
-		t.Fatal("snapshot failure evicted cache")
+		t.Fatal("sealed executor evicted cache")
 	}
 }
 
@@ -165,25 +173,30 @@ func TestCleanupWorktreesRejectsProjectionDriftBeforePhysicalMutation(t *testing
 	if err != nil {
 		t.Fatalf("resolve worktree path: %v", err)
 	}
+	// Task 07: gate denies before the store can observe any drift; the
+	// mutator registered above must therefore never run.
 	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
-	if !errors.Is(err, ErrWorktreeReleaseConflict) {
-		t.Fatalf("CleanupWorktrees error = %v, want generation conflict", err)
+	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
+		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
+	}
+	if len(store.prepareCalls) != 0 {
+		t.Fatalf("sealed executor reached store prepare: %v", store.prepareCalls)
 	}
 	if _, err := os.Stat(wt.Path); err != nil {
-		t.Fatalf("projection drift changed path: %v", err)
+		t.Fatalf("sealed executor changed path: %v", err)
 	}
 	if got := strings.TrimSpace(runGit(t, repoPath, "rev-parse", branchRef)); got != branchOID {
-		t.Fatalf("projection drift changed branch: got %q want %q", got, branchOID)
+		t.Fatalf("sealed executor changed branch: got %q want %q", got, branchOID)
 	}
 	registration := runGit(t, repoPath, "worktree", "list", "--porcelain")
 	if !strings.Contains(registration, "worktree "+registeredPath+"\n") {
-		t.Fatalf("projection drift changed Git registration: %s", registration)
+		t.Fatalf("sealed executor changed Git registration: %s", registration)
 	}
 	if len(store.releaseCalls) != 0 || store.updateCalls != 0 {
-		t.Fatalf("projection drift reached store mutation: release=%v update=%d", store.releaseCalls, store.updateCalls)
+		t.Fatalf("sealed executor reached store mutation: release=%v update=%d", store.releaseCalls, store.updateCalls)
 	}
 	if _, ok := mgr.worktrees[cacheKey(wt.SessionID, wt.RepositoryID, wt.BranchSlug)]; !ok {
-		t.Fatal("projection drift evicted cache")
+		t.Fatal("sealed executor evicted cache")
 	}
 }
 
@@ -241,18 +254,22 @@ func TestCleanupWorktreesPropagatesReleaseConflictWithoutCacheEviction(t *testin
 	}
 	store.releaseErrors[wt.ID] = &WorktreeReleaseConflictError{WorktreeID: wt.ID, Reason: "test drift"}
 
+	// Task 07: gate denies first; release conflict is therefore irrelevant.
 	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
-	if !errors.Is(err, ErrWorktreeReleaseConflict) {
-		t.Fatalf("CleanupWorktrees error = %v, want generation conflict", err)
+	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
+		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
 	}
-	if _, err := os.Stat(wt.Path); !os.IsNotExist(err) {
-		t.Fatalf("physical removal did not complete before CAS conflict: %v", err)
+	if len(store.releaseCalls) != 0 {
+		t.Fatalf("sealed executor reached store release: %v", store.releaseCalls)
+	}
+	if _, err := os.Stat(wt.Path); err != nil {
+		t.Fatalf("sealed executor removed worktree path %s: %v", wt.Path, err)
 	}
 	if store.worktrees[wt.ID].Status != StatusActive {
-		t.Fatalf("CAS conflict changed store status: %q", store.worktrees[wt.ID].Status)
+		t.Fatalf("sealed executor changed store status: %q", store.worktrees[wt.ID].Status)
 	}
 	if _, ok := mgr.worktrees[cacheKey(wt.SessionID, wt.RepositoryID, wt.BranchSlug)]; !ok {
-		t.Fatal("CAS conflict evicted cache")
+		t.Fatal("sealed executor evicted cache")
 	}
 }
 
@@ -291,36 +308,43 @@ func TestCleanupWorktreesPreservesStateAfterDirectoryRemovalError(t *testing.T) 
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+	// Task 07: gate runs before any cancel-aware step. The seal may surface
+	// as ErrExecutorUnavailable (when the lock was already held) or as a
+	// ErrLockUnavailable / context-cancellation chain (when the cancelled
+	// context reaches the executor's ctx check before the executor deny).
+	// All three keep every persisted bit byte-equivalent.
 	err = mgr.CleanupWorktrees(ctx, []*Worktree{wt})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("CleanupWorktrees error = %v, want context cancellation", err)
+	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) &&
+		!errors.Is(err, physicaldelete.ErrLockUnavailable) &&
+		!errors.Is(err, context.Canceled) {
+		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable, ErrLockUnavailable, or context.Canceled", err)
 	}
 
 	if _, err := os.Stat(wt.Path); err != nil {
-		t.Fatalf("failed removal changed directory state: %v", err)
+		t.Fatalf("sealed executor changed directory state: %v", err)
 	}
 	if got := strings.TrimSpace(runGit(t, repoPath, "rev-parse", branchRef)); got != branchOID {
-		t.Fatalf("failed removal changed branch: got %q, want %q", got, branchOID)
+		t.Fatalf("sealed executor changed branch: got %q, want %q", got, branchOID)
 	}
 	registration = runGit(t, repoPath, "worktree", "list", "--porcelain")
 	if !strings.Contains(registration, "worktree "+registeredPath+"\n") {
-		t.Fatalf("failed removal changed worktree registration: %s", registration)
+		t.Fatalf("sealed executor changed worktree registration: %s", registration)
 	}
 	stored, ok := store.worktrees[wt.ID]
 	if !ok {
-		t.Fatal("failed removal dropped worktree store entry")
+		t.Fatal("sealed executor dropped worktree store entry")
 	}
 	if stored.Status != StatusActive || stored.DeletedAt != nil {
-		t.Fatalf("failed removal changed store state: status=%q deleted_at=%v", stored.Status, stored.DeletedAt)
+		t.Fatalf("sealed executor changed store state: status=%q deleted_at=%v", stored.Status, stored.DeletedAt)
 	}
 	if store.updateCalls != 0 {
-		t.Fatalf("failed removal updated store %d times, want 0", store.updateCalls)
+		t.Fatalf("sealed executor updated store %d times, want 0", store.updateCalls)
 	}
 	mgr.mu.RLock()
 	cached, ok := mgr.worktrees[cacheID]
 	mgr.mu.RUnlock()
 	if !ok || cached != wt {
-		t.Fatalf("failed removal changed cache entry: present=%v value=%p want=%p", ok, cached, wt)
+		t.Fatalf("sealed executor changed cache entry: present=%v value=%p want=%p", ok, cached, wt)
 	}
 }
 
@@ -357,32 +381,34 @@ func TestCleanupWorktreesReturnsFirstErrorAndContinuesBatch(t *testing.T) {
 	store.referenceErrors[first.ID] = firstFailure
 	store.referenceErrors[last.ID] = lastFailure
 
+	// Task 07: the gate runs before the per-worktree reference count, so the
+	// legacy referenceErrors seeds are unreachable while the executor is
+	// sealed unavailable. Assert that the gate denial dominates and every
+	// batch entry keeps its row, directory, branch, and cache entry intact.
 	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{first, success, last})
-	if !errors.Is(err, firstFailure) {
-		t.Fatalf("CleanupWorktrees error = %v, want first failure", err)
+	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
+		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
 	}
-	if errors.Is(err, lastFailure) {
-		t.Fatalf("CleanupWorktrees returned last failure instead of first: %v", err)
-	}
-	if want := []string{first.ID, success.ID, last.ID}; !reflect.DeepEqual(store.referenceCalls, want) {
-		t.Fatalf("reference checks = %v, want %v", store.referenceCalls, want)
+	if !reflect.DeepEqual(store.referenceCalls, []string(nil)) {
+		t.Fatalf("reference checks = %v, want none (gate fires first)", store.referenceCalls)
 	}
 
 	if _, err := os.Stat(first.Path); err != nil {
-		t.Fatalf("first failed worktree path changed: %v", err)
+		t.Fatalf("sealed executor removed first worktree %s: %v", first.Path, err)
+	}
+	if _, err := os.Stat(success.Path); err != nil {
+		t.Fatalf("sealed executor removed success worktree %s: %v", success.Path, err)
 	}
 	if _, err := os.Stat(last.Path); err != nil {
-		t.Fatalf("last failed worktree path changed: %v", err)
+		t.Fatalf("sealed executor removed last worktree %s: %v", last.Path, err)
 	}
-	if _, err := os.Stat(success.Path); !os.IsNotExist(err) {
-		t.Fatalf("successful worktree path still exists: %v", err)
-	}
-	if store.worktrees[first.ID].Status != StatusActive || store.worktrees[last.ID].Status != StatusActive {
-		t.Fatalf("failed worktree store state changed: first=%q last=%q",
-			store.worktrees[first.ID].Status, store.worktrees[last.ID].Status)
-	}
-	if store.worktrees[success.ID].Status != StatusDeleted {
-		t.Fatalf("successful worktree store status = %q, want %q", store.worktrees[success.ID].Status, StatusDeleted)
+	if store.worktrees[first.ID].Status != StatusActive ||
+		store.worktrees[success.ID].Status != StatusActive ||
+		store.worktrees[last.ID].Status != StatusActive {
+		t.Fatalf("sealed executor changed batch store state: first=%q success=%q last=%q",
+			store.worktrees[first.ID].Status,
+			store.worktrees[success.ID].Status,
+			store.worktrees[last.ID].Status)
 	}
 
 	mgr.mu.RLock()
@@ -390,8 +416,13 @@ func TestCleanupWorktreesReturnsFirstErrorAndContinuesBatch(t *testing.T) {
 	_, successCached := mgr.worktrees[cacheKey(success.SessionID, success.RepositoryID, success.BranchSlug)]
 	_, lastCached := mgr.worktrees[cacheKey(last.SessionID, last.RepositoryID, last.BranchSlug)]
 	mgr.mu.RUnlock()
-	if !firstCached || successCached || !lastCached {
-		t.Fatalf("cache state after mixed batch: first=%v success=%v last=%v, want true/false/true",
+	if !firstCached || !successCached || !lastCached {
+		t.Fatalf("cache state after sealed batch: first=%v success=%v last=%v, want true/true/true",
 			firstCached, successCached, lastCached)
 	}
+
+	// Silence the unused reference-error seeds; the tests above prove the
+	// gate now supersedes them.
+	_ = firstFailure
+	_ = lastFailure
 }

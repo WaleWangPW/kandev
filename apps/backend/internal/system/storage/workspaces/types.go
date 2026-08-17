@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/system/storage"
 )
 
@@ -65,6 +66,10 @@ type Config struct {
 	Now         func() time.Time
 	NewID       func() string
 	Pruner      WorktreePruner
+	// Admission is the sealed central gate every destructive quarantine
+	// step must funnel through. nil is fail-closed; production wiring in
+	// backendapp provides the shared physicaldelete.Service instance.
+	Admission physicaldelete.Admission
 }
 
 type WorktreePruner interface {

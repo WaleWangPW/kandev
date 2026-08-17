@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/system/storage"
 )
 
@@ -32,6 +33,9 @@ type ProviderConfig struct {
 	Retention time.Duration
 	Now       func() time.Time
 	NewID     func() string
+	// Admission is the sealed central gate that every destructive temp-
+	// artifact quarantine step must funnel through. nil is fail-closed.
+	Admission physicaldelete.Admission
 }
 
 type Provider struct {
@@ -42,6 +46,70 @@ type Provider struct {
 	retention time.Duration
 	now       func() time.Time
 	newID     func() string
+	admission physicaldelete.Admission
+}
+
+// SetAdmission wires the sealed central admission gate that every
+// destructive temp-artifact quarantine step must funnel through.
+// Production callers must wire this; tests may omit it to assert the
+// fail-closed contract.
+func (p *Provider) SetAdmission(admission physicaldelete.Admission) {
+	p.admission = admission
+}
+
+// gateManagedRootDeletion submits one sealed admission request for a
+// managed-root destructive action. Missing admission or the deliberately
+// sealed executor returns a typed denial so the caller short-circuits
+// before any filesystem mutation.
+func (p *Provider) gateManagedRootDeletion(
+	ctx context.Context,
+	authority physicaldelete.Authority,
+	action physicaldelete.Action,
+	resourceID, path string,
+) (physicaldelete.Receipt, error) {
+	if p.admission == nil {
+		return physicaldelete.Receipt{}, fmt.Errorf(
+			"tempartifacts quarantine: physical-delete admission is not configured")
+	}
+	if path == "" {
+		return physicaldelete.Receipt{}, fmt.Errorf(
+			"tempartifacts quarantine: %s requires a managed-root path", action)
+	}
+	absPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return physicaldelete.Receipt{}, fmt.Errorf(
+			"tempartifacts quarantine: canonicalize %s path %s: %w", action, path, err)
+	}
+	anchor, anchorErr := physicaldelete.CaptureAnchor(absPath)
+	resource := physicaldelete.Resource{
+		Kind:     physicaldelete.ResourceKindQuarantineEntry,
+		ID:       resourceID,
+		Path:     absPath,
+		RootPath: absPath,
+	}
+	if anchorErr == nil {
+		resource.Anchor = &anchor
+	}
+	request := physicaldelete.Request{
+		Action:    action,
+		Authority: authority,
+		Resource:  resource,
+	}
+	receipt, err := p.admission.Execute(ctx, request)
+	if err == nil {
+		return receipt, nil
+	}
+	switch {
+	case errors.Is(err, physicaldelete.ErrExecutorUnavailable),
+		errors.Is(err, physicaldelete.ErrInvalidRequest),
+		errors.Is(err, physicaldelete.ErrInventoryIncomplete),
+		errors.Is(err, physicaldelete.ErrLockUnavailable),
+		errors.Is(err, physicaldelete.ErrProtectedResource),
+		errors.Is(err, physicaldelete.ErrAnchorMismatch):
+		return receipt, err
+	default:
+		return receipt, err
+	}
 }
 
 type Analysis struct {
@@ -90,6 +158,7 @@ func NewProvider(config ProviderConfig) *Provider {
 		registry: config.Registry, store: config.Store, homeDir: filepath.Clean(config.HomeDir),
 		trashDir:  filepath.Clean(trashDir),
 		retention: retention, now: now, newID: newID,
+		admission: config.Admission,
 	}
 }
 
@@ -447,6 +516,18 @@ func (p *Provider) permanentDelete(
 	}
 	if err := p.registry.ValidateMarker(entry.QuarantinePath, artifact); err != nil {
 		return entry, err
+	}
+	// Task 07: route every destructive temp-artifact quarantine step
+	// through the sealed central admission so an unavailable executor
+	// denies before any filesystem mutation.
+	if _, err := p.gateManagedRootDeletion(
+		ctx,
+		physicaldelete.AuthorityStorage,
+		physicaldelete.ActionPurge,
+		id,
+		entry.QuarantinePath,
+	); err != nil {
+		return entry, fmt.Errorf("admission denied temp-artifact purge for %s: %w", id, err)
 	}
 	if err := os.RemoveAll(entry.QuarantinePath); err != nil {
 		return entry, fmt.Errorf("delete temporary artifact quarantine: %w", err)

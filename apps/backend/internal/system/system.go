@@ -22,6 +22,7 @@ import (
 	"github.com/kandev/kandev/internal/common/logger"
 	"github.com/kandev/kandev/internal/db"
 	"github.com/kandev/kandev/internal/events/bus"
+	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/system/backups"
 	"github.com/kandev/kandev/internal/system/database"
 	"github.com/kandev/kandev/internal/system/disk"
@@ -79,6 +80,17 @@ type Service struct {
 	Storage         *storage.Handler
 	// StorageRuntime owns the scheduler, reconciliation, and durable cleanup worker.
 	StorageRuntime *storage.Runtime
+}
+
+// SetDatabaseAdmission wires the sealed central admission gate onto the
+// database (factory-reset) service. The shared gate is owned by the wider
+// composition layer; this setter just propagates it after both sides are
+// constructed.
+func (s *Service) SetDatabaseAdmission(admission physicaldelete.Admission) {
+	if s == nil || s.Database == nil {
+		return
+	}
+	s.Database.Admission = admission
 }
 
 // Provide constructs the composed Service. The HTTP routes are

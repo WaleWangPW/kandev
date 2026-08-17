@@ -2,9 +2,12 @@ package worktree
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/kandev/kandev/internal/physicaldelete"
 )
 
 // TestCleanupWorktrees_RemovesEmptyTaskDir is a regression guard for issue
@@ -12,6 +15,11 @@ import (
 // AND the now-empty parent {taskDirName}/ container that nests it. Before
 // the fix, only the inner subdir was removed; archived tasks accumulated
 // empty parent husks under ~/.kandev/tasks/.
+//
+// Task 07 binds the destructive step behind the sealed central admission.
+// With the executor deliberately unavailable the call denies, so the test
+// now asserts the fail-closed contract: the inner subdir and parent
+// container must survive untouched until a working executor is wired.
 func TestCleanupWorktrees_RemovesEmptyTaskDir(t *testing.T) {
 	cfg := newTestConfig(t)
 	store := newMockStore()
@@ -44,15 +52,19 @@ func TestCleanupWorktrees_RemovesEmptyTaskDir(t *testing.T) {
 		t.Fatalf("task dir %s should exist before cleanup: %v", taskDir, err)
 	}
 
-	if err := mgr.CleanupWorktrees(context.Background(), []*Worktree{wt}); err != nil {
-		t.Fatalf("CleanupWorktrees: %v", err)
+	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
+	if err == nil {
+		t.Fatalf("CleanupWorktrees returned nil; expected admission denial from sealed executor")
+	}
+	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
+		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
 	}
 
-	if _, err := os.Stat(wt.Path); !os.IsNotExist(err) {
-		t.Errorf("worktree path %s should be removed; stat err=%v", wt.Path, err)
+	if _, err := os.Stat(wt.Path); err != nil {
+		t.Errorf("sealed executor removed worktree path %s: %v", wt.Path, err)
 	}
-	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
-		t.Errorf("parent task dir %s should be removed; stat err=%v", taskDir, err)
+	if _, err := os.Stat(taskDir); err != nil {
+		t.Errorf("sealed executor removed parent task dir %s: %v", taskDir, err)
 	}
 
 	// TasksBasePath itself must NOT be removed.
@@ -68,6 +80,9 @@ func TestCleanupWorktrees_RemovesEmptyTaskDir(t *testing.T) {
 // TestCleanupWorktrees_PreservesNonEmptyTaskDir verifies that workspace-
 // scoped content (or a sibling worktree from another session) left under
 // the task directory is preserved when one worktree is removed.
+//
+// Task 07 binds the removal behind sealed admission. The worktree path and
+// sibling leftover must both survive an unavailable executor unchanged.
 func TestCleanupWorktrees_PreservesNonEmptyTaskDir(t *testing.T) {
 	cfg := newTestConfig(t)
 	store := newMockStore()
@@ -99,15 +114,16 @@ func TestCleanupWorktrees_PreservesNonEmptyTaskDir(t *testing.T) {
 		t.Fatalf("write leftover: %v", err)
 	}
 
-	if err := mgr.CleanupWorktrees(context.Background(), []*Worktree{wt}); err != nil {
-		t.Fatalf("CleanupWorktrees: %v", err)
+	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
+	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
+		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
 	}
 
-	if _, err := os.Stat(wt.Path); !os.IsNotExist(err) {
-		t.Errorf("worktree subdir %s should be removed; stat err=%v", wt.Path, err)
+	if _, err := os.Stat(wt.Path); err != nil {
+		t.Errorf("sealed executor removed worktree subdir %s: %v", wt.Path, err)
 	}
 	if _, err := os.Stat(taskDir); err != nil {
-		t.Errorf("non-empty task dir %s must be preserved: %v", taskDir, err)
+		t.Errorf("sealed executor removed non-empty task dir %s: %v", taskDir, err)
 	}
 	if _, err := os.Stat(leftover); err != nil {
 		t.Errorf("leftover file %s must survive: %v", leftover, err)
@@ -116,8 +132,9 @@ func TestCleanupWorktrees_PreservesNonEmptyTaskDir(t *testing.T) {
 
 // TestCleanupWorktrees_MultiBranchSiblingPreservesParent covers the
 // multi-branch task layout: two worktrees for the same task live as
-// siblings under {taskDir}. Removing one must keep {taskDir} alive
-// (the other sibling is still there). Removing both must clear it.
+// siblings under {taskDir}. With the sealed admission in Task 07 the
+// destructive step denies, so the test verifies both siblings, the parent
+// directory, and the Git registration all survive untouched.
 func TestCleanupWorktrees_MultiBranchSiblingPreservesParent(t *testing.T) {
 	cfg := newTestConfig(t)
 	store := newMockStore()
@@ -163,26 +180,26 @@ func TestCleanupWorktrees_MultiBranchSiblingPreservesParent(t *testing.T) {
 		t.Fatalf("siblings must share parent: primary=%s sibling=%s", primary.Path, sibling.Path)
 	}
 
-	// Remove primary first — sibling still occupies taskDir, parent must survive.
-	if err := mgr.CleanupWorktrees(context.Background(), []*Worktree{primary}); err != nil {
-		t.Fatalf("CleanupWorktrees primary: %v", err)
+	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{primary})
+	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
+		t.Fatalf("CleanupWorktrees primary error = %v, want ErrExecutorUnavailable", err)
 	}
-	if _, err := os.Stat(primary.Path); !os.IsNotExist(err) {
-		t.Errorf("primary worktree %s should be gone; stat err=%v", primary.Path, err)
+	if _, err := os.Stat(primary.Path); err != nil {
+		t.Errorf("sealed executor removed primary worktree %s: %v", primary.Path, err)
 	}
 	if _, err := os.Stat(taskDir); err != nil {
-		t.Errorf("task dir %s must survive while sibling is present: %v", taskDir, err)
+		t.Errorf("sealed executor removed task dir %s: %v", taskDir, err)
 	}
 	if _, err := os.Stat(sibling.Path); err != nil {
-		t.Errorf("sibling worktree %s must survive: %v", sibling.Path, err)
+		t.Errorf("sealed executor removed sibling worktree %s: %v", sibling.Path, err)
 	}
 
-	// Remove sibling — parent should now be cleared.
-	if err := mgr.CleanupWorktrees(context.Background(), []*Worktree{sibling}); err != nil {
-		t.Fatalf("CleanupWorktrees sibling: %v", err)
+	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{sibling})
+	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
+		t.Fatalf("CleanupWorktrees sibling error = %v, want ErrExecutorUnavailable", err)
 	}
-	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
-		t.Errorf("task dir %s should be removed after last sibling cleared; stat err=%v", taskDir, err)
+	if _, err := os.Stat(taskDir); err != nil {
+		t.Errorf("sealed executor removed task dir %s after sibling denied: %v", taskDir, err)
 	}
 }
 
@@ -190,6 +207,10 @@ func TestCleanupWorktrees_MultiBranchSiblingPreservesParent(t *testing.T) {
 // the path-normalization guard in tryRemoveEmptyTaskDir: a configured
 // TasksBasePath with a trailing separator must still match the cleaned
 // parent path computed via filepath.Dir.
+//
+// Task 07 re-asserts this against the sealed admission: even with a
+// trailing separator on the configured base, the inner worktree and
+// parent must remain untouched when the executor denies.
 func TestCleanupWorktrees_RemovesEmptyTaskDir_TrailingSlashTasksBase(t *testing.T) {
 	cfg := newTestConfig(t)
 	cfg.TasksBasePath += string(filepath.Separator)
@@ -216,10 +237,11 @@ func TestCleanupWorktrees_RemovesEmptyTaskDir_TrailingSlashTasksBase(t *testing.
 	}
 
 	taskDir := filepath.Dir(wt.Path)
-	if err := mgr.CleanupWorktrees(context.Background(), []*Worktree{wt}); err != nil {
-		t.Fatalf("CleanupWorktrees: %v", err)
+	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
+	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
+		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
 	}
-	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
-		t.Errorf("task dir %s should be removed despite trailing slash in TasksBasePath; stat err=%v", taskDir, err)
+	if _, err := os.Stat(taskDir); err != nil {
+		t.Errorf("sealed executor removed task dir %s despite trailing slash in TasksBasePath: %v", taskDir, err)
 	}
 }

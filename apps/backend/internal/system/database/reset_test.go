@@ -150,3 +150,56 @@ func TestHandleReset_Confirmed_Returns202WithJobID(t *testing.T) {
 		waitForState(t, tracker, j.ID, jobs.StateSucceeded)
 	}
 }
+
+// TestFactoryReset_SealedExecutorDeniesBeforeWipingSubdirs proves the
+// Task 07 fail-closed contract: when the sealed central admission denies
+// the destructive step, the wipe subdirs are untouched and the job reports
+// failure instead of silently removing data.
+func TestFactoryReset_SealedExecutorDeniesBeforeWipingSubdirs(t *testing.T) {
+	svc, tracker, _, _ := newTestService(t)
+	svc.OrchestratorShutdown = func() {}
+	svc.Admission = newDeniedAdmissionForReset()
+
+	// Snapshot every sentinel before the reset attempt so we can prove
+	// nothing on disk changed despite the user confirming RESET.
+	type sentinel struct {
+		path string
+		data []byte
+	}
+	sentinels := []sentinel{}
+	for _, d := range []string{svc.dirs.Worktrees, svc.dirs.Repos, svc.dirs.Sessions, svc.dirs.Tasks, svc.dirs.QuickChat} {
+		sentinels = append(sentinels, sentinel{
+			path: filepath.Join(d, "sentinel"),
+			data: mustReadFile(t, filepath.Join(d, "sentinel")),
+		})
+	}
+
+	id, err := svc.FactoryReset(context.Background(), "RESET")
+	if err != nil {
+		t.Fatalf("FactoryReset: %v", err)
+	}
+	job := waitForState(t, tracker, id, jobs.StateFailed)
+	if job.State != jobs.StateFailed {
+		t.Fatalf("state = %s, want failed; message=%s", job.State, job.Message)
+	}
+	if !strings.Contains(job.Message, "physical-delete admission") &&
+		!strings.Contains(job.Message, "executor is unavailable") {
+		t.Fatalf("reset failure message = %q, want admission denial", job.Message)
+	}
+
+	for _, s := range sentinels {
+		got := mustReadFile(t, s.path)
+		if string(got) != string(s.data) {
+			t.Errorf("sealed executor wiped sentinel %s: got %q want %q", s.path, got, s.data)
+		}
+	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return data
+}

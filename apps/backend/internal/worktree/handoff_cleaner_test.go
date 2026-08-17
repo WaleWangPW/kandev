@@ -2,13 +2,52 @@ package worktree
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/kandev/kandev/internal/common/logger"
+	"github.com/kandev/kandev/internal/physicaldelete"
 )
+
+// permissiveHandoffAdmission is a controllable physicaldelete.Admission
+// for the handoff-cleaner tests. Task 07 binds every destructive
+// handoff-cleanup step behind the sealed central admission; tests opt in
+// to a working gate with newPermissiveHandoffAdmission, and the
+// fail-closed contract is covered in
+// TestCleanupPlainFolder_SealedExecutorDeniesBeforeRemovingPath below.
+type permissiveHandoffAdmission struct {
+	denied bool
+}
+
+func (p permissiveHandoffAdmission) BeginProvisional(_ context.Context, _ physicaldelete.CreateRequest) (physicaldelete.ProvisionalLease, error) {
+	return physicaldelete.ProvisionalLease{}, nil
+}
+
+func (p permissiveHandoffAdmission) Execute(_ context.Context, req physicaldelete.Request) (physicaldelete.Receipt, error) {
+	if p.denied {
+		return physicaldelete.Receipt{
+			Action:       req.Action,
+			ResourceKind: req.Resource.Kind,
+			ResourceID:   req.Resource.ID,
+			Reason:       physicaldelete.DenialExecutorUnavailable,
+		}, physicaldelete.ErrExecutorUnavailable
+	}
+	return physicaldelete.Receipt{
+		Action: req.Action, ResourceKind: req.Resource.Kind,
+		ResourceID: req.Resource.ID, Mutated: false,
+	}, nil
+}
+
+func newPermissiveHandoffAdmission() physicaldelete.Admission {
+	return permissiveHandoffAdmission{}
+}
+
+func newDeniedHandoffAdmission() physicaldelete.Admission {
+	return permissiveHandoffAdmission{denied: true}
+}
 
 // newCleanerWithTasksRoot constructs a HandoffCleaner whose managed
 // tasks-base path points at a tmp dir, so tests can write into it
@@ -23,7 +62,9 @@ func newCleanerWithTasksRoot(t *testing.T, tasksRoot string) *HandoffCleaner {
 		config: Config{TasksBasePath: tasksRoot},
 		logger: log,
 	}
-	return NewHandoffCleaner(mgr, log)
+	cleaner := NewHandoffCleaner(mgr, log)
+	cleaner.SetAdmission(newPermissiveHandoffAdmission())
+	return cleaner
 }
 
 func TestRequireManagedRoot_AcceptsTasksRootDescendants(t *testing.T) {
@@ -93,6 +134,35 @@ func TestCleanupPlainFolder_RemovesPathOnlyUnderRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Errorf("expected target to be removed; stat err=%v", err)
+	}
+}
+
+// TestCleanupPlainFolder_SealedExecutorDeniesBeforeRemovingPath locks in
+// the Task 07 fail-closed contract for the plain-folder handoff path:
+// when the sealed central admission denies the destructive step, the
+// path stays intact so the operator can inspect it.
+func TestCleanupPlainFolder_SealedExecutorDeniesBeforeRemovingPath(t *testing.T) {
+	tasksRoot := t.TempDir()
+	target := filepath.Join(tasksRoot, "task-abc", "scratch")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	canary := filepath.Join(target, "preserve.txt")
+	if err := os.WriteFile(canary, []byte("keep"), 0o600); err != nil {
+		t.Fatalf("write canary: %v", err)
+	}
+	c := newCleanerWithTasksRoot(t, tasksRoot)
+	c.SetAdmission(newDeniedHandoffAdmission())
+
+	err := c.CleanupPlainFolder(context.Background(), target)
+	if err == nil {
+		t.Fatal("sealed executor must deny the destructive step")
+	}
+	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
+		t.Fatalf("error = %v, want ErrExecutorUnavailable", err)
+	}
+	if _, statErr := os.Stat(canary); statErr != nil {
+		t.Fatalf("sealed executor removed canary %s: %v", canary, statErr)
 	}
 }
 

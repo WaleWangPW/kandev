@@ -21,6 +21,7 @@ import (
 	"github.com/kandev/kandev/internal/common/logger"
 	"github.com/kandev/kandev/internal/db"
 	"github.com/kandev/kandev/internal/db/dialect"
+	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/system/jobs"
 )
 
@@ -71,6 +72,11 @@ type Service struct {
 	// OrchestratorShutdown stops the orchestrator and active executions before
 	// the factory-reset job runs. Wired by cmd/kandev. Tests pass a no-op.
 	OrchestratorShutdown func()
+
+	// Admission is the sealed central gate that must authorize every
+	// factory-reset subdirectory wipe. nil is fail-closed; production
+	// wiring in backendapp provides the shared physicaldelete.Service.
+	Admission physicaldelete.Admission
 }
 
 // NewService constructs a Service. dataDir is the resolved kandev data
@@ -85,6 +91,13 @@ func NewService(pool *db.Pool, dataDir string, dirs ResetDirs, j *jobs.Tracker, 
 		jobs:    j,
 		log:     log,
 	}
+}
+
+// SetAdmission wires the sealed central gate that must authorize every
+// factory-reset wipe. Production callers must wire this; tests may omit it
+// to assert the fail-closed contract.
+func (s *Service) SetAdmission(admission physicaldelete.Admission) {
+	s.Admission = admission
 }
 
 // Stats returns the current database stats. SQLite size is computed from
