@@ -171,6 +171,7 @@ func (h *TaskHandlers) registerHTTP(router *gin.Engine) {
 	api.POST("/tasks/:id/unarchive", h.httpUnarchiveTask)
 	if h.archivedResourceReconcile {
 		reconcile := api.Group("", authn.RequireRealIdentity(), authn.RequireAdmin())
+		reconcile.POST("/tasks/:id/resource-cleanup/cancel-archive", h.httpCancelArchivedCascadeCleanup)
 		reconcile.POST("/tasks/:id/resource-cleanup/reconcile", h.httpReconcileArchivedResource)
 		reconcile.POST("/system/resource-cleanup/reconcile-group", h.httpReconcileArchivedResourceGroup)
 		reconcile.POST("/system/resource-cleanup/cancel-stale-pending-move", h.httpCancelStaleArchivedResourcePendingMove)

@@ -206,6 +206,16 @@ type HandoffService struct {
 	workspaceGroupLock parentMutex
 }
 
+var (
+	// ErrArchiveCleanupCancellationUnavailable means the runtime lacks the
+	// generation-bound cancellation coordinator. Callers must not fall back to
+	// an unbound generic job update.
+	ErrArchiveCleanupCancellationUnavailable = errors.New("archive cleanup cancellation is unavailable")
+	// ErrArchiveCleanupCancellationConflict means the requested root is not an
+	// exact archive cascade or one of its generations changed while binding.
+	ErrArchiveCleanupCancellationConflict = errors.New("archive cleanup cancellation conflict")
+)
+
 // TaskEventPublisher abstracts the side-effect of broadcasting task
 // lifecycle events. The cascade paths (ArchiveTaskTree, DeleteTaskTree)
 // bypass Service.ArchiveTask / Service.DeleteTask — which means they
@@ -264,6 +274,13 @@ type TaskResourceCleaner interface {
 
 type archiveTaskResourceCleanupCanceller interface {
 	CancelArchiveTaskResourceCleanup(ctx context.Context, taskID string) error
+}
+
+type retryableArchivedCascadeCleanupCanceller interface {
+	CancelRetryableArchivedCascadeCleanup(
+		ctx context.Context,
+		expected []models.ArchiveTaskCleanupCancellationExpectation,
+	) (int, error)
 }
 
 type taskResourceCleanupCoordinator interface {

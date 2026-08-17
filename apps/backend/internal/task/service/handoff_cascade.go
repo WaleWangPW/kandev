@@ -709,6 +709,71 @@ func (s *HandoffService) UnarchiveTaskTree(ctx context.Context, rootID string) (
 	return out, nil
 }
 
+// CancelArchivedCascadeCleanup stops only retryable cleanup jobs belonging to
+// the exact archive cascade rooted at rootID. It leaves every task archived
+// and never invokes a filesystem, Git, runtime, or workspace-group action.
+func (s *HandoffService) CancelArchivedCascadeCleanup(ctx context.Context, rootID string) (*CascadeCleanupCancellationOutcome, error) {
+	if err := s.authorizeTask(ctx, rootID); err != nil {
+		return nil, err
+	}
+	if rootID == "" || s.tasks == nil {
+		return nil, ErrArchiveCleanupCancellationUnavailable
+	}
+	root, err := s.tasks.GetTask(ctx, rootID)
+	if err != nil {
+		return nil, err
+	}
+	if root == nil {
+		return nil, fmt.Errorf("%w: task %s not found", ErrArchiveCleanupCancellationConflict, rootID)
+	}
+	if root.ArchivedAt == nil || root.ArchivedByCascadeID == "" {
+		return nil, fmt.Errorf("%w: root is not cascade-archived", ErrArchiveCleanupCancellationConflict)
+	}
+	ids, err := s.collectArchivedTreeByCascade(ctx, rootID, root.ArchivedByCascadeID)
+	if err != nil {
+		return nil, err
+	}
+	expected, err := s.archiveCleanupCancellationExpectations(ctx, ids, root.ArchivedByCascadeID)
+	if err != nil {
+		return nil, err
+	}
+	canceller, ok := s.resourceCleaner.(retryableArchivedCascadeCleanupCanceller)
+	if !ok || canceller == nil {
+		return nil, ErrArchiveCleanupCancellationUnavailable
+	}
+	cancelled, err := canceller.CancelRetryableArchivedCascadeCleanup(ctx, expected)
+	if err != nil {
+		return nil, err
+	}
+	return &CascadeCleanupCancellationOutcome{CascadeID: root.ArchivedByCascadeID, TaskIDs: ids, CancelledJobs: cancelled}, nil
+}
+
+// CascadeCleanupCancellationOutcome reports only lifecycle metadata; it does
+// not imply that any physical resource was released or removed.
+type CascadeCleanupCancellationOutcome struct {
+	CascadeID     string
+	TaskIDs       []string
+	CancelledJobs int
+}
+
+func (s *HandoffService) archiveCleanupCancellationExpectations(
+	ctx context.Context,
+	ids []string,
+	cascadeID string,
+) ([]models.ArchiveTaskCleanupCancellationExpectation, error) {
+	expected := make([]models.ArchiveTaskCleanupCancellationExpectation, 0, len(ids))
+	for _, id := range ids {
+		task, err := s.tasks.GetTask(ctx, id)
+		if err != nil || task == nil || task.ArchivedAt == nil || task.ArchivedByCascadeID != cascadeID {
+			return nil, fmt.Errorf("%w: generation unavailable for task %s", ErrArchiveCleanupCancellationConflict, id)
+		}
+		expected = append(expected, models.ArchiveTaskCleanupCancellationExpectation{
+			TaskID: id, ArchivedAt: *task.ArchivedAt, CascadeID: cascadeID,
+		})
+	}
+	return expected, nil
+}
+
 // unarchiveManualRoot restores a single task that was archived without a
 // cascade stamp (legacy Service.ArchiveTask path or rows predating the
 // cascade infrastructure). Only the root is restored — its descendants

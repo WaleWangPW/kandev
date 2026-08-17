@@ -304,6 +304,17 @@ type TaskResourceCleanupRepository interface {
 	ResetRunningTaskResourceCleanupJobs(ctx context.Context) error
 }
 
+// ArchiveTaskCleanupCancellationRepository exposes the narrowly-scoped,
+// DB-only cancellation used by the operator archive-cleanup endpoint. The
+// implementation must reject a running job or any archive-generation drift
+// before it transitions a single retryable job.
+type ArchiveTaskCleanupCancellationRepository interface {
+	CancelRetryableArchiveTaskResourceCleanupJobs(
+		ctx context.Context,
+		expected []models.ArchiveTaskCleanupCancellationExpectation,
+	) (int, error)
+}
+
 // ArchivedResourceReconcileRepository exposes only the strict DB-only
 // reconcile transitions. Keeping it separate prevents generic cleanup workers
 // and their test doubles from gaining retention-anchor mutation authority.

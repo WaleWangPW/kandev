@@ -21,6 +21,7 @@ import (
 	"github.com/kandev/kandev/internal/task/dto"
 	"github.com/kandev/kandev/internal/task/models"
 	taskrepository "github.com/kandev/kandev/internal/task/repository"
+	"github.com/kandev/kandev/internal/task/repository/repoerrors"
 	taskrepo "github.com/kandev/kandev/internal/task/repository/sqlite"
 	"github.com/kandev/kandev/internal/task/service"
 	"github.com/kandev/kandev/internal/task/statussummary"
@@ -1800,6 +1801,33 @@ func (h *TaskHandlers) httpUnarchiveTask(c *gin.Context) {
 		"affected_group_ids": outcome.ReleasedGroupIDs,
 		"workspace_recovery": workspaceRecovery,
 		"recovery":           recovery,
+	})
+}
+
+// httpCancelArchivedCascadeCleanup is an administrator-only, feature-gated
+// lifecycle operation. It intentionally has no fallback to the ordinary task
+// service: cancellation without the cascade generation binding is unsafe.
+func (h *TaskHandlers) httpCancelArchivedCascadeCleanup(c *gin.Context) {
+	if h.handoffSvc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "archive cleanup cancellation is unavailable"})
+		return
+	}
+	outcome, err := h.handoffSvc.CancelArchivedCascadeCleanup(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrArchiveCleanupCancellationUnavailable):
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "archive cleanup cancellation is unavailable"})
+		case errors.Is(err, repoerrors.ErrTaskCleanupInProgress), errors.Is(err, service.ErrArchiveCleanupCancellationConflict):
+			c.JSON(http.StatusConflict, gin.H{"error": "archive cleanup is running"})
+		default:
+			handleNotFound(c, h.logger, err, "archive cleanup not cancelled")
+		}
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true, "cascade_id": outcome.CascadeID,
+		"tasks": len(outcome.TaskIDs), "cancelled_jobs": outcome.CancelledJobs,
+		"physical_retained": true,
 	})
 }
 

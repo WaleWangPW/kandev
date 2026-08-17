@@ -19,6 +19,7 @@ func TestHTTPTerminalActionRoutesRespectFlags(t *testing.T) {
 	registerTerminalActionRoutes(router, handler, false, false)
 
 	for _, path := range []string{
+		"/api/v1/tasks/task/resource-cleanup/cancel-archive",
 		"/api/v1/system/resource-cleanup/cancel-stale-pending-move",
 		"/api/v1/system/resource-cleanup/release-absent-retained-target",
 		"/api/v1/system/resource-cleanup/retire-stale-environment-reference",

@@ -552,6 +552,24 @@ func (s *Service) CancelArchiveTaskResourceCleanup(ctx context.Context, taskID s
 	return errors.Join(cancelErr, joinErr)
 }
 
+// CancelRetryableArchivedCascadeCleanup cancels an exact archived cascade
+// without unarchiving its tasks. It accepts only non-running jobs, so a
+// concurrent cleanup worker remains a fail-closed conflict rather than being
+// relabelled while it may still own side effects.
+func (s *Service) CancelRetryableArchivedCascadeCleanup(
+	ctx context.Context,
+	expected []models.ArchiveTaskCleanupCancellationExpectation,
+) (int, error) {
+	if s.resourceCleanups == nil {
+		return 0, ErrArchiveCleanupCancellationUnavailable
+	}
+	repo, ok := s.resourceCleanups.(taskrepo.ArchiveTaskCleanupCancellationRepository)
+	if !ok || repo == nil {
+		return 0, ErrArchiveCleanupCancellationUnavailable
+	}
+	return repo.CancelRetryableArchiveTaskResourceCleanupJobs(ctx, expected)
+}
+
 // PrepareTaskResourceCleanup captures cleanup handles before a cascade mutates
 // task rows. StartPreparedTaskResourceCleanup is called only after the matching
 // lifecycle mutation commits.
