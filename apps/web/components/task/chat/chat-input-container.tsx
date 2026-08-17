@@ -5,9 +5,10 @@ import { IconAlertTriangle, IconPlayerPlay, IconRefresh } from "@tabler/icons-re
 import { Button } from "@kandev/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@kandev/ui/tooltip";
 import { NewSessionDialog } from "@/components/task/new-session-dialog";
-import { useAppStore } from "@/components/state-provider";
+import { useAppStore, useAppStoreApi } from "@/components/state-provider";
 import type { ContextFile } from "@/lib/state/context-files-store";
-import type { ClarificationRequestMetadata, Message } from "@/lib/types/http";
+import type { ClarificationRequestMetadata, Message, TaskSession } from "@/lib/types/http";
+import type { LaunchSessionResponse } from "@/lib/services/session-launch-service";
 import type { DiffComment } from "@/lib/diff/types";
 import type { TaskMentionData } from "@/hooks/use-inline-mention";
 import type { MCPAttachmentHistory } from "@/lib/state/slices/session-runtime/types";
@@ -118,19 +119,48 @@ async function requestSessionRecover(
   taskId: string,
   sessionId: string,
   action: "resume" | "fresh_start",
-): Promise<boolean> {
+): Promise<LaunchSessionResponse | null> {
   const client = getWebSocketClient();
-  if (!client) return false;
+  if (!client) return null;
   try {
-    await client.request(
+    return await client.request<LaunchSessionResponse>(
       "session.recover",
       { task_id: taskId, session_id: sessionId, action },
       30000,
     );
-    return true;
   } catch {
-    return false;
+    return null;
   }
+}
+
+const recoverableSessionStates = new Set<TaskSession["state"]>([
+  "CREATED",
+  "STARTING",
+  "RUNNING",
+  "WAITING_FOR_INPUT",
+]);
+
+/** Applies an authoritative successful recovery reply without waiting for a later session event. */
+export function recoveredSessionFromResponse(
+  session: TaskSession | undefined,
+  response: LaunchSessionResponse | null,
+  taskId: string,
+  sessionId: string,
+): TaskSession | null {
+  if (
+    !session ||
+    !response?.success ||
+    response.task_id !== taskId ||
+    response.session_id !== sessionId ||
+    !recoverableSessionStates.has(response.state as TaskSession["state"])
+  ) {
+    return null;
+  }
+  return {
+    ...session,
+    state: response.state as TaskSession["state"],
+    error_message: "",
+  };
 }
 
 // The recovery banner keeps resume/fresh-start controls together for desktop
@@ -158,6 +188,7 @@ function FailedSessionBanner({
   resumingLabel?: string;
 }) {
   const { t } = useTranslation();
+  const store = useAppStoreApi();
   const [isResuming, setIsResuming] = useState(false);
   const [isStartingFresh, setIsStartingFresh] = useState(false);
 
@@ -175,10 +206,20 @@ function FailedSessionBanner({
       if (!sessionId || !taskId) return;
       const setBusy = action === "resume" ? setIsResuming : setIsStartingFresh;
       setBusy(true);
-      const ok = await requestSessionRecover(taskId, sessionId, action);
-      if (!ok) setBusy(false);
+      const response = await requestSessionRecover(taskId, sessionId, action);
+      const recovered = recoveredSessionFromResponse(
+        store.getState().taskSessions.items[sessionId],
+        response,
+        taskId,
+        sessionId,
+      );
+      if (!recovered) {
+        setBusy(false);
+        return;
+      }
+      store.getState().setTaskSession(recovered);
     },
-    [sessionId, taskId],
+    [sessionId, store, taskId],
   );
 
   const handleResume = useCallback(() => handleRecover("resume"), [handleRecover]);
