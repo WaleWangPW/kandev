@@ -295,6 +295,58 @@ describe("useAllWorkflowSnapshots — snapshot mapping", () => {
     await waitFor(() => expect(mockSetWorkflowSnapshot).toHaveBeenCalled());
     expect(mockSetWorkflowSnapshot.mock.calls[0][1].tasks[0].autopilot).toBe(false);
   });
+
+  // Regression fixture from production: workflow 55c97ece-2dd8-4d45-93a2-8104a7fd36a8
+  // has a single step "运行中" bc390dcb-21c4-451a-9309-249649514f50, and the
+  // orchestrator's own task d5a9f791-ca73-4fea-bc07-f3f988827709 sits there with
+  // state=IN_PROGRESS, wip_admitted=true. The user reported the kanban "进行中"
+  // column stayed empty even though the snapshot was returning this row, so
+  // pin the contract that an admitted IN_PROGRESS task attached to a step
+  // listed in the same snapshot must reach the written snapshot untouched.
+  it("preserves an admitted IN_PROGRESS task that targets the only snapshot step (regression for kanban '进行中' empty column)", async () => {
+    mockState.kanbanMulti.snapshots = {};
+    mockFetchWorkflowSnapshot.mockResolvedValueOnce({
+      steps: [
+        {
+          id: "bc390dcb-21c4-451a-9309-249649514f50",
+          name: "运行中",
+          position: 0,
+          color: "bg-blue-500",
+          is_start_step: true,
+        },
+      ],
+      tasks: [
+        {
+          id: "d5a9f791-ca73-4fea-bc07-f3f988827709",
+          workspace_id: "ws-A",
+          workflow_id: "55c97ece-2dd8-4d45-93a2-8104a7fd36a8",
+          workflow_step_id: "bc390dcb-21c4-451a-9309-249649514f50",
+          title: "Total control",
+          state: "IN_PROGRESS",
+          position: 0,
+          wip_admitted: true,
+          queued_for_step_id: null,
+          queued_at: null,
+        },
+      ],
+    });
+
+    renderHook(() => useAllWorkflowSnapshots("ws-A"));
+
+    await waitFor(() => expect(mockSetWorkflowSnapshot).toHaveBeenCalled());
+    const written = mockSetWorkflowSnapshot.mock.calls.at(-1)![1];
+    const writtenTask = written.tasks.find(
+      (task: { id: string }) => task.id === "d5a9f791-ca73-4fea-bc07-f3f988827709",
+    );
+    if (!writtenTask) {
+      throw new Error(
+        `IN_PROGRESS task dropped from snapshot; written tasks=${JSON.stringify(written.tasks)}`,
+      );
+    }
+    expect(writtenTask.state).toBe("IN_PROGRESS");
+    expect(writtenTask.wipAdmitted).toBe(true);
+    expect(writtenTask.workflowStepId).toBe("bc390dcb-21c4-451a-9309-249649514f50");
+  });
 });
 
 /**
