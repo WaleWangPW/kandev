@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { snapshotToState } from "./mapper";
 import { taskId, workflowId, workspaceId } from "@/lib/types/ids";
 import type { WorkflowSnapshot } from "@/lib/types/http";
+import { partitionWipTasks } from "@/lib/kanban/wip-queue";
 
 const now = "2026-07-10T12:00:00Z";
 const workflowID = workflowId("workflow-1");
@@ -128,29 +129,31 @@ describe("snapshotToState", () => {
   });
 
   it("forwards task WIP admission + overflow fields into the kanban state", () => {
-    // Regression for the kanban '进行中列空' symptom. SSR was the lone
-    // mapper that dropped wip_admitted / queued_for_step_id / queued_at,
-    // so any task hydrated before its first kanban.update arrived had
-    // those fields as undefined. Downstream consumers
-    // (lib/kanban/wip-queue.isDestinationQueued, lib/kanban/wip-limit.
-    // countAdmittedTasks) treat wipAdmitted=undefined as truthy in the
-    // `wipAdmitted !== true` check, so a queued-overflow card could slip
-    // past the partition while an admitted card stayed outside the
-    // count. Mirror the lib/kanban/map-task.ts copy here so the SSR
-    // snapshot and the WS / map-task payloads stay byte-equivalent.
+    // The HTTP snapshot path must preserve the backend queue projection.
     const snapshot = snapshotWithPendingAction(undefined);
     snapshot.tasks[0].state = "IN_PROGRESS";
-    snapshot.tasks[0].wip_admitted = true;
-    snapshot.tasks[0].queued_for_step_id = undefined;
-    snapshot.tasks[0].queued_at = undefined;
+    snapshot.tasks[0].priority = "high";
+    snapshot.tasks[0].wip_admitted = false;
+    snapshot.tasks[0].queued_for_step_id = "step-1";
+    snapshot.tasks[0].queued_at = now;
 
     const state = snapshotToState(snapshot);
+    const task = state.kanban?.tasks[0];
 
-    expect(state.kanban?.tasks[0]).toMatchObject({
+    expect(task).toBeDefined();
+    if (!task) return;
+
+    expect(task).toMatchObject({
       state: "IN_PROGRESS",
-      wipAdmitted: true,
-      queuedForStepId: undefined,
-      queuedAt: undefined,
+      priority: "high",
+      createdAt: now,
+      wipAdmitted: false,
+      queuedForStepId: "step-1",
+      queuedAt: now,
+    });
+    expect(partitionWipTasks([task], "step-1")).toMatchObject({
+      admitted: [],
+      queued: [task],
     });
   });
 });

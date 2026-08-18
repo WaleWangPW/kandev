@@ -38,21 +38,16 @@ export function snapshotToState(snapshot: WorkflowSnapshot): Partial<AppState> {
         autopilot: task.autopilot ?? false,
         position: task.position ?? 0,
         state: task.state,
-        // Carry the WIP admission + overflow fields so downstream
-        // partitioning (lib/kanban/wip-queue, lib/kanban/wip-limit) sees
-        // a faithful copy of the backend state during SSR hydration. The
-        // WS handler (lib/ws/handlers/kanban.ts) and the snapshot mapper
-        // (lib/kanban/map-task.ts) both forward these fields; SSR was the
-        // lone path that dropped them, so any task hydrated before its
-        // first kanban.update arrived had `wipAdmitted` and
-        // `queuedForStepId` as undefined. That fed straight into
-        // `countAdmittedTasks` and `isDestinationQueued` and let an
-        // overflow card (wip_admitted=false + queued_for_step_id set)
-        // slip into the admitted count when the SSR snapshot was the
-        // only data on hand.
+        // Preserve WIP admission and queue metadata during HTTP snapshot
+        // refreshes. The Go boot mapper, WebSocket handler, and canonical
+        // task mapper already carry these fields. This path must keep the
+        // same values so queue classification and ordering stay consistent
+        // after a workflow switch or reconnect.
+        priority: task.priority,
+        createdAt: task.created_at,
         wipAdmitted: task.wip_admitted,
-        queuedForStepId: task.queued_for_step_id ?? undefined,
-        queuedAt: task.queued_at ?? undefined,
+        queuedForStepId: task.queued_for_step_id,
+        queuedAt: task.queued_at,
         repositoryId: primary?.repository_id ?? undefined,
         repositories: task.repositories?.map((r) => ({
           id: r.id,
