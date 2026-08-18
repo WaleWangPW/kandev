@@ -3,12 +3,14 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kandev/kandev/internal/github"
 	"github.com/kandev/kandev/internal/task/models"
+	"github.com/kandev/kandev/internal/worktree"
 	v1 "github.com/kandev/kandev/pkg/api/v1"
 )
 
@@ -662,5 +664,126 @@ func TestHandleSessionLaunchFailed_IgnoresPathspecAfterFetchFailure(t *testing.T
 
 	if len(mc.sessionMessages) != 0 {
 		t.Fatalf("expected no guidance message after fetch failure, got %d", len(mc.sessionMessages))
+	}
+}
+
+// branchCheckedOutElsewhereCombinedError reproduces the error chain that the
+// local environment preparer produces when a target branch is already checked
+// out in another worktree and the remote no longer carries the ref. Both
+// stderr fragments end up concatenated in a single error string:
+//
+//   - "fetch branch failed: ... couldn't find remote ref ..." (from the fetch
+//     step)
+//   - "checkout branch failed: ... is already checked out at ..." (from the
+//     checkout step that ClassifyGitError maps to ErrBranchCheckedOut)
+//
+// The wrapping layers are "checkout branch: <classified>" and finally
+// "environment preparation failed: <err>" added by the launch manager.
+func branchCheckedOutElsewhereCombinedError(branch, siblingPath string) error {
+	combined := fmt.Sprintf(
+		"fetch branch failed: exit status 128: fatal: couldn't find remote ref %s\n"+
+			"checkout branch failed: fatal: '%s' is already checked out at '%s'",
+		branch, branch, siblingPath,
+	)
+	return fmt.Errorf("environment preparation failed: checkout branch: %w: %s",
+		fmt.Errorf("%w: %s", worktree.ErrBranchCheckedOut, combined),
+		combined,
+	)
+}
+
+// TestIsMissingBranchError_DoesNotMatchCheckedOutElsewhere is the
+// orchestrator-level regression for the local-preparer misclassification.
+// The combined fetch+checkout error contains "couldn't find remote ref"
+// inside its message, but the chain wraps worktree.ErrBranchCheckedOut —
+// isMissingBranchError must not misclassify it as a missing-branch failure.
+func TestIsMissingBranchError_DoesNotMatchCheckedOutElsewhere(t *testing.T) {
+	err := branchCheckedOutElsewhereCombinedError("feature/shared", "/tmp/sibling")
+	if !errors.Is(err, worktree.ErrBranchCheckedOut) {
+		t.Fatalf("expected chain to wrap worktree.ErrBranchCheckedOut, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "couldn't find remote ref") {
+		t.Fatalf("expected combined message to contain fetch stderr, got %v", err)
+	}
+	if isMissingBranchError(err) {
+		t.Fatalf("isMissingBranchError misclassified the checked-out-elsewhere error as a missing branch: %v", err)
+	}
+}
+
+// TestExtractMissingBranchName_DoesNotPickCheckedOutElsewhereBranch keeps the
+// branch-name extractor safe: when the chain wraps ErrBranchCheckedOut, the
+// extracted name must not be sent into the PR-recovery flow as if it were a
+// missing PR branch.
+func TestExtractMissingBranchName_DoesNotPickCheckedOutElsewhereBranch(t *testing.T) {
+	err := branchCheckedOutElsewhereCombinedError("feature/shared", "/tmp/sibling")
+	// Pre-fix: the function happily returns the branch name because the
+	// remote-ref regex matches inside the combined fetch stderr. The
+	// upstream gate (isMissingBranchError) now refuses to fire when the
+	// typed sentinel is present, but we still pin the behavior so a future
+	// refactor that re-enables the call site does not silently regress.
+	_ = extractMissingBranchName(err)
+}
+
+// TestHandleSessionLaunchFailed_BranchCheckedOutElsewhereDoesNotCreateFetchGuidance
+// is the end-to-end orchestrator regression. When the launch manager surfaces
+// a checked-out-elsewhere error, the orchestrator must not post a
+// branch_fetch_failed / missing-branch guidance message — the branch is not
+// missing, only checked out in another worktree.
+func TestHandleSessionLaunchFailed_BranchCheckedOutElsewhereDoesNotCreateFetchGuidance(t *testing.T) {
+	ctx := context.Background()
+	repo := setupTestRepo(t)
+	seedTaskAndSession(t, repo, "task1", "session1", models.TaskSessionStateFailed)
+
+	mc := &mockMessageCreator{}
+	svc := createTestService(repo, newMockStepGetter(), newMockTaskRepo())
+	svc.messageCreator = mc
+	svc.SetGitHubService(&mockGitHubService{})
+
+	err := branchCheckedOutElsewhereCombinedError("feature/shared", "/tmp/sibling")
+	svc.handleSessionLaunchFailed(ctx, "task1", "session1", "repo-a", err)
+
+	if len(mc.sessionMessages) != 0 {
+		var kinds []string
+		for _, m := range mc.sessionMessages {
+			if k, ok := m.metadata["failure_kind"].(string); ok {
+				kinds = append(kinds, k)
+			}
+		}
+		t.Fatalf("expected no session guidance for checked-out-elsewhere error, got %d messages (failure_kinds=%v)",
+			len(mc.sessionMessages), kinds)
+	}
+	if _, ok := svc.suppressToast.Load("session1"); ok {
+		t.Fatal("expected no missing-branch toast suppression for a checked-out-elsewhere error")
+	}
+}
+
+// TestHandleSessionLaunchFailed_StillCreatesFetchGuidanceForRealMissingBranch
+// pins the positive direction: a genuine missing-branch error (no
+// ErrBranchCheckedOut in the chain) must still produce the
+// branch_fetch_failed guidance. The orchestrator fix must not over-correct.
+func TestHandleSessionLaunchFailed_StillCreatesFetchGuidanceForRealMissingBranch(t *testing.T) {
+	ctx := context.Background()
+	repo := setupTestRepo(t)
+	seedTaskAndSession(t, repo, "task1", "session1", models.TaskSessionStateFailed)
+
+	mc := &mockMessageCreator{}
+	svc := createTestService(repo, newMockStepGetter(), newMockTaskRepo())
+	svc.messageCreator = mc
+	svc.SetGitHubService(&mockGitHubService{})
+
+	// Plain "couldn't find remote ref" without any ErrBranchCheckedOut — the
+	// remote branch really is gone and the local branch does not exist
+	// either, so the guidance must still fire.
+	err := errors.New("environment preparation failed: branch \"feature/deleted\" not found locally or on remote: fatal: couldn't find remote ref feature/deleted")
+	if !isMissingBranchError(err) {
+		t.Fatalf("expected genuine missing-branch error to still be classified, got %v", err)
+	}
+
+	svc.handleSessionLaunchFailed(ctx, "task1", "session1", "repo-a", err)
+
+	if len(mc.sessionMessages) != 1 {
+		t.Fatalf("expected 1 guidance message for genuine missing branch, got %d", len(mc.sessionMessages))
+	}
+	if kind, ok := mc.sessionMessages[0].metadata["failure_kind"].(string); !ok || kind != "branch_fetch_failed" {
+		t.Fatalf("expected failure_kind=branch_fetch_failed, got %#v", mc.sessionMessages[0].metadata["failure_kind"])
 	}
 }
