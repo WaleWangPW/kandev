@@ -709,18 +709,35 @@ func TestIsMissingBranchError_DoesNotMatchCheckedOutElsewhere(t *testing.T) {
 	}
 }
 
-// TestExtractMissingBranchName_DoesNotPickCheckedOutElsewhereBranch keeps the
-// branch-name extractor safe: when the chain wraps ErrBranchCheckedOut, the
-// extracted name must not be sent into the PR-recovery flow as if it were a
-// missing PR branch.
-func TestExtractMissingBranchName_DoesNotPickCheckedOutElsewhereBranch(t *testing.T) {
+// TestExtractMissingBranchName_AndGateCombineToRejectCheckedOutElsewhere
+// locks the "extractor + typed-sentinel gate" pair that keeps a
+// checked-out-elsewhere branch out of the PR-recovery flow. The
+// extractor is intentionally naive — it walks the Unwrap chain and
+// matches the same regex that powers isMissingBranchError, so it
+// returns the branch name verbatim from the combined fetch stderr.
+// The recovery flow is gated on isMissingBranchError, which refuses
+// to fire when the chain wraps worktree.ErrBranchCheckedOut, so the
+// extractor's output is never fed into the PR-recovery flow.
+//
+// Greptile flagged this test for silently discarding the extractor's
+// return value. Make both halves observable so a future refactor that
+// drops the gate (or re-tunes the regex) is caught here:
+//  1. The extractor must keep returning the branch name verbatim —
+//     otherwise the gate is no longer being exercised against the
+//     would-be PR-recovery input.
+//  2. The gate must keep rejecting the same chain — otherwise the
+//     extractor output would actually flow into the PR-recovery path.
+func TestExtractMissingBranchName_AndGateCombineToRejectCheckedOutElsewhere(t *testing.T) {
 	err := branchCheckedOutElsewhereCombinedError("feature/shared", "/tmp/sibling")
-	// Pre-fix: the function happily returns the branch name because the
-	// remote-ref regex matches inside the combined fetch stderr. The
-	// upstream gate (isMissingBranchError) now refuses to fire when the
-	// typed sentinel is present, but we still pin the behavior so a future
-	// refactor that re-enables the call site does not silently regress.
-	_ = extractMissingBranchName(err)
+	if !errors.Is(err, worktree.ErrBranchCheckedOut) {
+		t.Fatalf("expected chain to wrap worktree.ErrBranchCheckedOut, got %v", err)
+	}
+	if extracted := extractMissingBranchName(err); extracted != "feature/shared" {
+		t.Fatalf("extractMissingBranchName returned %q, want %q (the typed gate is the only line of defense; the extractor must keep producing the value it would gate on)", extracted, "feature/shared")
+	}
+	if isMissingBranchError(err) {
+		t.Fatalf("isMissingBranchError must reject the checked-out-elsewhere chain; got %v", err)
+	}
 }
 
 // TestHandleSessionLaunchFailed_BranchCheckedOutElsewhereDoesNotCreateFetchGuidance
