@@ -136,9 +136,15 @@ describe("snapshotToState", () => {
     snapshot.tasks[0].wip_admitted = false;
     snapshot.tasks[0].queued_for_step_id = "step-1";
     snapshot.tasks[0].queued_at = now;
+    snapshot.tasks.push({
+      ...snapshot.tasks[0],
+      id: taskId("task-2"),
+      priority: "critical",
+    });
 
     const state = snapshotToState(snapshot);
-    const task = state.kanban?.tasks[0];
+    const task = state.kanban?.tasks.find((candidate) => candidate.id === taskId("task-1"));
+    const tasks = state.kanban?.tasks ?? [];
 
     expect(task).toBeDefined();
     if (!task) return;
@@ -151,9 +157,11 @@ describe("snapshotToState", () => {
       queuedForStepId: "step-1",
       queuedAt: now,
     });
-    expect(partitionWipTasks([task], "step-1")).toMatchObject({
-      admitted: [],
-      queued: [task],
-    });
+    const partition = partitionWipTasks(tasks, "step-1");
+    expect(partition).toMatchObject({ admitted: [] });
+    expect(partition.queued.map((queuedTask) => queuedTask.id)).toEqual([
+      taskId("task-2"),
+      taskId("task-1"),
+    ]);
   });
 });
