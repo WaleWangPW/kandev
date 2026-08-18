@@ -340,3 +340,58 @@ func TestPreparedCleanupSnapshotStartAndRunningReset(t *testing.T) {
 		t.Fatal("missing operation lookup returned nil")
 	}
 }
+
+// TestResetRunningReconcileJobsStaysRunning pins the generic cleanup
+// startup reset against the v2/v3 reconcile path. Both
+// ReconcileArchivedResource and ReconcileArchivedResourceGroup admit
+// the job and finish synchronously, so a row that is still RUNNING
+// after a process is killed must keep the typed-sentinel for the
+// operator to replay — the generic archive/delete worker does not
+// understand snapshot_version in (2, 3) and would re-run the row
+// against the wrong cleanup path.
+func TestResetRunningReconcileJobsStaysRunning(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepoForHealTests(t)
+	seedBarrierTask(t, repo, "task-reconcile-v2")
+	seedBarrierTask(t, repo, "task-reconcile-v3")
+	seedBarrierTask(t, repo, "task-archive-normal")
+
+	insert := func(id, taskID, trigger string, snapshotVersion int) {
+		state := models.TaskResourceCleanupStatePending
+		job := &models.TaskResourceCleanupJob{
+			ID:               id,
+			OperationID:      "reconcile:" + id,
+			TaskID:           taskID,
+			Trigger:          models.TaskResourceCleanupTrigger(trigger),
+			State:            state,
+			ResourceSnapshot: `{"schema_version":1}`,
+			SnapshotVersion:  snapshotVersion,
+		}
+		if err := repo.CreateTaskResourceCleanupJob(ctx, job); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+		if _, err := repo.MarkTaskResourceCleanupJobRunning(ctx, id); err != nil {
+			t.Fatalf("mark %s running: %v", id, err)
+		}
+	}
+	insert("reconcile-v2", "task-reconcile-v2", "reconcile", 2)
+	insert("reconcile-v3", "task-reconcile-v3", "reconcile", 3)
+	insert("archive-normal", "task-archive-normal", "archive", 1)
+
+	if err := repo.ResetRunningTaskResourceCleanupJobs(ctx); err != nil {
+		t.Fatalf("ResetRunningTaskResourceCleanupJobs: %v", err)
+	}
+
+	checkState := func(id string, want models.TaskResourceCleanupState) {
+		got, err := repo.GetTaskResourceCleanupJob(ctx, id)
+		if err != nil {
+			t.Fatalf("reload %s: %v", id, err)
+		}
+		if got.State != want {
+			t.Fatalf("%s state = %q, want %q", id, got.State, want)
+		}
+	}
+	checkState("reconcile-v2", models.TaskResourceCleanupStateRunning)
+	checkState("reconcile-v3", models.TaskResourceCleanupStateRunning)
+	checkState("archive-normal", models.TaskResourceCleanupStateRetryWait)
+}

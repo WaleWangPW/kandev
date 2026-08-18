@@ -230,16 +230,14 @@ func requireReleasePathAndGitAbsentTx(
 			return fmt.Errorf("%w: %s still references the target path", ErrArchivedResourceReleaseTargetNotRetained, t.label)
 		}
 	}
-	var execCount int
-	if err := tx.QueryRowContext(ctx, tx.Rebind(`
-		SELECT COUNT(*) FROM executors_running
-		WHERE worktree_path = ? AND worktree_branch = ?
-	`), physicalPath, branch,
-	).Scan(&execCount); err != nil {
-		return fmt.Errorf("%w: probe executors_running registration: %v", ErrArchivedResourceReleaseNotAdmitted, err)
-	}
-	if execCount > 0 {
-		return fmt.Errorf("%w: executors_running still references the target registration", ErrArchivedResourceReleaseTargetNotRetained)
-	}
+	// The standalone `executors_running.worktree_path + worktree_branch` query
+	// that used to live here is gone: the loop above already probes
+	// `executors_running.worktree_path`, which is the only signal the writer
+	// DB has for an active executor registration. The release snapshot
+	// guards the Git worktree registration through `worktree_path` and
+	// `branch` fields on the snapshot itself; using `executors_running`
+	// for a per-branch assertion was a redundant probe that conflated an
+	// active-executor row with a Git worktree registration (the two
+	// inventories only overlap while the executor is alive).
 	return nil
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/kandev/kandev/internal/common/logger"
 	"github.com/kandev/kandev/internal/physicaldelete"
 	"github.com/kandev/kandev/internal/system/storage"
 	storageworkspaces "github.com/kandev/kandev/internal/system/storage/workspaces"
@@ -236,6 +237,52 @@ func (m *Manager) resolveBaseRefWithFallback(ctx context.Context, req *CreateReq
 	return resolvedFallback, warning, detail, nil
 }
 
+// rollbackProvisionOnExit is the deferred guard for the create* paths:
+// when the lease is still bound (meaning the worktree was added on disk
+// but persist failed afterwards, or the lease was bound just before
+// the function returns an error) the guard asks the central admission
+// service to issue a rollback request and execute it. A purely
+// reservation phase (Bind never called) cleans up via lease.Close,
+// which is what the old defer did. A successfully persisted worktree
+// keeps the lease in place until the owning task releases it through
+// the normal lifecycle, so the same guard covers both fail paths and
+// the success path.
+func rollbackProvisionOnExit(
+	ctx context.Context,
+	logger *logger.Logger,
+	admission physicaldelete.Admission,
+	lease *physicaldelete.ProvisionalLease,
+	worktreePath, callSite string,
+) {
+	if lease == nil {
+		return
+	}
+	// Persist-failure path: RollbackRequest only returns a valid request
+	// when the lease is bound (the worktree was added on disk). If the
+	// lease is still in the reservation phase the rollback is a no-op
+	// (the worktree was never created), so the silent-skip posture is
+	// safe. The order matters: RollbackRequest consults the lease
+	// registry, so it must run before Close deletes the registry entry.
+	if req, err := lease.RollbackRequest(); err == nil && admission != nil {
+		if _, execErr := admission.Execute(ctx, req); execErr != nil {
+			logger.Warn("provisional rollback after create failure",
+				zap.String("call_site", callSite),
+				zap.String("worktree_path", worktreePath),
+				zap.Error(execErr))
+		}
+	}
+	// Successful path: function returned without error and the lease is
+	// still bound. The owning task owns the worktree already; release
+	// the *reservation* (idempotent when not bound) so the registry
+	// does not leak the reservation into the next request.
+	if err := lease.Close(); err != nil {
+		logger.Warn("close provisional lease failed",
+			zap.String("call_site", callSite),
+			zap.String("worktree_path", worktreePath),
+			zap.Error(err))
+	}
+}
+
 // createInTaskDir creates a worktree inside the task directory structure:
 // ~/.kandev/tasks/{taskDirName}/{repoName}/
 //
@@ -252,7 +299,7 @@ func (m *Manager) createInTaskDir(ctx context.Context, req CreateRequest, baseRe
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = lease.Close() }()
+	defer rollbackProvisionOnExit(ctx, m.logger, m.admission, lease, worktreePath, "createInTaskDir")
 	if err := m.prepareTaskWorktreePath(req, worktreePath); err != nil {
 		return nil, err
 	}
@@ -361,6 +408,11 @@ func (m *Manager) createContributionInTaskDir(
 	if err != nil {
 		return nil, err
 	}
+	// Wrap the remaining critical section in the same rollback-on-exit
+	// guard the non-contribution path uses, so a persist failure after
+	// Bind/Materialize cancels the admission-rollback mark rather than
+	// leaving a half-installed task behind.
+	defer rollbackProvisionOnExit(ctx, m.logger, m.admission, lease, worktreePath, "createContributionInTaskDir")
 	if err := lease.Bind(ctx); err != nil {
 		return nil, fmt.Errorf("bind provisional lease: %w", err)
 	}

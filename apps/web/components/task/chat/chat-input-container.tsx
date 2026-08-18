@@ -140,6 +140,25 @@ const recoverableSessionStates = new Set<TaskSession["state"]>([
   "WAITING_FOR_INPUT",
 ]);
 
+/** Decide whether the recovery reply for a session may be applied after
+ * the network round-trip. Returns true only when the in-memory session is
+ * still in a recoverable state, so a later failure/cancellation event
+ * can pre-empt the recovery without being overwritten by the stale
+ * `state: WAITING_FOR_INPUT` the server echoes back. */
+export function mayApplyRecoveredSession(
+  session: TaskSession | undefined,
+  response: LaunchSessionResponse | null,
+  taskId: string,
+  sessionId: string,
+): boolean {
+  if (!session) return false;
+  if (!response?.success) return false;
+  if (!recoverableSessionStates.has(session.state)) return false;
+  if (response.task_id !== taskId) return false;
+  if (response.session_id !== sessionId) return false;
+  return true;
+}
+
 /** Applies an authoritative successful recovery reply without waiting for a later session event. */
 export function recoveredSessionFromResponse(
   session: TaskSession | undefined,
@@ -152,6 +171,7 @@ export function recoveredSessionFromResponse(
     !response?.success ||
     response.task_id !== taskId ||
     response.session_id !== sessionId ||
+    !recoverableSessionStates.has(session.state) ||
     !recoverableSessionStates.has(response.state as TaskSession["state"])
   ) {
     return null;
@@ -207,8 +227,19 @@ function FailedSessionBanner({
       const setBusy = action === "resume" ? setIsResuming : setIsStartingFresh;
       setBusy(true);
       const response = await requestSessionRecover(taskId, sessionId, action);
+      // Re-read the session after the network round-trip: another
+      // session event (failure / cancellation) may have landed while
+      // the recovery reply was in flight, in which case the recovery
+      // path should not overwrite the now-stale targeted state. A
+      // session that is no longer in a recoverable state is treated as
+      // a fresh external signal and the recovery is ignored.
+      const postRoundtripSession = store.getState().taskSessions.items[sessionId];
+      if (!mayApplyRecoveredSession(postRoundtripSession, response, taskId, sessionId)) {
+        setBusy(false);
+        return;
+      }
       const recovered = recoveredSessionFromResponse(
-        store.getState().taskSessions.items[sessionId],
+        postRoundtripSession,
         response,
         taskId,
         sessionId,

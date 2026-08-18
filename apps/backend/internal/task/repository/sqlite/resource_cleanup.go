@@ -491,9 +491,17 @@ func (r *Repository) cancelRetryableArchiveCleanupLocked(
 
 func (r *Repository) ResetRunningTaskResourceCleanupJobs(ctx context.Context) error {
 	now := time.Now().UTC()
+	// The reset is for the generic cleanup worker. Reconcile jobs (v2/v3
+	// archived-resource snapshots) own their own task-lock and finish
+	// synchronously in `ReconcileArchivedResource` /
+	// `ReconcileArchivedResourceGroup`; if either path is interrupted the
+	// row must stay in `running` until the operator replays it through the
+	// typed operation, so the generic archive/delete worker does not pick
+	// it up against a snapshot schema it does not understand.
 	_, err := r.db.ExecContext(ctx, r.db.Rebind(`
 		UPDATE task_resource_cleanup_jobs
-		SET state = ?, next_attempt_at = ?, updated_at = ? WHERE state = ?
-	`), models.TaskResourceCleanupStateRetryWait, now, now, models.TaskResourceCleanupStateRunning)
+		SET state = ?, next_attempt_at = ?, updated_at = ?
+		WHERE state = ? AND trigger <> ?
+	`), models.TaskResourceCleanupStateRetryWait, now, now, models.TaskResourceCleanupStateRunning, models.TaskResourceCleanupTriggerReconcile)
 	return err
 }
