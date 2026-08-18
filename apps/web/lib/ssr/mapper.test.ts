@@ -141,15 +141,16 @@ describe("snapshotToState", () => {
     const snapshot = snapshotWithPendingAction(undefined);
     snapshot.tasks[0].state = "IN_PROGRESS";
     snapshot.tasks[0].wip_admitted = true;
-    snapshot.tasks[0].queued_for_step_id = null;
-    snapshot.tasks[0].queued_at = null;
+    snapshot.tasks[0].queued_for_step_id = undefined;
+    snapshot.tasks[0].queued_at = undefined;
 
     const state = snapshotToState(snapshot);
 
     expect(state.kanban?.tasks[0]).toMatchObject({
       state: "IN_PROGRESS",
       wipAdmitted: true,
-      queuedForStepId: null,
+      queuedForStepId: undefined,
+      queuedAt: undefined,
     });
   });
 });

@@ -51,7 +51,7 @@ export function snapshotToState(snapshot: WorkflowSnapshot): Partial<AppState> {
         // slip into the admitted count when the SSR snapshot was the
         // only data on hand.
         wipAdmitted: task.wip_admitted,
-        queuedForStepId: task.queued_for_step_id ?? null,
+        queuedForStepId: task.queued_for_step_id ?? undefined,
         queuedAt: task.queued_at ?? undefined,
         repositoryId: primary?.repository_id ?? undefined,
         repositories: task.repositories?.map((r) => ({
