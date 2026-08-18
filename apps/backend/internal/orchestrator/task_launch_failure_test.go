@@ -709,18 +709,14 @@ func TestIsMissingBranchError_DoesNotMatchCheckedOutElsewhere(t *testing.T) {
 	}
 }
 
-// TestExtractMissingBranchName_DoesNotPickCheckedOutElsewhereBranch keeps the
-// branch-name extractor safe: when the chain wraps ErrBranchCheckedOut, the
-// extracted name must not be sent into the PR-recovery flow as if it were a
-// missing PR branch.
-func TestExtractMissingBranchName_DoesNotPickCheckedOutElsewhereBranch(t *testing.T) {
+// TestExtractMissingBranchName_ExtractsCombinedDiagnostic documents that the
+// extractor still returns the branch from a combined fetch and checkout
+// diagnostic. The caller must classify the typed sentinel before using it.
+func TestExtractMissingBranchName_ExtractsCombinedDiagnostic(t *testing.T) {
 	err := branchCheckedOutElsewhereCombinedError("feature/shared", "/tmp/sibling")
-	// Pre-fix: the function happily returns the branch name because the
-	// remote-ref regex matches inside the combined fetch stderr. The
-	// upstream gate (isMissingBranchError) now refuses to fire when the
-	// typed sentinel is present, but we still pin the behavior so a future
-	// refactor that re-enables the call site does not silently regress.
-	_ = extractMissingBranchName(err)
+	if got := extractMissingBranchName(err); got != "feature/shared" {
+		t.Fatalf("extractMissingBranchName() = %q, want %q", got, "feature/shared")
+	}
 }
 
 // TestHandleSessionLaunchFailed_BranchCheckedOutElsewhereDoesNotCreateFetchGuidance
