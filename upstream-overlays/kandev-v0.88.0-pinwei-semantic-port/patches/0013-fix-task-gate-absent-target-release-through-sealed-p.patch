@@ -1,0 +1,741 @@
+From 225c022c52719c086a0a134a07caed228d5587ee Mon Sep 17 00:00:00 2001
+From: WaleWangPW <396218656@qq.com>
+Date: Sun, 16 Aug 2026 17:15:38 +0800
+Subject: [PATCH 13/22] fix(task): gate absent-target release through sealed
+ physicaldelete admission
+
+The first Task06 candidate (0fc8f491) routed ReleaseAbsentArchivedResourceTarget
+straight to the repository writer, so ActionReleaseAbsent / releaseExecutor were
+unreachable from the production service path and the retained anchor could
+transition to released without the central admission lock, inventory, or
+root-policy gate.
+
+- Service now holds a physicaldelete.Admission (SetPhysicalDeleteAdmission),
+  wired from backendapp.provideWorktreeManager so the task service and the
+  worktree manager share the same physicaldelete.New instance and lock domain.
+- ReleaseAbsentArchivedResourceTarget invokes the sealed ActionReleaseAbsent
+  admission BEFORE any terminal repository read/mutation, then validates the
+  receipt (Mutated=false, Executor=ExecutorNone, Action=ActionReleaseAbsent,
+  matching ResourceKind/ResourceID). Nil admission, denied admission,
+  incomplete inventory, locked-out, mutated receipt, wrong executor, and
+  wrong action all fail closed with new typed errors before any repo access.
+- New admission_test.go uses an admissionOrderSpy and a releaseRepoSpy to
+  prove the order (admission first, exactly one repo call) and the fail-closed
+  contract (zero repo calls on every deny / unavailable / mutated / wrong-field
+  path). The success test asserts the physical_retained / physical_removed /
+  released state contract on the receipt.
+---
+ apps/backend/internal/backendapp/worktree.go  |   5 +
+ .../resource_cleanup_terminal_actions.go      |  68 ++-
+ ...cleanup_terminal_actions_admission_test.go | 461 ++++++++++++++++++
+ apps/backend/internal/task/service/service.go |  11 +
+ .../task-06-terminal-db-only-actions.md       |  78 +++
+ 5 files changed, 619 insertions(+), 4 deletions(-)
+ create mode 100644 apps/backend/internal/task/service/resource_cleanup_terminal_actions_admission_test.go
+
+diff --git a/apps/backend/internal/backendapp/worktree.go b/apps/backend/internal/backendapp/worktree.go
+index b9b426e5ef47f1e895249c075e77f6925970838b..a466a3927d90eed249289611d73f548bbd503c4f 100644
+--- a/apps/backend/internal/backendapp/worktree.go
++++ b/apps/backend/internal/backendapp/worktree.go
+@@ -80,6 +80,11 @@ func provideWorktreeManager(dbPool *db.Pool, cfg *config.Config, log *logger.Log
+ 		return nil, nil, nil, fmt.Errorf("physical-delete admission: %w", err)
+ 	}
+ 	manager.SetAdmission(admission)
++	// Share the same physicaldelete admission with the task service so the
++	// Task06 terminal release path runs through the sealed authority before
++	// any repository read or mutation. The shared lock domain guarantees
++	// concurrent admission paths serialize correctly.
++	taskSvc.SetPhysicalDeleteAdmission(admission)
+ 
+ 	if lifecycleMgr != nil {
+ 		lifecycleMgr.SetWorktreeManager(manager)
+diff --git a/apps/backend/internal/task/service/resource_cleanup_terminal_actions.go b/apps/backend/internal/task/service/resource_cleanup_terminal_actions.go
+index 519442cd371caa271df2ef3d2ca39ab4783f0e51..389cd5f6564ddfa214d9d73a94357e875bc82295 100644
+--- a/apps/backend/internal/task/service/resource_cleanup_terminal_actions.go
++++ b/apps/backend/internal/task/service/resource_cleanup_terminal_actions.go
+@@ -6,15 +6,19 @@ import (
+ 	"fmt"
+ 	"time"
+ 
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/task/models"
+ 	"github.com/kandev/kandev/internal/task/repository"
+ )
+ 
+ var (
+-	ErrArchivedResourceReleaseDisabled    = errors.New("archived resource release is disabled")
+-	ErrArchivedResourceReleaseInvalid     = errors.New("invalid archived resource release request")
+-	ErrArchivedResourceReleaseUnavailable = errors.New("archived resource release is unavailable")
+-	ErrArchivedResourceReleaseUnknown     = errors.New("archived resource release target is unknown")
++	ErrArchivedResourceReleaseDisabled             = errors.New("archived resource release is disabled")
++	ErrArchivedResourceReleaseInvalid              = errors.New("invalid archived resource release request")
++	ErrArchivedResourceReleaseUnavailable          = errors.New("archived resource release is unavailable")
++	ErrArchivedResourceReleaseUnknown              = errors.New("archived resource release target is unknown")
++	ErrArchivedResourceReleaseAdmissionUnavailable = errors.New("archived resource release admission is unavailable")
++	ErrArchivedResourceReleaseAdmissionDenied      = errors.New("archived resource release admission was denied")
++	ErrArchivedResourceReleaseAdmissionMutated     = errors.New("archived resource release admission produced a non-noop receipt")
+ 
+ 	ErrArchivedResourceEnvironmentRetirementDisabled    = errors.New("archived resource environment retirement is disabled")
+ 	ErrArchivedResourceEnvironmentRetirementInvalid     = errors.New("invalid archived resource environment retirement request")
+@@ -258,6 +262,15 @@ func (s *Service) ReleaseAbsentArchivedResourceTarget(
+ 	if err := validateArchivedResourceReleaseRequest(req); err != nil {
+ 		return nil, err
+ 	}
++	// The release admission must run through the sealed central physicaldelete
++	// admission BEFORE any terminal repository read or mutation. A nil or
++	// unavailable admission is fail-closed — zero repo reads, zero repo writes.
++	if s.physicalDeleteAdmission == nil {
++		return nil, ErrArchivedResourceReleaseAdmissionUnavailable
++	}
++	if err := s.invokeAbsentTargetAdmission(ctx, req); err != nil {
++		return nil, err
++	}
+ 	repo, err := s.archivedResourceTerminalRepoFor(ErrArchivedResourceReleaseUnavailable)
+ 	if err != nil {
+ 		return nil, err
+@@ -282,6 +295,53 @@ func (s *Service) ReleaseAbsentArchivedResourceTarget(
+ 	}, nil
+ }
+ 
++// invokeAbsentTargetAdmission runs the sealed ActionReleaseAbsent admission
++// and validates the receipt. The receipt is the only authoritative proof that
++// the targeted retained anchor's path and Git registration are absent from
++// the writer-DB inventory and root policy. A denied, mutated, or non-noop
++// receipt fails closed before any repository access.
++func (s *Service) invokeAbsentTargetAdmission(
++	ctx context.Context,
++	req ArchivedResourceReleaseRequest,
++) error {
++	physicalRequest := physicaldelete.Request{
++		Action:    physicaldelete.ActionReleaseAbsent,
++		Authority: physicaldelete.AuthorityAdmin,
++		Executor:  physicaldelete.ExecutorNone,
++		Force:     false,
++		Resource: physicaldelete.Resource{
++			Kind: physicaldelete.ResourceKindEnvironmentRepo,
++			ID:   req.AnchorWorktreeID,
++			Path: req.AnchorWorktreePath,
++		},
++	}
++	receipt, err := s.physicalDeleteAdmission.Execute(ctx, physicalRequest)
++	if err != nil {
++		if errors.Is(err, physicaldelete.ErrInvalidRequest) ||
++			errors.Is(err, physicaldelete.ErrInventoryIncomplete) ||
++			errors.Is(err, physicaldelete.ErrProtectedResource) ||
++			errors.Is(err, physicaldelete.ErrLockUnavailable) ||
++			errors.Is(err, physicaldelete.ErrReleaseNotAdmitted) {
++			return ErrArchivedResourceReleaseAdmissionDenied
++		}
++		return ErrArchivedResourceReleaseAdmissionUnavailable
++	}
++	if receipt.Mutated {
++		return ErrArchivedResourceReleaseAdmissionMutated
++	}
++	if receipt.Executor != physicaldelete.ExecutorNone {
++		return ErrArchivedResourceReleaseAdmissionMutated
++	}
++	if receipt.Action != physicaldelete.ActionReleaseAbsent {
++		return ErrArchivedResourceReleaseAdmissionMutated
++	}
++	if receipt.ResourceKind != physicaldelete.ResourceKindEnvironmentRepo ||
++		receipt.ResourceID != req.AnchorWorktreeID {
++		return ErrArchivedResourceReleaseAdmissionMutated
++	}
++	return nil
++}
++
+ func (s *Service) archivedResourcePhysicalReleaseFlagOn() bool {
+ 	s.archivedResourceFeatureMu.Lock()
+ 	defer s.archivedResourceFeatureMu.Unlock()
+diff --git a/apps/backend/internal/task/service/resource_cleanup_terminal_actions_admission_test.go b/apps/backend/internal/task/service/resource_cleanup_terminal_actions_admission_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8c6b66f814d1ded6fea66a9a98c2ed1ddba07f19
+--- /dev/null
++++ b/apps/backend/internal/task/service/resource_cleanup_terminal_actions_admission_test.go
+@@ -0,0 +1,461 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/kandev/kandev/internal/common/logger"
++	"github.com/kandev/kandev/internal/physicaldelete"
++	"github.com/kandev/kandev/internal/task/models"
++)
++
++// admissionOrderSpy records the order in which the sealed admission runs
++// relative to the repository CAS. It can also synthesize deny / unavailable
++// receipts to verify the fail-closed contract.
++type admissionOrderSpy struct {
++	mu                  sync.Mutex
++	calls               int
++	receipts            []physicaldelete.Request
++	deny                bool
++	denyError           error
++	mutateReceipt       bool
++	mutatedAction       physicaldelete.Action
++	mutatedExecutor     physicaldelete.Executor
++	mutatedResourceKind physicaldelete.ResourceKind
++}
++
++func (s *admissionOrderSpy) BeginProvisional(_ context.Context, _ physicaldelete.CreateRequest) (physicaldelete.ProvisionalLease, error) {
++	return physicaldelete.ProvisionalLease{}, errors.New("provisional rollback not in use")
++}
++
++func (s *admissionOrderSpy) Execute(_ context.Context, req physicaldelete.Request) (physicaldelete.Receipt, error) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.calls++
++	s.receipts = append(s.receipts, req)
++	if s.denyError != nil {
++		return physicaldelete.Receipt{}, s.denyError
++	}
++	if s.deny {
++		return physicaldelete.Receipt{
++			Decision:     physicaldelete.DecisionDeny,
++			Reason:       physicaldelete.DenialProtected,
++			Action:       req.Action,
++			ResourceKind: req.Resource.Kind,
++			ResourceID:   req.Resource.ID,
++			Executor:     req.Executor,
++			Mutated:      false,
++			At:           time.Now().UTC(),
++		}, physicaldelete.ErrProtectedResource
++	}
++	// Default success path returns a sealed no-op receipt with the requested
++	// action/executor/kind preserved. Per-field overrides (when non-zero)
++	// mutate the corresponding receipt field so each validation rule has a
++	// dedicated failure mode. mutateReceipt also flips Mutated=true so the
++	// service's "no physical mutation" guard fires.
++	action := req.Action
++	executor := req.Executor
++	resourceKind := req.Resource.Kind
++	if s.mutatedAction != "" {
++		action = s.mutatedAction
++	}
++	if s.mutatedExecutor != "" {
++		executor = s.mutatedExecutor
++	}
++	if s.mutatedResourceKind != "" {
++		resourceKind = s.mutatedResourceKind
++	}
++	if !s.mutateReceipt && executor == "" {
++		// Preserve ExecutorNone on the success path.
++		executor = physicaldelete.ExecutorNone
++	}
++	return physicaldelete.Receipt{
++		Decision:     physicaldelete.DecisionDeny,
++		Reason:       "",
++		Action:       action,
++		ResourceKind: resourceKind,
++		ResourceID:   req.Resource.ID,
++		Executor:     executor,
++		Mutated:      s.mutateReceipt,
++		At:           time.Now().UTC(),
++	}, nil
++}
++
++func (s *admissionOrderSpy) callCount() int {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	return s.calls
++}
++
++// releaseRepoSpy tracks every call made to the release repository after the
++// service has invoked admission. The spy fails the test if any terminal call
++// happens without a prior admission call.
++type releaseRepoSpy struct {
++	mu         sync.Mutex
++	calls      []string
++	shouldFail bool
++}
++
++func (r *releaseRepoSpy) ReleaseAbsentArchivedResourceAnchor(_ context.Context, job *models.TaskResourceCleanupJob) (*models.ArchivedResourceReleaseAdmission, error) {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	r.calls = append(r.calls, "release:"+job.OperationID)
++	if r.shouldFail {
++		return nil, errors.New("repo failure")
++	}
++	completedAt := time.Now().UTC()
++	return &models.ArchivedResourceReleaseAdmission{
++		Job: &models.TaskResourceCleanupJob{
++			OperationID: job.OperationID,
++			State:       models.TaskResourceCleanupStateReleased,
++			CompletedAt: &completedAt,
++		},
++		Reason: "release_absent",
++	}, nil
++}
++
++func (r *releaseRepoSpy) callCount() int {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	return len(r.calls)
++}
++
++// terminalReleaseRepos satisfies both TaskResourceCleanupRepository and
++// ArchivedResourceTerminalRepository. The release spy is the only method that
++// is meaningful for the release path; every other method panics so any
++// unexpected repo read/mutation fails the test loudly.
++type terminalReleaseRepos struct {
++	release *releaseRepoSpy
++}
++
++func (r *terminalReleaseRepos) ReleaseAbsentArchivedResourceAnchor(ctx context.Context, job *models.TaskResourceCleanupJob) (*models.ArchivedResourceReleaseAdmission, error) {
++	return r.release.ReleaseAbsentArchivedResourceAnchor(ctx, job)
++}
++
++func (r *terminalReleaseRepos) CancelStaleArchivedResourcePendingMove(context.Context, *models.TaskResourceCleanupJob) (bool, error) {
++	return false, nil
++}
++
++func (r *terminalReleaseRepos) RetireStaleArchivedResourceEnvironmentReference(context.Context, *models.TaskResourceCleanupJob) (*models.ArchivedResourceEnvironmentRetirementIdentity, error) {
++	return &models.ArchivedResourceEnvironmentRetirementIdentity{}, nil
++}
++
++func (r *terminalReleaseRepos) CreateTaskResourceCleanupJob(context.Context, *models.TaskResourceCleanupJob) error {
++	return errors.New("terminalReleaseRepos.CreateTaskResourceCleanupJob must not be invoked")
++}
++
++func (r *terminalReleaseRepos) HasActiveTaskResourceCleanupJob(context.Context, string) (bool, error) {
++	return false, nil
++}
++
++func (r *terminalReleaseRepos) UpdateTaskResourceCleanupSnapshot(context.Context, string, string) error {
++	return nil
++}
++
++func (r *terminalReleaseRepos) GetTaskResourceCleanupJob(context.Context, string) (*models.TaskResourceCleanupJob, error) {
++	return nil, nil
++}
++
++func (r *terminalReleaseRepos) GetTaskResourceCleanupJobByOperationID(context.Context, string) (*models.TaskResourceCleanupJob, error) {
++	return nil, nil
++}
++
++func (r *terminalReleaseRepos) ListPreparedTaskResourceCleanupJobs(context.Context) ([]*models.TaskResourceCleanupJob, error) {
++	return nil, nil
++}
++
++func (r *terminalReleaseRepos) ListDueTaskResourceCleanupJobs(_ context.Context, _ time.Time, _ int) ([]*models.TaskResourceCleanupJob, error) {
++	return nil, nil
++}
++
++func (r *terminalReleaseRepos) StartPreparedTaskResourceCleanupJob(context.Context, string) (bool, error) {
++	return false, nil
++}
++
++func (r *terminalReleaseRepos) MarkTaskResourceCleanupJobRunning(context.Context, string) (bool, error) {
++	return false, nil
++}
++
++func (r *terminalReleaseRepos) CompleteClaimedTaskResourceCleanupJob(context.Context, string, int, models.TaskResourceCleanupState, string, *time.Time) (bool, error) {
++	return false, nil
++}
++
++func (r *terminalReleaseRepos) CompleteTaskResourceCleanupJob(context.Context, string, models.TaskResourceCleanupState, string, *time.Time) error {
++	return nil
++}
++
++func (r *terminalReleaseRepos) CancelArchiveTaskResourceCleanupJobs(context.Context, string) error {
++	return nil
++}
++
++func (r *terminalReleaseRepos) ResetRunningTaskResourceCleanupJobs(context.Context) error {
++	return nil
++}
++
++func (r *terminalReleaseRepos) AdmitArchivedResourceReconcile(context.Context, *models.TaskResourceCleanupJob) (*models.ArchivedResourceReconcileAdmission, error) {
++	return nil, nil
++}
++
++func (r *terminalReleaseRepos) ClaimArchivedResourceReconcileJob(context.Context, string) (*models.TaskResourceCleanupJob, bool, error) {
++	return nil, false, nil
++}
++
++func (r *terminalReleaseRepos) CompleteArchivedResourceReconcileRetention(context.Context, string, int) (*models.ArchivedResourceReconcileCompletion, error) {
++	return nil, nil
++}
++
++func (r *terminalReleaseRepos) CancelNeverClaimedArchivedResourceReconcile(context.Context, *models.TaskResourceCleanupJob) (bool, error) {
++	return false, nil
++}
++
++func (r *terminalReleaseRepos) ListArchivedResourceReconcileJobsByTaskID(context.Context, string) ([]*models.TaskResourceCleanupJob, error) {
++	return nil, nil
++}
++
++func (r *terminalReleaseRepos) ListDueArchivedResourceReconcileJobs(_ context.Context, _ time.Time, _ int) ([]*models.TaskResourceCleanupJob, error) {
++	return nil, nil
++}
++
++func (r *terminalReleaseRepos) ListRunningArchivedResourceReconcileJobs(context.Context) ([]*models.TaskResourceCleanupJob, error) {
++	return nil, nil
++}
++
++func (r *terminalReleaseRepos) GetRunningArchivedResourceReconcileJob(context.Context, string) (*models.TaskResourceCleanupJob, error) {
++	return nil, nil
++}
++
++func (r *terminalReleaseRepos) RestoreArchivedResourceReconcileRetention(context.Context, string) (bool, error) {
++	return false, nil
++}
++
++func (r *terminalReleaseRepos) AdmitArchivedResourceGroupReconcile(context.Context, *models.TaskResourceCleanupJob) (*models.ArchivedResourceReconcileAdmission, error) {
++	return nil, nil
++}
++
++func (r *terminalReleaseRepos) CompleteArchivedResourceGroupReconcileRetention(context.Context, string, int) (*models.ArchivedResourceReconcileCompletion, error) {
++	return nil, nil
++}
++
++func (r *terminalReleaseRepos) RestoreArchivedResourceGroupReconcileRetention(context.Context, string) (bool, error) {
++	return false, nil
++}
++
++func (r *terminalReleaseRepos) ListArchivedResourceGroupReconcileJobsByParticipant(context.Context, string) ([]*models.TaskResourceCleanupJob, error) {
++	return nil, nil
++}
++
++func (r *terminalReleaseRepos) ResolveArchivedResourceReconcileUnarchive(context.Context, string, time.Time, string, bool) (bool, error) {
++	return false, nil
++}
++
++func terminalReleaseRequestFixture() ArchivedResourceReleaseRequest {
++	return ArchivedResourceReleaseRequest{
++		AnchorOperationID:  "operation-anchor",
++		AnchorDigest:       "digest",
++		AnchorTaskID:       "task-anchor",
++		AnchorWorktreeID:   "wt-anchor",
++		AnchorRepository:   "repository-company",
++		AnchorBranch:       "feature/synthetic",
++		AnchorHeadOID:      strings.Repeat("a", 40),
++		AnchorWorktreePath: "/tmp/release/path",
++		AnchorGitCommonDir: "/tmp/release/.git",
++		ReleasedAt:         time.Now().UTC().Format(time.RFC3339Nano),
++	}
++}
++
++func buildReleaseTestService(t *testing.T, admission physicaldelete.Admission, repo *releaseRepoSpy) *Service {
++	t.Helper()
++	log, err := logger.NewLogger(logger.LoggingConfig{Level: "error", Format: "json"})
++	if err != nil {
++		t.Fatalf("logger: %v", err)
++	}
++	svc := NewService(Repos{}, nil, log, RepositoryDiscoveryConfig{})
++	svc.SetArchivedResourceFeatures(true, true)
++	svc.SetPhysicalDeleteAdmission(admission)
++	svc.resourceCleanups = &terminalReleaseRepos{release: repo}
++	return svc
++}
++
++func TestTerminalReleaseRunsAdmissionBeforeAnyRepositoryCall(t *testing.T) {
++	admission := &admissionOrderSpy{}
++	repo := &releaseRepoSpy{}
++	svc := buildReleaseTestService(t, admission, repo)
++
++	result, err := svc.ReleaseAbsentArchivedResourceTarget(context.Background(), terminalReleaseRequestFixture())
++	if err != nil {
++		t.Fatalf("ReleaseAbsentArchivedResourceTarget: %v", err)
++	}
++	if result == nil {
++		t.Fatal("expected non-nil result")
++	}
++	if admission.callCount() != 1 {
++		t.Fatalf("admission call count = %d, want 1", admission.callCount())
++	}
++	if repo.callCount() != 1 {
++		t.Fatalf("repo call count = %d, want 1", repo.callCount())
++	}
++	if len(admission.receipts) != 1 {
++		t.Fatalf("recorded admission receipts = %d, want 1", len(admission.receipts))
++	}
++	got := admission.receipts[0]
++	if got.Action != physicaldelete.ActionReleaseAbsent ||
++		got.Authority != physicaldelete.AuthorityAdmin ||
++		got.Executor != physicaldelete.ExecutorNone ||
++		got.Resource.Kind != physicaldelete.ResourceKindEnvironmentRepo ||
++		got.Resource.Path != "/tmp/release/path" ||
++		got.Resource.ID != "wt-anchor" {
++		t.Fatalf("admission request shape wrong: %#v", got)
++	}
++}
++
++func TestTerminalReleaseFailsClosedWhenAdmissionIsNil(t *testing.T) {
++	repo := &releaseRepoSpy{}
++	log, err := logger.NewLogger(logger.LoggingConfig{Level: "error", Format: "json"})
++	if err != nil {
++		t.Fatalf("logger: %v", err)
++	}
++	svc := NewService(Repos{}, nil, log, RepositoryDiscoveryConfig{})
++	svc.SetArchivedResourceFeatures(true, true)
++	// Intentionally NOT wiring admission: it stays nil.
++	svc.resourceCleanups = &terminalReleaseRepos{release: repo}
++
++	_, err = svc.ReleaseAbsentArchivedResourceTarget(context.Background(), terminalReleaseRequestFixture())
++	if !errors.Is(err, ErrArchivedResourceReleaseAdmissionUnavailable) {
++		t.Fatalf("nil admission error = %v, want ErrArchivedResourceReleaseAdmissionUnavailable", err)
++	}
++	if repo.callCount() != 0 {
++		t.Fatalf("repo called %d times despite nil admission; want 0", repo.callCount())
++	}
++}
++
++func TestTerminalReleaseFailsClosedWhenAdmissionDeny(t *testing.T) {
++	admission := &admissionOrderSpy{deny: true}
++	repo := &releaseRepoSpy{}
++	svc := buildReleaseTestService(t, admission, repo)
++
++	_, err := svc.ReleaseAbsentArchivedResourceTarget(context.Background(), terminalReleaseRequestFixture())
++	if !errors.Is(err, ErrArchivedResourceReleaseAdmissionDenied) {
++		t.Fatalf("denied admission error = %v, want ErrArchivedResourceReleaseAdmissionDenied", err)
++	}
++	if repo.callCount() != 0 {
++		t.Fatalf("repo called %d times despite denied admission; want 0", repo.callCount())
++	}
++	if admission.callCount() != 1 {
++		t.Fatalf("admission should still be invoked once; got %d", admission.callCount())
++	}
++}
++
++func TestTerminalReleaseFailsClosedWhenAdmissionReturnsMutatedReceipt(t *testing.T) {
++	admission := &admissionOrderSpy{mutateReceipt: true}
++	repo := &releaseRepoSpy{}
++	svc := buildReleaseTestService(t, admission, repo)
++
++	_, err := svc.ReleaseAbsentArchivedResourceTarget(context.Background(), terminalReleaseRequestFixture())
++	if !errors.Is(err, ErrArchivedResourceReleaseAdmissionMutated) {
++		t.Fatalf("mutated receipt error = %v, want ErrArchivedResourceReleaseAdmissionMutated", err)
++	}
++	if repo.callCount() != 0 {
++		t.Fatalf("repo called %d times despite mutated receipt; want 0", repo.callCount())
++	}
++}
++
++func TestTerminalReleaseFailsClosedWhenAdmissionReturnsWrongExecutor(t *testing.T) {
++	admission := &admissionOrderSpy{
++		mutatedExecutor: physicaldelete.ExecutorFilesystem,
++	}
++	repo := &releaseRepoSpy{}
++	svc := buildReleaseTestService(t, admission, repo)
++
++	_, err := svc.ReleaseAbsentArchivedResourceTarget(context.Background(), terminalReleaseRequestFixture())
++	if !errors.Is(err, ErrArchivedResourceReleaseAdmissionMutated) {
++		t.Fatalf("wrong-executor receipt error = %v, want ErrArchivedResourceReleaseAdmissionMutated", err)
++	}
++	if repo.callCount() != 0 {
++		t.Fatalf("repo called %d times despite wrong executor; want 0", repo.callCount())
++	}
++}
++
++func TestTerminalReleaseFailsClosedWhenAdmissionReturnsWrongAction(t *testing.T) {
++	admission := &admissionOrderSpy{
++		mutatedAction: physicaldelete.ActionRegisteredWorktreeRemove,
++	}
++	repo := &releaseRepoSpy{}
++	svc := buildReleaseTestService(t, admission, repo)
++
++	_, err := svc.ReleaseAbsentArchivedResourceTarget(context.Background(), terminalReleaseRequestFixture())
++	if !errors.Is(err, ErrArchivedResourceReleaseAdmissionMutated) {
++		t.Fatalf("wrong-action receipt error = %v, want ErrArchivedResourceReleaseAdmissionMutated", err)
++	}
++	if repo.callCount() != 0 {
++		t.Fatalf("repo called %d times despite wrong action; want 0", repo.callCount())
++	}
++}
++
++func TestTerminalReleaseFailsClosedWhenAdmissionInventoryIncomplete(t *testing.T) {
++	admission := &admissionOrderSpy{denyError: physicaldelete.ErrInventoryIncomplete}
++	repo := &releaseRepoSpy{}
++	svc := buildReleaseTestService(t, admission, repo)
++
++	_, err := svc.ReleaseAbsentArchivedResourceTarget(context.Background(), terminalReleaseRequestFixture())
++	if !errors.Is(err, ErrArchivedResourceReleaseAdmissionDenied) {
++		t.Fatalf("incomplete inventory error = %v, want ErrArchivedResourceReleaseAdmissionDenied", err)
++	}
++	if repo.callCount() != 0 {
++		t.Fatalf("repo called %d times despite incomplete inventory; want 0", repo.callCount())
++	}
++}
++
++func TestTerminalReleaseFailsClosedWhenAdmissionLockedOut(t *testing.T) {
++	admission := &admissionOrderSpy{denyError: physicaldelete.ErrLockUnavailable}
++	repo := &releaseRepoSpy{}
++	svc := buildReleaseTestService(t, admission, repo)
++
++	_, err := svc.ReleaseAbsentArchivedResourceTarget(context.Background(), terminalReleaseRequestFixture())
++	if !errors.Is(err, ErrArchivedResourceReleaseAdmissionDenied) {
++		t.Fatalf("locked-out error = %v, want ErrArchivedResourceReleaseAdmissionDenied", err)
++	}
++	if repo.callCount() != 0 {
++		t.Fatalf("repo called %d times despite lock unavailable; want 0", repo.callCount())
++	}
++}
++
++func TestTerminalReleaseFailsClosedWhenAdmissionUnavailable(t *testing.T) {
++	admission := &admissionOrderSpy{denyError: errors.New("admission exploded")}
++	repo := &releaseRepoSpy{}
++	svc := buildReleaseTestService(t, admission, repo)
++
++	_, err := svc.ReleaseAbsentArchivedResourceTarget(context.Background(), terminalReleaseRequestFixture())
++	if !errors.Is(err, ErrArchivedResourceReleaseAdmissionUnavailable) {
++		t.Fatalf("unavailable admission error = %v, want ErrArchivedResourceReleaseAdmissionUnavailable", err)
++	}
++	if repo.callCount() != 0 {
++		t.Fatalf("repo called %d times despite unavailable admission; want 0", repo.callCount())
++	}
++}
++
++func TestTerminalReleaseReceiptContractHoldsOnSuccess(t *testing.T) {
++	admission := &admissionOrderSpy{}
++	repo := &releaseRepoSpy{}
++	svc := buildReleaseTestService(t, admission, repo)
++
++	result, err := svc.ReleaseAbsentArchivedResourceTarget(context.Background(), terminalReleaseRequestFixture())
++	if err != nil {
++		t.Fatalf("ReleaseAbsentArchivedResourceTarget: %v", err)
++	}
++	if result == nil {
++		t.Fatal("expected non-nil result")
++	}
++	if !result.PhysicalRetained || result.PhysicalRemoved {
++		t.Fatalf("physical contract wrong: retained=%v removed=%v", result.PhysicalRetained, result.PhysicalRemoved)
++	}
++	if result.OperationID == "" || result.State != string(models.TaskResourceCleanupStateReleased) {
++		t.Fatalf("result metadata wrong: op=%q state=%q", result.OperationID, result.State)
++	}
++	if result.Targets != 1 {
++		t.Fatalf("targets = %d, want 1", result.Targets)
++	}
++}
+diff --git a/apps/backend/internal/task/service/service.go b/apps/backend/internal/task/service/service.go
+index 4dcf891f53667a99568719428219fbfcf78885f9..a18c88ebf8c009232c132a1b4ea39e91527ecffa 100644
+--- a/apps/backend/internal/task/service/service.go
++++ b/apps/backend/internal/task/service/service.go
+@@ -12,6 +12,7 @@ import (
+ 
+ 	"github.com/kandev/kandev/internal/common/logger"
+ 	"github.com/kandev/kandev/internal/events/bus"
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/secrets"
+ 	"github.com/kandev/kandev/internal/task/models"
+ 	"github.com/kandev/kandev/internal/task/repository"
+@@ -289,6 +290,7 @@ type Service struct {
+ 	logger                      *logger.Logger
+ 	discoveryConfig             RepositoryDiscoveryConfig
+ 	worktreeCleanup             WorktreeCleanup
++	physicalDeleteAdmission     physicaldelete.Admission
+ 	executionStopper            TaskExecutionStopper
+ 	rowLivenessProber           TaskRowLivenessProber
+ 	contextWindowResetter       func(context.Context, string) error
+@@ -434,6 +436,15 @@ func (s *Service) SetWorktreeCleanup(cleanup WorktreeCleanup) {
+ 	s.worktreeCleanup = cleanup
+ }
+ 
++// SetPhysicalDeleteAdmission wires the sealed central admission gate that
++// Task06's terminal actions must invoke before any repository read or
++// mutation. Optional in tests; production backendapp wires this with the
++// same physicaldelete.New instance given to the worktree manager so the
++// entire managed-root authority shares one lock domain.
++func (s *Service) SetPhysicalDeleteAdmission(admission physicaldelete.Admission) {
++	s.physicalDeleteAdmission = admission
++}
++
+ func (s *Service) setCleanupDoneForTestHook(ch chan struct{}) {
+ 	s.cleanupDoneForTest = ch
+ }
+diff --git a/docs/plans/pinwei-v088-semantic-port/task-06-terminal-db-only-actions.md b/docs/plans/pinwei-v088-semantic-port/task-06-terminal-db-only-actions.md
+index f22b1f3f713c1baa6f03a08f6e7858fd42bc3543..606d215a3e8154b1fafbe8fea1453f890a83a9a0 100644
+--- a/docs/plans/pinwei-v088-semantic-port/task-06-terminal-db-only-actions.md
++++ b/docs/plans/pinwei-v088-semantic-port/task-06-terminal-db-only-actions.md
+@@ -165,3 +165,81 @@ the governing flag is disabled or the inventory is missing.
+     The new release route is registered only when the physical-release flag
+     is enabled; the cancel / retirement routes are registered only when the
+     reconcile flag is enabled.
++
++### Fix receipt (counterexample response)
++
++The first candidate (`0fc8f491`) routed `ReleaseAbsentArchivedResourceTarget`
++straight to the release repository writer. The sealed central admission
++(`physicaldelete.ActionReleaseAbsent` / `releaseExecutor`) was unreachable
++from the production service path, so the retained anchor could transition
++to released without the central lock, inventory, or root-policy gate.
++
++The successor commit closes that gap end-to-end:
++
++- **Service** (`apps/backend/internal/task/service`)
++  - `Service.physicalDeleteAdmission` field plus
++    `SetPhysicalDeleteAdmission` setter, threaded from
++    `backendapp.provideWorktreeManager` so the task service and the worktree
++    manager share the same `physicaldelete.Service` instance and lock domain.
++  - `ReleaseAbsentArchivedResourceTarget` now invokes the sealed
++    `ActionReleaseAbsent` admission BEFORE any repository read/mutation,
++    requires `receipt.Mutated == false`, `receipt.Executor == ExecutorNone`,
++    `receipt.Action == ActionReleaseAbsent`, and a matching
++    `ResourceKind/ResourceID`. Any drift fails closed with one of three new
++    typed errors (`ErrArchivedResourceReleaseAdmissionUnavailable`,
++    `ErrArchivedResourceReleaseAdmissionDenied`,
++    `ErrArchivedResourceReleaseAdmissionMutated`).
++  - Nil admission fails closed before any repo call
++    (`ErrArchivedResourceReleaseAdmissionUnavailable`).
++
++- **Composition** (`apps/backend/internal/backendapp/worktree.go`)
++  - The same `physicaldelete.New` instance that the worktree manager consumes
++    is now wired into the task service via `taskSvc.SetPhysicalDeleteAdmission`.
++
++- **Tests** (`apps/backend/internal/task/service/resource_cleanup_terminal_actions_admission_test.go`)
++  - `admissionOrderSpy` records the exact admission request and call order;
++    `releaseRepoSpy` enforces zero repo reads on every fail-closed scenario.
++  - `TestTerminalReleaseRunsAdmissionBeforeAnyRepositoryCall` — admission
++    request shape (`ActionReleaseAbsent`, `AuthorityAdmin`, `ExecutorNone`,
++    `ResourceKindEnvironmentRepo`, exact path + id) plus one-and-only-one
++    repo call.
++  - `TestTerminalReleaseFailsClosedWhenAdmissionIsNil` — zero repo calls.
++  - `TestTerminalReleaseFailsClosedWhenAdmissionDeny` /
++    `…InventoryIncomplete` / `…LockedOut` — every denial path produces
++    `ErrArchivedResourceReleaseAdmissionDenied` and zero repo calls.
++  - `TestTerminalReleaseFailsClosedWhenAdmissionUnavailable` — typed
++    "unavailable" error, zero repo calls.
++  - `TestTerminalReleaseFailsClosedWhenAdmissionReturnsMutatedReceipt` /
++    `…WrongExecutor` / `…WrongAction` — every receipt-validation failure
++    produces `ErrArchivedResourceReleaseAdmissionMutated` and zero repo calls.
++  - `TestTerminalReleaseReceiptContractHoldsOnSuccess` — `physical_retained`
++    true, `physical_removed` false, terminal `released` state, single target.
++
++### Re-verification (all `env -u KANDEV_TEST_POSTGRES_DSN`, from `apps/backend`)
++
++```text
++$ go test ./internal/task/models ./internal/task/repository/sqlite \
++        ./internal/task/service ./internal/task/handlers ./internal/physicaldelete \
++        -run 'PendingMove|ReleaseAbsent|EnvironmentRetirement|Inventory' -count=1
++ok  internal/task/models             0.272s
++ok  internal/task/repository/sqlite   0.657s
++ok  internal/task/service            0.980s
++ok  internal/task/handlers           0.985s
++ok  internal/physicaldelete          1.308s
++
++$ go test -race ./internal/task/repository/sqlite ./internal/task/service \
++        -run 'PendingMove|ReleaseAbsent|EnvironmentRetirement' -count=1
++ok  internal/task/repository/sqlite   2.018s
++ok  internal/task/service            1.921s
++
++$ go vet ./internal/task/... ./internal/physicaldelete
++(no output)
++
++$ go build ./...
++(no output)
++```
++
++PostgreSQL runtime remains `NOT_RUN`; no new dependency was installed; the
++shipped `archivedResourceReconcile` / `archivedResourcePhysicalRelease` flags
++remain default-off; no route, runtime, or live action was started; no live DB,
++API, or remote server was contacted.
+-- 
+2.55.0
+

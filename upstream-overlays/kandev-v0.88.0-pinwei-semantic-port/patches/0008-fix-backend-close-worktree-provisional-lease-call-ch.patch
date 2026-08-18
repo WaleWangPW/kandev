@@ -1,0 +1,152 @@
+From 5f11f9f4cb37ae54ed9d09a51c6e11ff0b1a35c4 Mon Sep 17 00:00:00 2001
+From: WaleWangPW <396218656@qq.com>
+Date: Sun, 16 Aug 2026 03:19:54 +0800
+Subject: [PATCH 08/22] fix(backend): close worktree provisional lease call
+ chain and test signatures
+
+---
+ .../internal/worktree/manager_contribution.go        |  6 ++++--
+ .../worktree/manager_failed_add_rollback_test.go     | 10 +++++-----
+ apps/backend/internal/worktree/manager_lifecycle.go  | 12 ++++++------
+ 3 files changed, 15 insertions(+), 13 deletions(-)
+
+diff --git a/apps/backend/internal/worktree/manager_contribution.go b/apps/backend/internal/worktree/manager_contribution.go
+index 132bdb1a01aa857814ecb53c3952ba8ee868894a..7de1904025e05b8eada622453c57ca478473ec42 100644
+--- a/apps/backend/internal/worktree/manager_contribution.go
++++ b/apps/backend/internal/worktree/manager_contribution.go
+@@ -6,6 +6,7 @@ import (
+ 	"fmt"
+ 	"strings"
+ 
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/task/models"
+ 	"go.uber.org/zap"
+ )
+@@ -90,6 +91,7 @@ func (m *Manager) validateContributionAncestor(ctx context.Context, repoPath, ex
+ 
+ func (m *Manager) addContributionWorktree(
+ 	ctx context.Context, req CreateRequest, worktreePath, startPoint, remoteName string,
++	lease *physicaldelete.ProvisionalLease,
+ ) (string, string, error) {
+ 	branchName := req.CheckoutBranch
+ 	exists, err := m.branchExists(ctx, req.RepositoryPath, "refs/heads/"+branchName)
+@@ -99,10 +101,10 @@ func (m *Manager) addContributionWorktree(
+ 	if exists {
+ 		branchName = branchName + "-" + SmallSuffix(3)
+ 	}
+-	id, err := m.gitAddWorktree(ctx, req.RepositoryPath, branchName, worktreePath, startPoint)
++	id, err := m.gitAddWorktree(ctx, req.RepositoryPath, branchName, worktreePath, startPoint, lease)
+ 	if err != nil && errors.Is(err, ErrBranchCheckedOut) {
+ 		branchName = req.CheckoutBranch + "-" + SmallSuffix(3)
+-		id, err = m.gitAddWorktree(ctx, req.RepositoryPath, branchName, worktreePath, startPoint)
++		id, err = m.gitAddWorktree(ctx, req.RepositoryPath, branchName, worktreePath, startPoint, lease)
+ 	}
+ 	if err != nil {
+ 		return "", "", err
+diff --git a/apps/backend/internal/worktree/manager_failed_add_rollback_test.go b/apps/backend/internal/worktree/manager_failed_add_rollback_test.go
+index b773476593866d67cb7f0c8b77b1a9fd37d7570c..3f562fdecf42581bc426f109a77b593bb52a7e8e 100644
+--- a/apps/backend/internal/worktree/manager_failed_add_rollback_test.go
++++ b/apps/backend/internal/worktree/manager_failed_add_rollback_test.go
+@@ -25,7 +25,7 @@ func TestGitAddWorktree_FailureRollsBackNewBranchAndPartialWorktree(t *testing.T
+ 	repoPath := t.TempDir()
+ 	worktreePath := filepath.Join(t.TempDir(), "partial-worktree")
+ 
+-	_, err = mgr.gitAddWorktree(context.Background(), repoPath, "feature/new", worktreePath, "main")
++	_, err = mgr.gitAddWorktree(context.Background(), repoPath, "feature/new", worktreePath, "main", nil)
+ 	if err == nil {
+ 		t.Fatal("gitAddWorktree() error = nil, want checkout failure")
+ 	}
+@@ -55,7 +55,7 @@ func TestGitAddWorktree_FailureUsesAtomicBranchOwnership(t *testing.T) {
+ 		t.Fatalf("NewManager failed: %v", err)
+ 	}
+ 	_, err = mgr.gitAddWorktree(
+-		context.Background(), t.TempDir(), "feature/new", filepath.Join(t.TempDir(), "worktree"), "main",
++		context.Background(), t.TempDir(), "feature/new", filepath.Join(t.TempDir(), "worktree"), "main", nil,
+ 	)
+ 	if err == nil {
+ 		t.Fatal("gitAddWorktree() error = nil, want checkout failure")
+@@ -159,7 +159,7 @@ func TestGitAddWorktree_FailurePreservesPreexistingBranchAndDirectory(t *testing
+ 		t.Fatalf("create marker: %v", err)
+ 	}
+ 
+-	_, err = mgr.gitAddWorktree(context.Background(), repoPath, "feature/existing", worktreePath, "main")
++	_, err = mgr.gitAddWorktree(context.Background(), repoPath, "feature/existing", worktreePath, "main", nil)
+ 	if err == nil {
+ 		t.Fatal("gitAddWorktree() error = nil, want existing branch failure")
+ 	}
+@@ -186,7 +186,7 @@ func TestGitAddWorktree_PreRegistrationFailureRollsBackOwnedBranch(t *testing.T)
+ 		t.Fatalf("create target marker: %v", err)
+ 	}
+ 
+-	_, err = mgr.gitAddWorktree(context.Background(), repoPath, "feature/pre-registration-failure", worktreePath, "main")
++	_, err = mgr.gitAddWorktree(context.Background(), repoPath, "feature/pre-registration-failure", worktreePath, "main", nil)
+ 	if err == nil {
+ 		t.Fatal("gitAddWorktree() error = nil, want pre-registration failure")
+ 	}
+@@ -216,7 +216,7 @@ func TestGitAddWorktree_RegisteredCleanupFailureRestoresOwnedBranch(t *testing.T
+ 		t.Fatalf("NewManager failed: %v", err)
+ 	}
+ 	worktreePath := filepath.Join(t.TempDir(), "registered-worktree")
+-	_, err = mgr.gitAddWorktree(context.Background(), t.TempDir(), "feature/new", worktreePath, "main")
++	_, err = mgr.gitAddWorktree(context.Background(), t.TempDir(), "feature/new", worktreePath, "main", nil)
+ 	if err == nil {
+ 		t.Fatal("gitAddWorktree() error = nil, want checkout failure")
+ 	}
+diff --git a/apps/backend/internal/worktree/manager_lifecycle.go b/apps/backend/internal/worktree/manager_lifecycle.go
+index c44c390674a0f01b58a85d1d92ac4663281fd3d3..7121a2742c289b4cbc1234d90576eaa72e7d7a7c 100644
+--- a/apps/backend/internal/worktree/manager_lifecycle.go
++++ b/apps/backend/internal/worktree/manager_lifecycle.go
+@@ -357,7 +357,7 @@ func (m *Manager) createContributionInTaskDir(
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	worktreeID, branchName, err := m.addContributionWorktree(ctx, req, worktreePath, contributionRef, remoteName)
++	worktreeID, branchName, err := m.addContributionWorktree(ctx, req, worktreePath, contributionRef, remoteName, lease)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -439,12 +439,12 @@ func (m *Manager) validateTaskDir(taskDir string) error {
+ // origin/<checkout-branch> so ahead/behind counts are relative to the PR's remote branch.
+ func (m *Manager) addWorktreeForBranch(ctx context.Context, req CreateRequest, worktreePath, fallbackBranch, startPoint, baseRef string, lease *physicaldelete.ProvisionalLease) (string, string, error) {
+ 	if req.CheckoutBranch == "" {
+-		id, err := m.gitAddWorktree(ctx, req.RepositoryPath, fallbackBranch, worktreePath, baseRef)
++		id, err := m.gitAddWorktree(ctx, req.RepositoryPath, fallbackBranch, worktreePath, baseRef, lease)
+ 		return id, fallbackBranch, err
+ 	}
+ 
+ 	// Try checking out the PR branch directly (common case: single task per PR).
+-	id, err := m.gitAddWorktreeExisting(ctx, req.RepositoryPath, req.CheckoutBranch, worktreePath)
++	id, err := m.gitAddWorktreeExisting(ctx, req.RepositoryPath, req.CheckoutBranch, worktreePath, lease)
+ 	if err == nil {
+ 		m.setUpstreamIfExists(ctx, worktreePath, req.CheckoutBranch, req.CheckoutBranch)
+ 		return id, req.CheckoutBranch, nil
+@@ -456,7 +456,7 @@ func (m *Manager) addWorktreeForBranch(ctx context.Context, req CreateRequest, w
+ 	// Branch is in use by another worktree — create a unique fallback branch
+ 	// using the original branch name with a random suffix.
+ 	suffixed := req.CheckoutBranch + "-" + SmallSuffix(3)
+-	id, err = m.gitAddWorktree(ctx, req.RepositoryPath, suffixed, worktreePath, startPoint)
++	id, err = m.gitAddWorktree(ctx, req.RepositoryPath, suffixed, worktreePath, startPoint, lease)
+ 	if err == nil {
+ 		m.setUpstreamIfExists(ctx, worktreePath, suffixed, req.CheckoutBranch)
+ 	}
+@@ -591,7 +591,7 @@ func (m *Manager) retryFetchAsRemoteTrackingRef(ctx context.Context, repoPath, b
+ // If the branch is already checked out in a stale worktree (directory no longer exists),
+ // it automatically prunes and retries. If the repository uses git-crypt, it creates
+ // the worktree without checkout, then unlocks git-crypt and performs the checkout.
+-func (m *Manager) gitAddWorktreeExisting(ctx context.Context, repoPath, branchName, worktreePath string) (string, error) {
++func (m *Manager) gitAddWorktreeExisting(ctx context.Context, repoPath, branchName, worktreePath string, _ *physicaldelete.ProvisionalLease) (string, error) {
+ 	release, err := acquireWorktreeTargetPath(ctx, worktreePath)
+ 	if err != nil {
+ 		return "", fmt.Errorf("acquire worktree target path: %w", err)
+@@ -923,7 +923,7 @@ func (m *Manager) rollbackFailedNewBranchAdd(
+ // gitAddWorktree runs "git worktree add" and returns the new worktree UUID.
+ // If the repository uses git-crypt, it creates the worktree without checkout,
+ // then unlocks git-crypt and performs the checkout separately.
+-func (m *Manager) gitAddWorktree(ctx context.Context, repoPath, branchName, worktreePath, baseRef string) (string, error) {
++func (m *Manager) gitAddWorktree(ctx context.Context, repoPath, branchName, worktreePath, baseRef string, _ *physicaldelete.ProvisionalLease) (string, error) {
+ 	release, err := acquireWorktreeTargetPath(ctx, worktreePath)
+ 	if err != nil {
+ 		return "", fmt.Errorf("acquire worktree target path: %w", err)
+-- 
+2.55.0
+

@@ -1,0 +1,88 @@
+{
+  "overlay": {
+    "name": "kandev-v0.88.0-pinwei-semantic-port",
+    "version": "0.88.0-pinwei-semantic-port.1",
+    "channel": "private",
+    "created_utc": "2026-08-18T00:00:00Z"
+  },
+  "repository": {
+    "id": "6e37a00b-e078-4b6d-a4eb-40b88ea59145",
+    "canonical_base_commit": "cab9eaf19d997bb4c8020dd263ddc60d5b035b64",
+    "canonical_base_tag": "v0.88.0",
+    "task08_base_branch": "feature/v0-88-task08-migrati-dkl",
+    "task09_overlay_branch": "feature/v0-88-task09-overlay-fj3"
+  },
+  "source_acceptance": {
+    "head_commit": "c70fd4fb7d77d3f679f2639ab992c6868240e773",
+    "tree_object": "91c5b69ebe797c1152ea627b07a25722a33f4e0c",
+    "parent_commit": "7e987c0a7bb06f68c9f395c5cff7e38672d72d1a",
+    "subject": "docs(plan): record Task08 verification receipt",
+    "author_name": "WaleWangPW",
+    "author_email": "396218656@qq.com",
+    "author_timestamp": 1786970337
+  },
+  "closure": {
+    "required_artifacts": [
+      "manifest.json",
+      "checksums.sha256",
+      "patches/"
+    ],
+    "patch_count_required": 22,
+    "patch_order_subjects": [
+      "docs: plan Pinwei v0.88 semantic port",
+      "fix(worktree): stop cleanup after removal failure",
+      "fix(worktree): bind environment release generations",
+      "fix(agent): bind prepared profile launches",
+      "fix(worktree): preserve durable release generations",
+      "wip(physicaldelete): preserve Task04 central admission",
+      "feat(backend,web): port central physical-delete",
+      "fix(backend): close worktree provisional lease call",
+      "test(executor): cover replacement session environment",
+      "test(worktree): lock admission fail-closed order",
+      "feat(task): port retained-anchor reconcile lifecycle",
+      "feat(task): port terminal DB-only archived-resource",
+      "fix(task): gate absent-target release through sealed",
+      "fix(task): wire Task05 v2/v3 decoder into the",
+      "fix(task): bind release receipt to worktree_id, gate",
+      "feat(backend): route managed-root consumers through",
+      "test: verify v0.88 migration safety matrix",
+      "fix(task): add safe archive cleanup cancellation",
+      "fix(task): bind archive cancellation to operation",
+      "fix(web): reconcile successful session recovery",
+      "test(integration): bind simulated launch profiles",
+      "docs(plan): record Task08 verification receipt"
+    ],
+    "required_docs": [
+      "docs/source-acceptance-receipt.md",
+      "docs/security-review.md",
+      "docs/desensitization-report.md",
+      "docs/test-results.md"
+    ],
+    "verifier_entrypoint": "verifier/verify.sh"
+  },
+  "verifier": {
+    "language": "bash",
+    "exit_codes": {
+      "pass": 0,
+      "manifest_missing": 10,
+      "checksum_mismatch": 11,
+      "tree_hash_mismatch": 12,
+      "parent_mismatch": 13,
+      "patch_apply_failure": 14,
+      "desensitization_failure": 15,
+      "runtime_or_db_contact": 20
+    },
+    "env_unset_required": [
+      "KANDEV_TEST_POSTGRES_DSN",
+      "DATABASE_URL",
+      "PGHOST",
+      "PGUSER"
+    ]
+  },
+  "task_binding": {
+    "task_id": "85307324-19c0-409e-8c70-6d8b3e2eb249",
+    "task_name": "v0.88 Task09 local overlay packaging and verifier",
+    "plan_ref": "docs/plans/pinwei-v088-semantic-port/task-09-overlay-delivery.md",
+    "spec_ref": "docs/specs/tasks/archived-resource-safety/spec.md"
+  }
+}

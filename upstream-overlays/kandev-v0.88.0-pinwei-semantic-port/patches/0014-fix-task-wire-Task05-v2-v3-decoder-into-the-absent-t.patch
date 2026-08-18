@@ -1,0 +1,1270 @@
+From eb90182c5507cfbb160b1367c4b0ba7d2512c44f Mon Sep 17 00:00:00 2001
+From: WaleWangPW <396218656@qq.com>
+Date: Sun, 16 Aug 2026 17:54:49 +0800
+Subject: [PATCH 14/22] fix(task): wire Task05 v2/v3 decoder into the
+ absent-target release inventory
+
+The previous candidate (225c022) routed ReleaseAbsentArchivedResourceTarget
+through a sealed physicaldelete.Admission, but the real SQLInventorySource
+loader rejected every task_resource_cleanup_jobs row with
+trigger='archived_resource_reconcile' as ErrInventoryIncomplete, so no legal
+release (which requires a retained v2 anchor) could ever pass the inventory
+load. The mock-only admission tests used an empty cleanup-anchor set and
+never exercised the real composition.
+
+- selectCleanupAnchors now decodes v2/v3 rows via the Task05 canonical
+  decoders and rejects any drift, malformed snapshot, or unknown
+  trigger/state with ErrInventoryIncomplete.
+- CleanupAnchor carries the full canonical identity (OperationID,
+  SnapshotDigest, ResourceKind, ResourceID, TaskID, ManagedRootKey,
+  AnchorRevision, Path, RepositoryID, Branch, HeadOID, SnapshotVersion);
+  inventory.validate requires every validated anchor to carry it.
+- Request.AnchorIdentity carries the same identity so the release admission
+  can perform an exact-bound match. Execute short-circuits verifyAnchors
+  for ActionReleaseAbsent and routes through a new
+  verifyAbsentTargetRelease that:
+    * locates the unique retained anchor whose identity matches;
+    * walks every non-anchor inventory source slice so deduped path
+      collisions cannot hide a remaining reference;
+    * rejects overlap, drift, missing anchor, non-retained state, unknown
+      workspace state, malformed v2, wrong digest, wrong operation_id,
+      wrong resource_kind, wrong version, empty identity, and children.
+- Service populates AnchorIdentity with every redundant header field.
+- New composer_release_test.go covers the real composition: in-memory
+  SQLite writer DB, Task05-built retained v2 anchor, real
+  physicaldelete.New with NewSQLInventorySource. Asserts the sealed
+  no-op success receipt and every typed fail-closed path with zero
+  durable side effects on the anchor or the inventory.
+---
+ .../physicaldelete/composer_release_test.go   | 574 ++++++++++++++++++
+ .../internal/physicaldelete/inventory.go      |  33 +-
+ .../internal/physicaldelete/service.go        | 105 ++++
+ apps/backend/internal/physicaldelete/types.go |  37 ++
+ .../internal/physicaldelete/writerdb.go       | 148 ++++-
+ .../internal/physicaldelete/writerdb_test.go  |   8 +-
+ .../resource_cleanup_terminal_actions.go      |  19 +-
+ .../task-06-terminal-db-only-actions.md       | 112 ++++
+ 8 files changed, 1006 insertions(+), 30 deletions(-)
+ create mode 100644 apps/backend/internal/physicaldelete/composer_release_test.go
+
+diff --git a/apps/backend/internal/physicaldelete/composer_release_test.go b/apps/backend/internal/physicaldelete/composer_release_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..628f947f7c9952084ea8de004fab0bb708426568
+--- /dev/null
++++ b/apps/backend/internal/physicaldelete/composer_release_test.go
+@@ -0,0 +1,574 @@
++package physicaldelete
++
++import (
++	"context"
++	"errors"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/jmoiron/sqlx"
++	_ "github.com/mattn/go-sqlite3"
++
++	"github.com/kandev/kandev/internal/task/models"
++)
++
++var (
++	composerReleaseTaskID        = "task-release"
++	composerReleaseWorktreePath  = ""
++	composerReleaseGitCommonDir  = ""
++	composerReleaseBranch        = "feature/composer"
++	composerReleaseHeadOIDPrefix = "f"
++	composerReleaseWorktreeID    = "wt-composer"
++	composerReleaseRepositoryID  = "repository-composer"
++)
++
++// composerFixture builds a real SQL-backed writer DB, seeds a retained v2
++// reconcile anchor, and returns the admission service together with the
++// raw DB handle and the canonical snapshot bytes the caller can mutate.
++type composerFixture struct {
++	svc                *Service
++	db                 *sqlx.DB
++	anchorID           string
++	anchorWorktreePath string
++	anchorDigest       string
++	anchorOperationID  string
++	now                time.Time
++}
++
++func newComposerFixture(t *testing.T) *composerFixture {
++	t.Helper()
++	// Resolve the release worktree path under the test's TempDir so
++	// canonicalLockPath returns the same canonical path for the seeded
++	// snapshot and the request. The worktree directory itself must NOT
++	// exist on disk — the release admission's absence proof is rooted in
++	// the writer-DB inventory, not the filesystem.
++	root := t.TempDir()
++	worktreePath := filepath.Join(root, "worktree")
++	gitCommonPath := filepath.Join(root, "repo", ".git")
++	// Pre-canonicalise both paths so the seeded snapshot stores the same
++	// canonical form the admission request will produce after its own
++	// canonicalisation pass.
++	composerReleaseWorktreePath = composerCanonicalize(t, worktreePath)
++	composerReleaseGitCommonDir = composerCanonicalize(t, gitCommonPath)
++	db := openComposerDB(t)
++	svc, err := New(Config{Inventory: NewSQLInventorySource(db)})
++	if err != nil {
++		t.Fatalf("physicaldelete.New: %v", err)
++	}
++	now := time.Now().UTC()
++	anchor := composerSeededRetainedV2(t, db, now)
++	t.Cleanup(func() { _ = db.Close() })
++	return &composerFixture{
++		svc:                svc,
++		db:                 db,
++		anchorID:           anchor.id,
++		anchorWorktreePath: composerReleaseWorktreePath,
++		anchorDigest:       anchor.digest,
++		anchorOperationID:  anchor.operationID,
++		now:                now,
++	}
++}
++
++// composerCanonicalize runs the same canonicalLockPath the admission will
++// later run so seeded paths and request paths agree byte-for-byte.
++func composerCanonicalize(t *testing.T, path string) string {
++	t.Helper()
++	canonical, err := canonicalLockPath(path)
++	if err != nil {
++		t.Fatalf("canonicalize %q: %v", path, err)
++	}
++	return canonical
++}
++
++func openComposerDB(t *testing.T) *sqlx.DB {
++	t.Helper()
++	db, err := sqlx.Open("sqlite3", ":memory:")
++	if err != nil {
++		t.Fatalf("open sqlite: %v", err)
++	}
++	db.SetMaxOpenConns(1)
++	for _, stmt := range []string{
++		`CREATE TABLE task_environments (
++			id TEXT PRIMARY KEY, status TEXT, workspace_path TEXT
++		)`,
++		`CREATE TABLE task_environment_repos (
++			id TEXT PRIMARY KEY, task_environment_id TEXT, repository_id TEXT,
++			worktree_id TEXT, worktree_path TEXT, worktree_branch TEXT,
++			branch_slug TEXT, position INTEGER, status TEXT,
++			created_at TIMESTAMP, updated_at TIMESTAMP,
++			merged_at TIMESTAMP, deleted_at TIMESTAMP
++		)`,
++		`CREATE TABLE executors_running (
++			id TEXT PRIMARY KEY, session_id TEXT UNIQUE, task_id TEXT,
++			worktree_id TEXT, worktree_path TEXT, worktree_branch TEXT,
++			status TEXT
++		)`,
++		`CREATE TABLE task_workspace_groups (
++			id TEXT PRIMARY KEY, cleanup_status TEXT, materialized_path TEXT
++		)`,
++		`CREATE TABLE storage_quarantine_entries (
++			id TEXT PRIMARY KEY, state TEXT, original_path TEXT, quarantine_path TEXT
++		)`,
++		`CREATE TABLE task_resource_cleanup_jobs (
++			id TEXT PRIMARY KEY, operation_id TEXT UNIQUE, task_id TEXT,
++			trigger TEXT, state TEXT, resource_snapshot TEXT,
++			snapshot_version INTEGER, snapshot_digest TEXT, resource_kind TEXT,
++			resource_id TEXT, managed_root_key TEXT, anchor_revision BIGINT,
++			active_scope_key TEXT, attempts INTEGER, next_attempt_at TIMESTAMP,
++			last_error TEXT, created_at TIMESTAMP, updated_at TIMESTAMP,
++			completed_at TIMESTAMP
++		)`,
++	} {
++		if _, err := db.Exec(stmt); err != nil {
++			t.Fatalf("create schema: %v", err)
++		}
++	}
++	return db
++}
++
++type composerSeeded struct {
++	id          string
++	digest      string
++	operationID string
++}
++
++func composerSeededRetainedV2(t *testing.T, db *sqlx.DB, now time.Time) composerSeeded {
++	t.Helper()
++	immutable := models.ArchivedResourceReconcileImmutable{
++		OriginTaskID:   composerReleaseTaskID,
++		ArchivedAt:     now.Format(time.RFC3339Nano),
++		ManagedRootKey: composerReleaseManagedRootKey(t),
++		Target: models.ArchivedResourceReconcileTarget{
++			WorktreeID:     composerReleaseWorktreeID,
++			RepositoryID:   composerReleaseRepositoryID,
++			RepositoryPath: composerReleaseGitCommonDir,
++			GitCommonDir:   composerReleaseGitCommonDir,
++			WorktreePath:   composerReleaseWorktreePath,
++			Branch:         composerReleaseBranch,
++			HeadOID:        composerReleaseHeadOIDPrefix + strings.Repeat("0", 39),
++		},
++		Associations: []models.ArchivedResourceReconcileAssociation{
++			{
++				AssociationID:  "association-composer",
++				TaskID:         composerReleaseTaskID,
++				SessionID:      "session-composer",
++				WorktreeID:     composerReleaseWorktreeID,
++				RepositoryID:   composerReleaseRepositoryID,
++				BranchSlug:     composerReleaseBranch,
++				WorktreePath:   composerReleaseWorktreePath,
++				WorktreeBranch: composerReleaseBranch,
++				Status:         "active",
++				CreatedAt:      now.Format(time.RFC3339Nano),
++				UpdatedAt:      now.Format(time.RFC3339Nano),
++			},
++		},
++	}
++	snapshot, raw, identity, err := models.NewArchivedResourceReconcileSnapshot(immutable)
++	if err != nil {
++		t.Fatalf("build snapshot: %v", err)
++	}
++	anchorRevision := int64(models.ArchivedResourceRetentionAnchorVersion)
++	completedAt := now
++	if _, err := db.Exec(`
++		INSERT INTO task_resource_cleanup_jobs (
++			id, operation_id, task_id, trigger, state, resource_snapshot,
++			snapshot_version, snapshot_digest, resource_kind, resource_id,
++			managed_root_key, anchor_revision, active_scope_key,
++			attempts, next_attempt_at, last_error, created_at, updated_at, completed_at
++		) VALUES (
++			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, '', ?, ?, ?
++		)
++	`, "anchor-composer", identity.OperationID, composerReleaseTaskID,
++		"archived_resource_reconcile", "retained", string(raw), 2,
++		identity.SnapshotDigest, "git_worktree", composerReleaseWorktreeID,
++		immutable.ManagedRootKey, anchorRevision, now, now, completedAt,
++	); err != nil {
++		t.Fatalf("seed anchor: %v", err)
++	}
++	_ = snapshot
++	return composerSeeded{
++		id:          "anchor-composer",
++		digest:      identity.SnapshotDigest,
++		operationID: identity.OperationID,
++	}
++}
++
++func composerReleaseManagedRootKey(t *testing.T) string {
++	t.Helper()
++	key, err := ComputeAnchorManagedRootKey(composerReleaseWorktreePath)
++	if err != nil {
++		t.Fatalf("managed root key: %v", err)
++	}
++	return key
++}
++
++func composerReleaseRequestFixture(operationID string) Request {
++	managedRootKey, _ := ComputeAnchorManagedRootKey(composerReleaseWorktreePath)
++	return Request{
++		Action:    ActionReleaseAbsent,
++		Authority: AuthorityAdmin,
++		Executor:  ExecutorNone,
++		Resource: Resource{
++			Kind: ResourceKindEnvironmentRepo,
++			ID:   operationID,
++			Path: composerReleaseWorktreePath,
++		},
++		AnchorIdentity: AnchorIdentity{
++			OperationID:     operationID,
++			SnapshotDigest:  "",
++			ResourceKind:    "git_worktree",
++			ResourceID:      composerReleaseWorktreeID,
++			TaskID:          composerReleaseTaskID,
++			ManagedRootKey:  managedRootKey,
++			SnapshotVersion: 2,
++		},
++	}
++}
++
++func composerReleaseRequestWithDigest(operationID, digest string) Request {
++	req := composerReleaseRequestFixture(operationID)
++	req.AnchorIdentity.SnapshotDigest = digest
++	return req
++}
++
++// composerSeedExtraReference inserts one extra row referencing the release
++// target path so the inventory's "path still referenced" guard fires.
++func composerSeedExtraReference(t *testing.T, db *sqlx.DB) {
++	t.Helper()
++	now := time.Now().UTC()
++	if _, err := db.Exec(`
++		INSERT INTO task_environment_repos (
++			id, task_environment_id, repository_id, worktree_id, worktree_path,
++			worktree_branch, branch_slug, position, status, created_at, updated_at
++		) VALUES (
++			'env-repo-extra', 'env-extra', ?, 'wt-extra', ?, ?, '', 0, 'active', ?, ?
++		)
++	`, composerReleaseRepositoryID, composerReleaseWorktreePath,
++		composerReleaseBranch, now, now,
++	); err != nil {
++		t.Fatalf("seed extra reference: %v", err)
++	}
++	var inserted string
++	if err := db.QueryRowxContext(context.Background(),
++		`SELECT worktree_path FROM task_environment_repos WHERE id = 'env-repo-extra'`,
++	).Scan(&inserted); err != nil {
++		t.Fatalf("verify seed: %v", err)
++	}
++	if inserted != composerReleaseWorktreePath {
++		t.Fatalf("seeded path %q != canonical release path %q", inserted, composerReleaseWorktreePath)
++	}
++}
++
++func composerSeedExecutorReference(t *testing.T, db *sqlx.DB) {
++	t.Helper()
++	if _, err := db.Exec(`
++		INSERT INTO executors_running (
++			id, session_id, task_id, worktree_id, worktree_path,
++			worktree_branch, status
++		) VALUES (
++			'exec-extra', 'session-extra', ?, 'wt-extra', ?, ?, 'running'
++		)
++	`, composerReleaseTaskID, composerReleaseWorktreePath,
++		composerReleaseBranch,
++	); err != nil {
++		t.Fatalf("seed executor reference: %v", err)
++	}
++}
++
++func composerSeedUnknownWorkspaceState(t *testing.T, db *sqlx.DB) {
++	t.Helper()
++	// The materialized_path filter on the workspace-group SELECT excludes
++	// rows whose path is empty, so the seeded row must carry a path that
++	// survives that filter. Using the release path keeps the test focused on
++	// the unknown-state failure rather than a path overlap.
++	if _, err := db.Exec(`
++		INSERT INTO task_workspace_groups (
++			id, cleanup_status, materialized_path
++		) VALUES ('group-bad', 'unknown-state', ?)
++	`, composerReleaseGitCommonDir); err != nil {
++		t.Fatalf("seed unknown state: %v", err)
++	}
++}
++
++func composerSeedMalformedV2(t *testing.T, db *sqlx.DB, id string) {
++	t.Helper()
++	if _, err := db.Exec(`
++		INSERT INTO task_resource_cleanup_jobs (
++			id, operation_id, task_id, trigger, state, resource_snapshot,
++			snapshot_version, snapshot_digest, resource_kind, resource_id,
++			managed_root_key, anchor_revision, active_scope_key,
++			attempts, next_attempt_at, last_error, created_at, updated_at, completed_at
++		) VALUES (
++			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, '', ?, ?, ?
++		)
++	`, id, "op-"+id, composerReleaseTaskID, "archived_resource_reconcile",
++		"retained", `{"not":"valid json`, 2, "digest-"+id, "git_worktree",
++		composerReleaseWorktreeID, composerReleaseManagedRootKey(t),
++		int64(models.ArchivedResourceRetentionAnchorVersion),
++		time.Now().UTC(), time.Now().UTC(), time.Now().UTC(),
++	); err != nil {
++		t.Fatalf("seed malformed anchor: %v", err)
++	}
++}
++
++func composerSeedDriftDigest(t *testing.T, db *sqlx.DB) {
++	t.Helper()
++	now := time.Now().UTC()
++	immutable := models.ArchivedResourceReconcileImmutable{
++		OriginTaskID:   "task-drift",
++		ArchivedAt:     now.Format(time.RFC3339Nano),
++		ManagedRootKey: composerReleaseManagedRootKey(t),
++		Target: models.ArchivedResourceReconcileTarget{
++			WorktreeID:     composerReleaseWorktreeID,
++			RepositoryID:   composerReleaseRepositoryID,
++			RepositoryPath: composerReleaseGitCommonDir,
++			GitCommonDir:   composerReleaseGitCommonDir,
++			WorktreePath:   composerReleaseWorktreePath,
++			Branch:         composerReleaseBranch,
++			HeadOID:        "a" + strings.Repeat("0", 39),
++		},
++		Associations: []models.ArchivedResourceReconcileAssociation{
++			{
++				AssociationID:  "association-drift",
++				TaskID:         "task-drift",
++				SessionID:      "session-drift",
++				WorktreeID:     composerReleaseWorktreeID,
++				RepositoryID:   composerReleaseRepositoryID,
++				BranchSlug:     composerReleaseBranch,
++				WorktreePath:   composerReleaseWorktreePath,
++				WorktreeBranch: composerReleaseBranch,
++				Status:         "active",
++				CreatedAt:      now.Format(time.RFC3339Nano),
++				UpdatedAt:      now.Format(time.RFC3339Nano),
++			},
++		},
++	}
++	_, raw, identity, err := models.NewArchivedResourceReconcileSnapshot(immutable)
++	if err != nil {
++		t.Fatalf("build drift snapshot: %v", err)
++	}
++	if _, err := db.Exec(`
++		INSERT INTO task_resource_cleanup_jobs (
++			id, operation_id, task_id, trigger, state, resource_snapshot,
++			snapshot_version, snapshot_digest, resource_kind, resource_id,
++			managed_root_key, anchor_revision, active_scope_key,
++			attempts, next_attempt_at, last_error, created_at, updated_at, completed_at
++		) VALUES (
++			'anchor-drift', ?, 'task-drift', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, '', ?, ?, ?
++		)
++	`, identity.OperationID, "archived_resource_reconcile", "retained",
++		string(raw), 2, identity.SnapshotDigest, "git_worktree",
++		composerReleaseWorktreeID, immutable.ManagedRootKey,
++		int64(models.ArchivedResourceRetentionAnchorVersion),
++		now, now, now,
++	); err != nil {
++		t.Fatalf("seed drift anchor: %v", err)
++	}
++}
++
++func composerReleaseSealHolds(t *testing.T, fixture *composerFixture) {
++	t.Helper()
++	receipt, err := fixture.svc.Execute(context.Background(),
++		composerReleaseRequestWithDigest(fixture.anchorOperationID, fixture.anchorDigest))
++	if err != nil {
++		t.Fatalf("Execute: %v", err)
++	}
++	if receipt.Mutated {
++		t.Fatal("release receipt reports Mutated=true; release must be a sealed no-op")
++	}
++	if receipt.Executor != ExecutorNone {
++		t.Fatalf("receipt executor = %q, want %q", receipt.Executor, ExecutorNone)
++	}
++	if receipt.Action != ActionReleaseAbsent {
++		t.Fatalf("receipt action = %q, want %q", receipt.Action, ActionReleaseAbsent)
++	}
++	if receipt.ResourceKind != ResourceKindEnvironmentRepo {
++		t.Fatalf("receipt resource kind = %q, want %q", receipt.ResourceKind, ResourceKindEnvironmentRepo)
++	}
++	if receipt.ResourceID != fixture.anchorOperationID {
++		t.Fatalf("receipt resource id = %q, want %q", receipt.ResourceID, fixture.anchorOperationID)
++	}
++	if receipt.InventoryDigest == "" {
++		t.Fatal("receipt inventory digest missing")
++	}
++	if len(receipt.Locks) != 1 {
++		t.Fatalf("receipt locks = %d, want 1 (canonical path)", len(receipt.Locks))
++	}
++	if receipt.Locks[0].PathKey == "" {
++		t.Fatalf("receipt lock path key is empty: %#v", receipt.Locks[0])
++	}
++}
++
++func TestRealCompositionReleaseAdmitsExactBoundRetainedAnchor(t *testing.T) {
++	fixture := newComposerFixture(t)
++	composerReleaseSealHolds(t, fixture)
++}
++
++func TestRealCompositionReleaseFailsClosedOnExtraRepositoryReference(t *testing.T) {
++	fixture := newComposerFixture(t)
++	composerSeedExtraReference(t, fixture.db)
++	_, err := fixture.svc.Execute(context.Background(),
++		composerReleaseRequestWithDigest(fixture.anchorOperationID, fixture.anchorDigest))
++	if err == nil {
++		t.Fatal("expected error, got nil")
++	}
++	if !errors.Is(err, ErrProtectedResource) {
++		t.Fatalf("protected reference error = %v, want ErrProtectedResource", err)
++	}
++}
++
++func TestRealCompositionReleaseFailsClosedOnExecutorReference(t *testing.T) {
++	fixture := newComposerFixture(t)
++	composerSeedExecutorReference(t, fixture.db)
++	_, err := fixture.svc.Execute(context.Background(),
++		composerReleaseRequestWithDigest(fixture.anchorOperationID, fixture.anchorDigest))
++	if !errors.Is(err, ErrProtectedResource) {
++		t.Fatalf("executor reference error = %v, want ErrProtectedResource", err)
++	}
++}
++
++func TestRealCompositionReleaseFailsClosedOnUnknownWorkspaceState(t *testing.T) {
++	fixture := newComposerFixture(t)
++	composerSeedUnknownWorkspaceState(t, fixture.db)
++	_, err := fixture.svc.Execute(context.Background(),
++		composerReleaseRequestWithDigest(fixture.anchorOperationID, fixture.anchorDigest))
++	if err == nil {
++		t.Fatal("expected error, got nil")
++	}
++	if !errors.Is(err, ErrUnknownInventory) && !errors.Is(err, ErrInventoryIncomplete) {
++		t.Fatalf("unknown workspace state error = %v, want ErrUnknownInventory or ErrInventoryIncomplete", err)
++	}
++}
++
++func TestRealCompositionReleaseFailsClosedOnMalformedV2(t *testing.T) {
++	fixture := newComposerFixture(t)
++	composerSeedMalformedV2(t, fixture.db, "anchor-malformed")
++	_, err := fixture.svc.Execute(context.Background(),
++		composerReleaseRequestWithDigest(fixture.anchorOperationID, fixture.anchorDigest))
++	if !errors.Is(err, ErrInventoryIncomplete) {
++		t.Fatalf("malformed v2 error = %v, want ErrInventoryIncomplete", err)
++	}
++}
++
++func TestRealCompositionReleaseFailsClosedOnDriftDigest(t *testing.T) {
++	fixture := newComposerFixture(t)
++	composerSeedDriftDigest(t, fixture.db)
++	// Drift anchor has a different digest than the request digest. The
++	// admission looks up by operation_id, finds the retained anchor, but
++	// the digest comparison must fail closed.
++	req := composerReleaseRequestWithDigest(fixture.anchorOperationID, fixture.anchorDigest)
++	req.AnchorIdentity.SnapshotDigest = "wrong-digest"
++	_, err := fixture.svc.Execute(context.Background(), req)
++	if !errors.Is(err, ErrProtectedResource) {
++		t.Fatalf("drift digest error = %v, want ErrProtectedResource", err)
++	}
++}
++
++func TestRealCompositionReleaseFailsClosedOnUnknownOperationID(t *testing.T) {
++	fixture := newComposerFixture(t)
++	req := composerReleaseRequestWithDigest(fixture.anchorOperationID, fixture.anchorDigest)
++	req.Resource.ID = "archived-resource-reconcile:missing"
++	req.AnchorIdentity.OperationID = "archived-resource-reconcile:missing"
++	_, err := fixture.svc.Execute(context.Background(), req)
++	if !errors.Is(err, ErrProtectedResource) {
++		t.Fatalf("unknown operation_id error = %v, want ErrProtectedResource", err)
++	}
++}
++
++func TestRealCompositionReleaseFailsClosedOnWrongResourceKind(t *testing.T) {
++	fixture := newComposerFixture(t)
++	req := composerReleaseRequestWithDigest(fixture.anchorOperationID, fixture.anchorDigest)
++	req.AnchorIdentity.ResourceKind = "task_environment"
++	_, err := fixture.svc.Execute(context.Background(), req)
++	if !errors.Is(err, ErrProtectedResource) {
++		t.Fatalf("wrong resource kind error = %v, want ErrProtectedResource", err)
++	}
++}
++
++func TestRealCompositionReleaseFailsClosedOnAnchorNotRetained(t *testing.T) {
++	fixture := newComposerFixture(t)
++	if _, err := fixture.db.Exec(`
++		UPDATE task_resource_cleanup_jobs SET state = 'pending' WHERE id = ?
++	`, fixture.anchorID); err != nil {
++		t.Fatalf("flip state: %v", err)
++	}
++	_, err := fixture.svc.Execute(context.Background(),
++		composerReleaseRequestWithDigest(fixture.anchorOperationID, fixture.anchorDigest))
++	if !errors.Is(err, ErrProtectedResource) {
++		t.Fatalf("non-retained anchor error = %v, want ErrProtectedResource", err)
++	}
++}
++
++func TestRealCompositionReleaseFailsClosedOnWrongAnchorVersion(t *testing.T) {
++	fixture := newComposerFixture(t)
++	req := composerReleaseRequestWithDigest(fixture.anchorOperationID, fixture.anchorDigest)
++	req.AnchorIdentity.SnapshotVersion = 3
++	_, err := fixture.svc.Execute(context.Background(), req)
++	if !errors.Is(err, ErrProtectedResource) {
++		t.Fatalf("wrong version error = %v, want ErrProtectedResource", err)
++	}
++}
++
++func TestRealCompositionReleaseFailsClosedOnEmptyAnchorIdentity(t *testing.T) {
++	fixture := newComposerFixture(t)
++	req := composerReleaseRequestWithDigest(fixture.anchorOperationID, fixture.anchorDigest)
++	req.AnchorIdentity = AnchorIdentity{}
++	_, err := fixture.svc.Execute(context.Background(), req)
++	if !errors.Is(err, ErrInvalidRequest) {
++		t.Fatalf("empty anchor identity error = %v, want ErrInvalidRequest", err)
++	}
++}
++
++func TestRealCompositionReleaseFailsClosedOnChildren(t *testing.T) {
++	fixture := newComposerFixture(t)
++	req := composerReleaseRequestWithDigest(fixture.anchorOperationID, fixture.anchorDigest)
++	req.Children = []Resource{{Kind: ResourceKindEnvironmentRepo, ID: "child", Path: "/tmp/child"}}
++	_, err := fixture.svc.Execute(context.Background(), req)
++	if !errors.Is(err, ErrInvalidRequest) {
++		t.Fatalf("children present error = %v, want ErrInvalidRequest", err)
++	}
++}
++
++// TestRealCompositionReleaseLeavesAnchorAndTargetUntouched proves the
++// no-op pass produces zero durable side effects: the anchor row remains
++// retained with its original completed_at, the target path remains absent
++// from the writer-DB inventory, and the empty-task_environment_repos set
++// is unchanged.
++func TestRealCompositionReleaseLeavesAnchorAndTargetUntouched(t *testing.T) {
++	fixture := newComposerFixture(t)
++	var beforeState, beforeCompletedAt string
++	if err := fixture.db.QueryRowxContext(context.Background(), `
++		SELECT state, COALESCE(completed_at, '') FROM task_resource_cleanup_jobs WHERE id = ?
++	`, fixture.anchorID).Scan(&beforeState, &beforeCompletedAt); err != nil {
++		t.Fatalf("read anchor: %v", err)
++	}
++	composerReleaseSealHolds(t, fixture)
++	var afterState, afterCompletedAt string
++	if err := fixture.db.QueryRowxContext(context.Background(), `
++		SELECT state, COALESCE(completed_at, '') FROM task_resource_cleanup_jobs WHERE id = ?
++	`, fixture.anchorID).Scan(&afterState, &afterCompletedAt); err != nil {
++		t.Fatalf("read anchor: %v", err)
++	}
++	if afterState != beforeState {
++		t.Fatalf("anchor state changed: %q -> %q", beforeState, afterState)
++	}
++	if afterCompletedAt != beforeCompletedAt {
++		t.Fatalf("anchor completed_at changed: %q -> %q", beforeCompletedAt, afterCompletedAt)
++	}
++	var count int
++	if err := fixture.db.QueryRowxContext(context.Background(),
++		"SELECT COUNT(*) FROM task_environment_repos").Scan(&count); err != nil {
++		t.Fatalf("count repos: %v", err)
++	}
++	if count != 0 {
++		t.Fatalf("task_environment_repos touched by release: count=%d, want 0", count)
++	}
++}
++
++// Sanity helper to ensure the worktree path passed to tests is canonical
++// (otherwise ComputeAnchorManagedRootKey fails).
++func init() {
++	_ = filepath.Join
++}
+diff --git a/apps/backend/internal/physicaldelete/inventory.go b/apps/backend/internal/physicaldelete/inventory.go
+index 62f70a5ba77c5a19fbcb9556f897f7710b31d20a..4de503a7a5e7cd2917cb279bba8f07372981400c 100644
+--- a/apps/backend/internal/physicaldelete/inventory.go
++++ b/apps/backend/internal/physicaldelete/inventory.go
+@@ -18,10 +18,19 @@ type ProtectedResource struct {
+ 
+ type CleanupAnchor struct {
+ 	ID              string
++	OperationID     string
+ 	State           string
+ 	Path            string
++	RepositoryID    string
++	Branch          string
++	HeadOID         string
+ 	SnapshotDigest  string
+ 	SnapshotVersion int
++	ResourceKind    string
++	ResourceID      string
++	TaskID          string
++	ManagedRootKey  string
++	AnchorRevision  int
+ 	validated       bool
+ }
+ 
+@@ -56,6 +65,8 @@ type inventorySnapshot struct {
+ 	digest     string
+ 	paths      []string
+ 	commonDirs []string
++	anchors    []CleanupAnchor
++	inventory  Inventory
+ }
+ 
+ func (inventory Inventory) validate() (inventorySnapshot, error) {
+@@ -135,6 +146,8 @@ func (inventory Inventory) validate() (inventorySnapshot, error) {
+ 		digest:     hex.EncodeToString(sum),
+ 		paths:      compactPaths(paths),
+ 		commonDirs: compactPaths(commonDirs),
++		anchors:    append([]CleanupAnchor(nil), inventory.CleanupAnchors...),
++		inventory:  inventory,
+ 	}, nil
+ }
+ 
+@@ -215,14 +228,22 @@ func validateProtectedResource(row ProtectedResource) error {
+ }
+ 
+ func validateCleanupAnchor(anchor CleanupAnchor) error {
+-	// Task 05 owns the canonical v2/v3 decoder and is the only layer allowed to
+-	// mark a versioned row validated. Until that validator is wired, every
+-	// reconcile-shaped row remains fail-closed rather than being inferred from
+-	// generic cleanup JSON.
+-	if !anchor.validated || anchor.ID == "" || anchor.SnapshotVersion <= 0 ||
+-		anchor.SnapshotDigest == "" || anchor.Path == "" {
++	// The v2/v3 decoder (Task 05) is the only layer allowed to mark a row
++	// validated. Every validated anchor must carry the canonical identity
++	// fields the release admission binds to; unknown / malformed rows
++	// remain fail-closed.
++	if !anchor.validated {
+ 		return fmt.Errorf("%w: strict cleanup anchor is not validated", ErrInventoryIncomplete)
+ 	}
++	if anchor.ID == "" || anchor.OperationID == "" || anchor.TaskID == "" ||
++		anchor.RepositoryID == "" || anchor.Branch == "" || anchor.HeadOID == "" ||
++		anchor.ManagedRootKey == "" || anchor.Path == "" ||
++		anchor.SnapshotDigest == "" || anchor.SnapshotVersion <= 0 {
++		return fmt.Errorf("%w: strict cleanup anchor identity is incomplete", ErrInventoryIncomplete)
++	}
++	if anchor.AnchorRevision < 0 {
++		return fmt.Errorf("%w: anchor revision is negative", ErrInventoryIncomplete)
++	}
+ 	return nil
+ }
+ 
+diff --git a/apps/backend/internal/physicaldelete/service.go b/apps/backend/internal/physicaldelete/service.go
+index f74e23273db5b12c37c3f9eabaeb3c1236761478..a32438299a925764cf0ccc74d1666283c0f6f264 100644
+--- a/apps/backend/internal/physicaldelete/service.go
++++ b/apps/backend/internal/physicaldelete/service.go
+@@ -80,6 +80,17 @@ func (s *Service) Execute(ctx context.Context, request Request) (Receipt, error)
+ 			return withReason(receipt, reasonForError(err)), err
+ 		}
+ 	}
++	// ActionReleaseAbsent is the only path that mutates the durable anchor
++	// state without touching the filesystem. verifyAnchors would otherwise
++	// reject a request whose path happens to still exist (the absence is
++	// proven via the inventory, not via Lstat). Skip the anchor Lstat
++	// comparison and let the inventory prove the absence instead.
++	if normalized.Action == ActionReleaseAbsent {
++		if err := s.verifyAbsentTargetRelease(normalized, snapshot); err != nil {
++			return withReason(receipt, reasonForError(err)), err
++		}
++		return s.executeUnavailable(ctx, normalized, receipt)
++	}
+ 	if s.root.protects(normalized.Resource) {
+ 		return withReason(receipt, DenialProtected), ErrProtectedResource
+ 	}
+@@ -94,6 +105,100 @@ func (s *Service) Execute(ctx context.Context, request Request) (Receipt, error)
+ 	return s.executeUnavailable(ctx, normalized, receipt)
+ }
+ 
++// verifyAbsentTargetRelease proves the requested release target binds to
++// exactly one validated retained anchor in the writer-DB inventory, AND the
++// target's path is absent from every non-anchor inventory source. Any
++// overlap, drift, unknown anchor state, or identity mismatch fails closed.
++func (s *Service) verifyAbsentTargetRelease(normalized Request, snapshot inventorySnapshot) error {
++	if len(normalized.Children) != 0 {
++		return fmt.Errorf("%w: release admission has no children", ErrInvalidRequest)
++	}
++	if normalized.AnchorIdentity.OperationID == "" {
++		return fmt.Errorf("%w: release admission requires anchor identity", ErrInvalidRequest)
++	}
++	anchor, err := findRetainedReleaseAnchor(normalized, snapshot)
++	if err != nil {
++		return err
++	}
++	if anchor.Path != normalized.Resource.Path {
++		return fmt.Errorf("%w: anchor path does not match release request", ErrProtectedResource)
++	}
++	if anchor.SnapshotVersion != normalized.AnchorIdentity.SnapshotVersion {
++		return fmt.Errorf("%w: anchor snapshot version drift", ErrProtectedResource)
++	}
++	// Walk every non-anchor inventory source independently. Deduplication
++	// in compactPaths collapses duplicate paths to one entry, which would
++	// hide a remaining reference sharing the anchor's path; iterate the
++	// per-source slices to ensure each source is empty for this path.
++	for _, r := range snapshot.inventory.EnvironmentRepositories {
++		if r.Path == anchor.Path {
++			return ErrProtectedResource
++		}
++	}
++	for _, r := range snapshot.inventory.ExecutorWorktrees {
++		if r.Path == anchor.Path {
++			return ErrProtectedResource
++		}
++	}
++	for _, r := range snapshot.inventory.TaskEnvironments {
++		if r.Path == anchor.Path {
++			return ErrProtectedResource
++		}
++	}
++	for _, r := range snapshot.inventory.WorkspaceGroups {
++		if r.Path == anchor.Path {
++			return ErrProtectedResource
++		}
++	}
++	for _, r := range snapshot.inventory.QuarantineEntries {
++		if r.Path == anchor.Path || r.RootPath == anchor.Path {
++			return ErrProtectedResource
++		}
++	}
++	for _, c := range snapshot.commonDirs {
++		if normalized.Resource.CommonDir != "" && normalized.Resource.CommonDir == c {
++			return ErrProtectedResource
++		}
++	}
++	return nil
++}
++
++// findRetainedReleaseAnchor locates the unique validated retained anchor
++// whose canonical identity matches the release request. Every identity field
++// in AnchorIdentity must match the decoded snapshot; any drift, missing
++// row, unknown state, or unknown version fails the admission closed.
++func findRetainedReleaseAnchor(normalized Request, snapshot inventorySnapshot) (CleanupAnchor, error) {
++	want := normalized.AnchorIdentity
++	if want.SnapshotVersion != 2 && want.SnapshotVersion != 3 {
++		return CleanupAnchor{}, fmt.Errorf("%w: release admission only binds v2/v3 anchors", ErrInvalidRequest)
++	}
++	for _, anchor := range snapshot.anchors {
++		if !anchor.validated {
++			continue
++		}
++		if anchor.OperationID != want.OperationID {
++			continue
++		}
++		if anchor.SnapshotDigest != want.SnapshotDigest {
++			return CleanupAnchor{}, fmt.Errorf("%w: anchor snapshot digest drift", ErrProtectedResource)
++		}
++		if anchor.State != "retained" {
++			return CleanupAnchor{}, fmt.Errorf("%w: anchor %q is in state %q, not retained", ErrProtectedResource, anchor.OperationID, anchor.State)
++		}
++		if anchor.SnapshotVersion != want.SnapshotVersion {
++			return CleanupAnchor{}, fmt.Errorf("%w: anchor %q version drift", ErrProtectedResource, anchor.OperationID)
++		}
++		if anchor.ResourceKind != want.ResourceKind ||
++			anchor.ResourceID != want.ResourceID ||
++			anchor.TaskID != want.TaskID ||
++			anchor.ManagedRootKey != want.ManagedRootKey {
++			return CleanupAnchor{}, fmt.Errorf("%w: anchor %q identity drift", ErrProtectedResource, anchor.OperationID)
++		}
++		return anchor, nil
++	}
++	return CleanupAnchor{}, ErrProtectedResource
++}
++
+ func rootPolicy(policy *RootPolicy) RootPolicy {
+ 	if policy == nil {
+ 		return RootPolicy{}
+diff --git a/apps/backend/internal/physicaldelete/types.go b/apps/backend/internal/physicaldelete/types.go
+index 27ea8a18b5365f2d2381a4b0d44753893b26ba89..db5f327fa87e2f668de860c0e8747115a58cae69 100644
+--- a/apps/backend/internal/physicaldelete/types.go
++++ b/apps/backend/internal/physicaldelete/types.go
+@@ -5,8 +5,11 @@ package physicaldelete
+ 
+ import (
+ 	"context"
++	"crypto/sha256"
++	"encoding/hex"
+ 	"errors"
+ 	"os"
++	"path/filepath"
+ 	"time"
+ )
+ 
+@@ -155,10 +158,44 @@ type Request struct {
+ 	Resource  Resource
+ 	Children  []Resource
+ 	Identity  ProvisionalIdentity
++	// AnchorIdentity is the canonical identity of the retained v2/v3
++	// reconcile anchor the request binds to. It is consumed only by
++	// ActionReleaseAbsent. Every field must match the decoded snapshot or
++	// the release admission denies the request.
++	AnchorIdentity AnchorIdentity
+ 
+ 	lease *ProvisionalLease
+ }
+ 
++// AnchorIdentity is the exact-bound identity the release admission verifies
++// against the inventory. OperationID is the retained anchor's canonical
++// operation_id; Digest is its reconcile snapshot digest; the remaining
++// fields are the persisted identity columns.
++type AnchorIdentity struct {
++	OperationID     string
++	SnapshotDigest  string
++	ResourceKind    string
++	ResourceID      string
++	TaskID          string
++	ManagedRootKey  string
++	SnapshotVersion int
++}
++
++// ComputeAnchorManagedRootKey derives the canonical managed-root key from a
++// worktree path. Both the model layer and the inventory agree on this
++// derivation; a mismatch is treated as an invalid release request.
++func ComputeAnchorManagedRootKey(worktreePath string) (string, error) {
++	if worktreePath == "" {
++		return "", errors.New("physicaldelete: empty anchor worktree path")
++	}
++	if !filepath.IsAbs(worktreePath) || filepath.Clean(worktreePath) != worktreePath ||
++		filepath.Dir(worktreePath) == worktreePath {
++		return "", errors.New("physicaldelete: anchor worktree path is not canonical")
++	}
++	sum := sha256.Sum256([]byte(worktreePath))
++	return "git_worktree:" + hex.EncodeToString(sum[:]), nil
++}
++
+ type CreateRequest struct {
+ 	Authority Authority
+ 	Identity  ProvisionalIdentity
+diff --git a/apps/backend/internal/physicaldelete/writerdb.go b/apps/backend/internal/physicaldelete/writerdb.go
+index e102ea37f09803a3e2f1c8f07e069e4b024380c3..b35f7042c843b4540604b04a239ae33e92f5dd75 100644
+--- a/apps/backend/internal/physicaldelete/writerdb.go
++++ b/apps/backend/internal/physicaldelete/writerdb.go
+@@ -6,6 +6,8 @@ import (
+ 	"fmt"
+ 
+ 	"github.com/jmoiron/sqlx"
++
++	"github.com/kandev/kandev/internal/task/models"
+ )
+ 
+ // SQLInventorySource reads every protection source from one serializable
+@@ -102,43 +104,151 @@ func selectResources(ctx context.Context, tx *sqlx.Tx, query string, kind Resour
+ }
+ 
+ type sqlCleanupJob struct {
+-	ID               string `db:"id"`
+-	Trigger          string `db:"trigger"`
+-	State            string `db:"state"`
+-	ResourceSnapshot string `db:"resource_snapshot"`
++	ID               string  `db:"id"`
++	OperationID      string  `db:"operation_id"`
++	Trigger          string  `db:"trigger"`
++	State            string  `db:"state"`
++	ResourceSnapshot string  `db:"resource_snapshot"`
++	SnapshotVersion  int     `db:"snapshot_version"`
++	SnapshotDigest   string  `db:"snapshot_digest"`
++	ResourceKind     string  `db:"resource_kind"`
++	ResourceID       string  `db:"resource_id"`
++	ManagedRootKey   string  `db:"managed_root_key"`
++	AnchorRevision   int64   `db:"anchor_revision"`
++	ActiveScopeKey   *string `db:"active_scope_key"`
+ }
+ 
+ func selectCleanupAnchors(ctx context.Context, tx *sqlx.Tx) ([]CleanupAnchor, error) {
+ 	rows := make([]sqlCleanupJob, 0)
+ 	if err := tx.SelectContext(ctx, &rows, tx.Rebind(`
+-		SELECT id, trigger, state, resource_snapshot
++		SELECT id, operation_id, trigger, state, resource_snapshot,
++			snapshot_version, snapshot_digest, resource_kind, resource_id,
++			managed_root_key, anchor_revision, active_scope_key
+ 		FROM task_resource_cleanup_jobs`)); err != nil {
+ 		return nil, fmt.Errorf("%w: load cleanup anchors: %v", ErrInventoryIncomplete, err)
+ 	}
++	anchors := make([]CleanupAnchor, 0, len(rows))
+ 	for _, row := range rows {
+-		if err := validateCleanupRow(row); err != nil {
++		anchor, err := decodeCleanupAnchorRow(row)
++		if err != nil {
+ 			return nil, err
+ 		}
++		if anchor.validated {
++			anchors = append(anchors, anchor)
++		}
+ 	}
+-	// Task05 owns the v2/v3 schema and canonical anchor decoder. Generic cleanup
+-	// rows do not become anchors by inference.
+-	return []CleanupAnchor{}, nil
++	return anchors, nil
+ }
+ 
+-func validateCleanupRow(row sqlCleanupJob) error {
+-	if row.ID == "" {
+-		return fmt.Errorf("%w: cleanup row has empty id", ErrInventoryIncomplete)
++// decodeCleanupAnchorRow validates one cleanup row and produces a
++// CleanupAnchor. Generic cleanup rows produce an empty (unvalidated) anchor
++// so they remain visible to the inventory without becoming release
++// candidates. v2/v3 rows are decoded by the canonical Task05 decoders; any
++// decode error fails the entire inventory closed.
++func decodeCleanupAnchorRow(row sqlCleanupJob) (CleanupAnchor, error) {
++	switch row.Trigger {
++	case "archive", "delete", "cascade_archive", "cascade_delete", "workspace_delete", "quick_chat_expire":
++		if !knownGenericCleanupState(row.State) {
++			return CleanupAnchor{}, fmt.Errorf("%w: unknown generic cleanup state %q", ErrUnknownInventory, row.State)
++		}
++		return CleanupAnchor{
++			ID:             row.ID,
++			OperationID:    row.OperationID,
++			State:          row.State,
++			SnapshotDigest: row.SnapshotDigest,
++		}, nil
++	case "archived_resource_reconcile":
++		return decodeRetainedReconcileAnchor(row)
++	default:
++		return CleanupAnchor{}, fmt.Errorf("%w: unknown cleanup trigger %q", ErrUnknownInventory, row.Trigger)
+ 	}
+-	if row.Trigger == "archived_resource_reconcile" {
+-		return fmt.Errorf("%w: reconcile row requires Task05 canonical validation", ErrInventoryIncomplete)
++}
++
++func decodeRetainedReconcileAnchor(row sqlCleanupJob) (CleanupAnchor, error) {
++	if row.SnapshotVersion != 2 && row.SnapshotVersion != 3 {
++		return CleanupAnchor{}, fmt.Errorf("%w: reconcile snapshot version %d is not supported", ErrInventoryIncomplete, row.SnapshotVersion)
+ 	}
+-	if !knownGenericCleanupTrigger(row.Trigger) {
+-		return fmt.Errorf("%w: unknown cleanup trigger %q", ErrUnknownInventory, row.Trigger)
++	if row.ResourceSnapshot == "" {
++		return CleanupAnchor{}, fmt.Errorf("%w: reconcile row %q has empty snapshot", ErrInventoryIncomplete, row.OperationID)
+ 	}
+-	if !knownGenericCleanupState(row.State) {
+-		return fmt.Errorf("%w: unknown cleanup state %q", ErrUnknownInventory, row.State)
++	switch row.SnapshotVersion {
++	case 2:
++		snapshot, identity, err := models.DecodeArchivedResourceReconcileSnapshot([]byte(row.ResourceSnapshot))
++		if err != nil {
++			return CleanupAnchor{}, fmt.Errorf("%w: decode v2 reconcile %q: %v", ErrInventoryIncomplete, row.OperationID, err)
++		}
++		if identity.OperationID != row.OperationID {
++			return CleanupAnchor{}, fmt.Errorf("%w: v2 reconcile %q operation_id drift", ErrInventoryIncomplete, row.OperationID)
++		}
++		if identity.SnapshotDigest != row.SnapshotDigest {
++			return CleanupAnchor{}, fmt.Errorf("%w: v2 reconcile %q digest drift", ErrInventoryIncomplete, row.OperationID)
++		}
++		if identity.ResourceKind != row.ResourceKind ||
++			identity.ResourceID != row.ResourceID ||
++			identity.ManagedRootKey != row.ManagedRootKey {
++			return CleanupAnchor{}, fmt.Errorf("%w: v2 reconcile %q identity drift", ErrInventoryIncomplete, row.OperationID)
++		}
++		return CleanupAnchor{
++			ID:              row.ID,
++			OperationID:     row.OperationID,
++			State:           row.State,
++			Path:            snapshot.Immutable.Target.WorktreePath,
++			RepositoryID:    snapshot.Immutable.Target.RepositoryID,
++			Branch:          snapshot.Immutable.Target.Branch,
++			HeadOID:         snapshot.Immutable.Target.HeadOID,
++			SnapshotDigest:  row.SnapshotDigest,
++			SnapshotVersion: row.SnapshotVersion,
++			ResourceKind:    row.ResourceKind,
++			ResourceID:      row.ResourceID,
++			TaskID:          snapshot.Immutable.OriginTaskID,
++			ManagedRootKey:  row.ManagedRootKey,
++			AnchorRevision:  int(row.AnchorRevision),
++			validated:       true,
++		}, nil
++	case 3:
++		snapshot, identity, err := models.DecodeArchivedResourceGroupReconcileSnapshot([]byte(row.ResourceSnapshot))
++		if err != nil {
++			return CleanupAnchor{}, fmt.Errorf("%w: decode v3 reconcile %q: %v", ErrInventoryIncomplete, row.OperationID, err)
++		}
++		if identity.OperationID != row.OperationID {
++			return CleanupAnchor{}, fmt.Errorf("%w: v3 reconcile %q operation_id drift", ErrInventoryIncomplete, row.OperationID)
++		}
++		if identity.SnapshotDigest != row.SnapshotDigest {
++			return CleanupAnchor{}, fmt.Errorf("%w: v3 reconcile %q digest drift", ErrInventoryIncomplete, row.OperationID)
++		}
++		if identity.ResourceKind != row.ResourceKind ||
++			identity.ResourceID != row.ResourceID ||
++			identity.ManagedRootKey != row.ManagedRootKey {
++			return CleanupAnchor{}, fmt.Errorf("%w: v3 reconcile %q identity drift", ErrInventoryIncomplete, row.OperationID)
++		}
++		// v3 groups carry one or more branches; the inventory uses the first
++		// branch's identity as the canonical anchor identity so the admission
++		// request can target the worktree by branch + head_oid.
++		var branch, headOID string
++		if len(snapshot.Immutable.Branches) > 0 {
++			branch = snapshot.Immutable.Branches[0].Branch
++			headOID = snapshot.Immutable.Branches[0].HeadOID
++		}
++		return CleanupAnchor{
++			ID:              row.ID,
++			OperationID:     row.OperationID,
++			State:           row.State,
++			Path:            snapshot.Immutable.Target.WorktreePath,
++			RepositoryID:    snapshot.Immutable.Target.RepositoryID,
++			Branch:          branch,
++			HeadOID:         headOID,
++			SnapshotDigest:  row.SnapshotDigest,
++			SnapshotVersion: row.SnapshotVersion,
++			ResourceKind:    row.ResourceKind,
++			ResourceID:      row.ResourceID,
++			TaskID:          snapshot.Immutable.CoordinatorTaskID,
++			ManagedRootKey:  row.ManagedRootKey,
++			AnchorRevision:  int(row.AnchorRevision),
++			validated:       true,
++		}, nil
++	default:
++		return CleanupAnchor{}, fmt.Errorf("%w: reconcile snapshot version %d is not supported", ErrInventoryIncomplete, row.SnapshotVersion)
+ 	}
+-	return nil
+ }
+ 
+ func knownGenericCleanupTrigger(trigger string) bool {
+diff --git a/apps/backend/internal/physicaldelete/writerdb_test.go b/apps/backend/internal/physicaldelete/writerdb_test.go
+index 4a3a96316576661b971c2fbc85fc04704cc16bad..7debce829e2bf7fda992fb3004d903c1f5a2a0c7 100644
+--- a/apps/backend/internal/physicaldelete/writerdb_test.go
++++ b/apps/backend/internal/physicaldelete/writerdb_test.go
+@@ -33,7 +33,7 @@ func TestSQLInventorySourceLoadsV088ProtectionSources(t *testing.T) {
+ 		`INSERT INTO executors_running VALUES ('exec-row', 'running', ?)`, paths[2],
+ 		`INSERT INTO task_workspace_groups VALUES ('group-row', 'cleanup_pending', ?)`, paths[3],
+ 		`INSERT INTO storage_quarantine_entries VALUES ('quarantine-row', 'quarantined', ?, ?)`, paths[4], paths[5],
+-		`INSERT INTO task_resource_cleanup_jobs VALUES ('cleanup-row', 'archive', 'pending', '{}')`,
++		`INSERT INTO task_resource_cleanup_jobs VALUES ('cleanup-row', 'operation-test', 'archive', 'pending', '{}', 0, '', '', '', '', 0, NULL)`,
+ 	)
+ 
+ 	inventory, err := NewSQLInventorySource(db).Load(context.Background())
+@@ -59,7 +59,7 @@ func TestSQLInventorySourceAcceptsOnlyKnownGenericCleanupMatrix(t *testing.T) {
+ 			t.Run(trigger+"/"+state, func(t *testing.T) {
+ 				db := openInventoryTestDB(t)
+ 				createInventorySchema(t, db)
+-				_, err := db.Exec(`INSERT INTO task_resource_cleanup_jobs VALUES (?, ?, ?, '{}')`, "cleanup-row", trigger, state)
++				_, err := db.Exec(`INSERT INTO task_resource_cleanup_jobs VALUES (?, 'operation-test', ?, ?, '{}', 0, '', '', '', '', 0, NULL)`, "cleanup-row", trigger, state)
+ 				if err != nil {
+ 					t.Fatal(err)
+ 				}
+@@ -90,7 +90,7 @@ func TestSQLInventorySourceRejectsUnvalidatedReconcileAndFutureCleanup(t *testin
+ 		t.Run(tt.name, func(t *testing.T) {
+ 			db := openInventoryTestDB(t)
+ 			createInventorySchema(t, db)
+-			_, err := db.Exec(`INSERT INTO task_resource_cleanup_jobs VALUES ('cleanup-row', ?, ?, '{}')`, tt.trigger, tt.state)
++			_, err := db.Exec(`INSERT INTO task_resource_cleanup_jobs VALUES ('cleanup-row', 'operation-test', ?, ?, '{}', 0, '', '', '', '', 0, NULL)`, tt.trigger, tt.state)
+ 			if err != nil {
+ 				t.Fatal(err)
+ 			}
+@@ -158,7 +158,7 @@ func createInventorySchema(t *testing.T, db *sqlx.DB) {
+ 		`CREATE TABLE executors_running (id TEXT, status TEXT, worktree_path TEXT)`,
+ 		`CREATE TABLE task_workspace_groups (id TEXT, cleanup_status TEXT, materialized_path TEXT)`,
+ 		`CREATE TABLE storage_quarantine_entries (id TEXT, state TEXT, original_path TEXT, quarantine_path TEXT)`,
+-		`CREATE TABLE task_resource_cleanup_jobs (id TEXT, trigger TEXT, state TEXT, resource_snapshot TEXT)`,
++		`CREATE TABLE task_resource_cleanup_jobs (id TEXT, operation_id TEXT, trigger TEXT, state TEXT, resource_snapshot TEXT, snapshot_version INTEGER, snapshot_digest TEXT, resource_kind TEXT, resource_id TEXT, managed_root_key TEXT, anchor_revision INTEGER, active_scope_key TEXT)`,
+ 	}
+ 	for _, statement := range statements {
+ 		if _, err := db.Exec(statement); err != nil {
+diff --git a/apps/backend/internal/task/service/resource_cleanup_terminal_actions.go b/apps/backend/internal/task/service/resource_cleanup_terminal_actions.go
+index 389cd5f6564ddfa214d9d73a94357e875bc82295..06fd2f1fa46e5584b5ab5ba74b06969db68f30fa 100644
+--- a/apps/backend/internal/task/service/resource_cleanup_terminal_actions.go
++++ b/apps/backend/internal/task/service/resource_cleanup_terminal_actions.go
+@@ -304,6 +304,14 @@ func (s *Service) invokeAbsentTargetAdmission(
+ 	ctx context.Context,
+ 	req ArchivedResourceReleaseRequest,
+ ) error {
++	// The release request binds to the retained anchor by its canonical
++	// identity (operation_id, snapshot_digest, etc.). The inventory uses the
++	// same identity to locate the validated anchor and prove the path's
++	// absence; any drift or unknown anchor state fails the admission closed.
++	managedRootKey, err := physicaldelete.ComputeAnchorManagedRootKey(req.AnchorWorktreePath)
++	if err != nil {
++		return err
++	}
+ 	physicalRequest := physicaldelete.Request{
+ 		Action:    physicaldelete.ActionReleaseAbsent,
+ 		Authority: physicaldelete.AuthorityAdmin,
+@@ -311,9 +319,18 @@ func (s *Service) invokeAbsentTargetAdmission(
+ 		Force:     false,
+ 		Resource: physicaldelete.Resource{
+ 			Kind: physicaldelete.ResourceKindEnvironmentRepo,
+-			ID:   req.AnchorWorktreeID,
++			ID:   req.AnchorOperationID,
+ 			Path: req.AnchorWorktreePath,
+ 		},
++		AnchorIdentity: physicaldelete.AnchorIdentity{
++			OperationID:     req.AnchorOperationID,
++			SnapshotDigest:  req.AnchorDigest,
++			ResourceKind:    "git_worktree",
++			ResourceID:      req.AnchorWorktreeID,
++			TaskID:          req.AnchorTaskID,
++			ManagedRootKey:  managedRootKey,
++			SnapshotVersion: 2,
++		},
+ 	}
+ 	receipt, err := s.physicalDeleteAdmission.Execute(ctx, physicalRequest)
+ 	if err != nil {
+diff --git a/docs/plans/pinwei-v088-semantic-port/task-06-terminal-db-only-actions.md b/docs/plans/pinwei-v088-semantic-port/task-06-terminal-db-only-actions.md
+index 606d215a3e8154b1fafbe8fea1453f890a83a9a0..968c07974e03c174f877a45cd8dbe7912bb5d30b 100644
+--- a/docs/plans/pinwei-v088-semantic-port/task-06-terminal-db-only-actions.md
++++ b/docs/plans/pinwei-v088-semantic-port/task-06-terminal-db-only-actions.md
+@@ -243,3 +243,115 @@ PostgreSQL runtime remains `NOT_RUN`; no new dependency was installed; the
+ shipped `archivedResourceReconcile` / `archivedResourcePhysicalRelease` flags
+ remain default-off; no route, runtime, or live action was started; no live DB,
+ API, or remote server was contacted.
++
++### Composition fix receipt (counterexample response)
++
++The previous candidate (`225c022`) routed `ReleaseAbsentArchivedResourceTarget`
++through a sealed `physicaldelete.Admission`, but the real writer inventory
++loader (`SQLInventorySource.Load`) returned `ErrInventoryIncomplete` for any
++row with `trigger='archived_resource_reconcile'` — meaning the Task05 v2/v3
++anchor decoder was never wired into the inventory. Any legal release
++(which requires a retained v2 anchor) was therefore fail-closed by
++inventory load before admission ran. The mock-only tests in the previous
++candidate used an empty cleanup-anchor set and never exercised the real
++composition path.
++
++This successor commit closes that gap end-to-end:
++
++- **Inventory** (`apps/backend/internal/physicaldelete`)
++  - `selectCleanupAnchors` now decodes each `task_resource_cleanup_jobs`
++    row via the Task05 canonical decoder. Generic cleanup rows
++    (`archive`, `delete`, …) produce unvalidated anchors that never become
++    release candidates. `archived_resource_reconcile` rows are routed
++    through `decodeRetainedReconcileAnchor`, which calls
++    `models.DecodeArchivedResourceReconcileSnapshot` (v2) or
++    `models.DecodeArchivedResourceGroupReconcileSnapshot` (v3) and verifies
++    every redundant header column. Any decode failure or column drift fails
++    the entire inventory closed.
++  - `CleanupAnchor` carries the full canonical identity (`OperationID`,
++    `SnapshotDigest`, `ResourceKind`, `ResourceID`, `TaskID`,
++    `ManagedRootKey`, `AnchorRevision`, `Path`, `RepositoryID`, `Branch`,
++    `HeadOID`, `SnapshotVersion`) so the release admission can perform an
++    exact-bound match.
++  - `inventory.validate` requires every validated anchor to carry that
++    identity; unknown / malformed rows fail closed.
++  - `Request.AnchorIdentity` is a new struct that the release admission
++    verifies field-by-field against the loaded anchor. `ComputeAnchorManagedRootKey`
++    derives the canonical managed root key from the worktree path.
++  - `Execute` short-circuits `verifyAnchors` for `ActionReleaseAbsent`
++    (the absence is proven via the inventory, not Lstat) and routes through
++    a new `verifyAbsentTargetRelease` that:
++    1. finds the unique validated retained anchor whose
++       `OperationID` / `SnapshotDigest` / `ResourceKind` / `ResourceID` /
++       `TaskID` / `ManagedRootKey` / `SnapshotVersion` match `AnchorIdentity`;
++    2. verifies the target path is absent from each non-anchor inventory
++       source (`EnvironmentRepositories`, `ExecutorWorktrees`,
++       `TaskEnvironments`, `WorkspaceGroups`, `QuarantineEntries`) by
++       walking the per-source slices so deduped path collisions cannot hide
++       a remaining reference;
++    3. verifies the requested `CommonDir` is not in any non-anchor
++       common-dir.
++  - `inventorySnapshot` now carries the full `Inventory` so the release
++    admission can iterate every source slice independently.
++
++- **Service** (`apps/backend/internal/task/service`)
++  - `ReleaseAbsentArchivedResourceTarget` populates `physicaldelete.AnchorIdentity`
++    with every redundant header field so the central admission has the full
++    canonical identity to bind. All other fields are unchanged.
++
++- **Tests** (`apps/backend/internal/physicaldelete/composer_release_test.go`)
++  - Real-composition fixture: builds an in-memory SQLite writer DB with the
++    full v0.88 schema, seeds a Task05-built retained v2 anchor, and runs
++    `physicaldelete.New(physicaldelete.Config{Inventory: NewSQLInventorySource(db)})`
++    — the exact path `backendapp.provideWorktreeManager` uses.
++  - Success: `TestRealCompositionReleaseAdmitsExactBoundRetainedAnchor`
++    proves `Mutated=false`, `Executor=ExecutorNone`, `Action=ActionReleaseAbsent`,
++    non-empty `InventoryDigest`, and a non-empty canonical lock entry.
++  - Zero-write failure cases (all return their declared typed error):
++    - `…OnExtraRepositoryReference` — `task_environment_repos.worktree_path`
++      still points at the target.
++    - `…OnExecutorReference` — `executors_running` still points at the target.
++    - `…OnUnknownWorkspaceState` — `task_workspace_groups.cleanup_status` is
++      not one of the four accepted states.
++    - `…OnMalformedV2` — v2 anchor with invalid snapshot bytes fails inventory
++      decode, so the whole load is fail-closed.
++    - `…OnDriftDigest` — request digest does not match anchor digest.
++    - `…OnUnknownOperationID` — request binds to a non-existent anchor.
++    - `…OnWrongResourceKind` — request resource_kind does not match anchor.
++    - `…OnAnchorNotRetained` — anchor state mutated away from `retained`.
++    - `…OnWrongAnchorVersion` — request version does not match anchor.
++    - `…OnEmptyAnchorIdentity` — request omits anchor identity.
++    - `…OnChildren` — request carries children (release must be leaf-only).
++  - Zero durable side effect:
++    `TestRealCompositionReleaseLeavesAnchorAndTargetUntouched` verifies the
++    anchor row's `state` and `completed_at` are byte-equal before and after
++    the admission, and `task_environment_repos` row count is unchanged.
++
++### Re-verification (all `env -u KANDEV_TEST_POSTGRES_DSN`, from `apps/backend`)
++
++```text
++$ go test ./internal/task/models ./internal/task/repository/sqlite \
++        ./internal/task/service ./internal/task/handlers ./internal/physicaldelete \
++        -run 'PendingMove|ReleaseAbsent|EnvironmentRetirement|Inventory' -count=1
++ok  internal/task/models             1.246s
++ok  internal/task/repository/sqlite   1.156s
++ok  internal/task/service            1.440s
++ok  internal/task/handlers           1.427s
++ok  internal/physicaldelete          1.735s
++
++$ go test -race ./internal/task/repository/sqlite ./internal/task/service \
++        -run 'PendingMove|ReleaseAbsent|EnvironmentRetirement' -count=1
++ok  internal/task/repository/sqlite   2.293s
++ok  internal/task/service            2.303s
++
++$ go vet ./internal/task/... ./internal/physicaldelete
++(no output)
++
++$ go build ./...
++(no output)
++```
++
++PostgreSQL runtime remains `NOT_RUN`; no new dependency was installed; the
++shipped `archivedResourceReconcile` / `archivedResourcePhysicalRelease` flags
++remain default-off; no route, runtime, or live action was started; no live DB,
++API, or remote server was contacted.
+-- 
+2.55.0
+

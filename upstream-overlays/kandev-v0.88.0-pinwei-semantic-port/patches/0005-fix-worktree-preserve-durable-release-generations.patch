@@ -1,0 +1,2223 @@
+From f49d81e088358e85f635d192e2e1d23dbdb8cd8b Mon Sep 17 00:00:00 2001
+From: WaleWangPW <396218656@qq.com>
+Date: Sat, 15 Aug 2026 18:24:27 +0800
+Subject: [PATCH 05/22] fix(worktree): preserve durable release generations
+
+---
+ .../internal/backendapp/storage_inventory.go  |  14 +-
+ .../backendapp/storage_inventory_test.go      |  29 ++-
+ .../task/repository/sqlite/base_schema.go     |   2 +-
+ .../repository/sqlite/postgres_schema_test.go | 134 ++++++++++
+ .../repository/sqlite/resource_cleanup.go     | 126 +++++++++-
+ .../sqlite/resource_cleanup_test.go           |  59 +++++
+ .../task/repository/sqlite/session.go         |  65 +++--
+ .../repository/sqlite/task_cleanup_barrier.go |  33 ++-
+ .../task_cleanup_barrier_postgres_test.go     | 171 +++++++++++++
+ .../sqlite/task_cleanup_barrier_test.go       | 181 +++++++++++++
+ .../repository/sqlite/task_environment.go     |  61 ++++-
+ .../sqlite/task_environment_repo_fence.go     |  71 ++++++
+ .../task/repository/sqlite/workspace_test.go  |  15 +-
+ .../sqlite/worktree_ownership_migration.go    |  14 +-
+ .../worktree_ownership_postgres_test.go       |   8 +-
+ .../sqlite/worktree_ownership_targets.go      |   7 +-
+ .../worktree_reference_lifecycle_migration.go | 180 +++++++++++++
+ ...tree_reference_lifecycle_migration_test.go | 238 ++++++++++++++++++
+ .../internal/worktree/manager_cleanup.go      |  23 ++
+ .../worktree/manager_cleanup_error_test.go    |  96 ++++++-
+ apps/backend/internal/worktree/store.go       |  61 ++++-
+ apps/backend/internal/worktree/store_test.go  |  82 ++++++
+ .../tasks/archived-resource-safety/spec.md    |   6 +
+ 23 files changed, 1593 insertions(+), 83 deletions(-)
+ create mode 100644 apps/backend/internal/task/repository/sqlite/task_cleanup_barrier_postgres_test.go
+ create mode 100644 apps/backend/internal/task/repository/sqlite/task_environment_repo_fence.go
+ create mode 100644 apps/backend/internal/task/repository/sqlite/worktree_reference_lifecycle_migration.go
+ create mode 100644 apps/backend/internal/task/repository/sqlite/worktree_reference_lifecycle_migration_test.go
+
+diff --git a/apps/backend/internal/backendapp/storage_inventory.go b/apps/backend/internal/backendapp/storage_inventory.go
+index 0d44e8bd4e7e81bfa11b8b082584bf716b19dd8f..56cb41f3e72fabab5a6b705b0cc7019458b6eafb 100644
+--- a/apps/backend/internal/backendapp/storage_inventory.go
++++ b/apps/backend/internal/backendapp/storage_inventory.go
+@@ -59,14 +59,12 @@ func (i *storageInventory) LoadWorkspaceInventory(ctx context.Context) (workspac
+ 
+ func (i *storageInventory) activeWorktreePaths(ctx context.Context) ([]string, error) {
+ 	paths := make([]string, 0)
+-	// Worktrees are task-owned: the inventory reads task_environment_repos
+-	// through the owning environment's task row, so a zero-session task
+-	// workspace is still protected from storage maintenance.
+-	query := "SELECT ter.worktree_path FROM task_environment_repos ter " +
+-		"INNER JOIN task_environments te ON te.id = ter.task_environment_id " +
+-		"INNER JOIN tasks t ON t.id = te.task_id " +
+-		"WHERE t.archived_at IS NULL AND ter.status = 'active' " +
+-		"AND ter.deleted_at IS NULL AND ter.worktree_path <> ''"
++	// Active environment-repository rows are physical inventory even after the
++	// logical task/environment parent is gone. Dropping an active orphan through
++	// an INNER JOIN would let storage GC race the durable release CAS. Complete
++	// deleted tombstones no longer protect bytes.
++	query := "SELECT worktree_path FROM task_environment_repos " +
++		"WHERE status = 'active' AND deleted_at IS NULL AND worktree_path <> ''"
+ 	if err := i.reader.SelectContext(ctx, &paths, query); err != nil {
+ 		return nil, err
+ 	}
+diff --git a/apps/backend/internal/backendapp/storage_inventory_test.go b/apps/backend/internal/backendapp/storage_inventory_test.go
+index 12ab0afffaf22d191126fe2d47a643727bf94856..e29cee4c4fc6fb290e44dd3fa02abe12abb9f7b5 100644
+--- a/apps/backend/internal/backendapp/storage_inventory_test.go
++++ b/apps/backend/internal/backendapp/storage_inventory_test.go
+@@ -59,7 +59,7 @@ func TestWorkspaceInventoryOnlyProtectsActiveTaskEnvironments(t *testing.T) {
+ 	}
+ }
+ 
+-func TestWorkspaceInventoryOnlyProtectsActiveTaskWorktrees(t *testing.T) {
++func TestWorkspaceInventoryProtectsActiveOrphansButNotDeletedTombstones(t *testing.T) {
+ 	database := newContainerInventoryDatabase(t)
+ 	insertContainerInventoryTask(t, database, "active", v1.TaskStateInProgress, false)
+ 	insertContainerInventoryTask(t, database, "archived", v1.TaskStateInProgress, true)
+@@ -84,14 +84,35 @@ func TestWorkspaceInventoryOnlyProtectsActiveTaskWorktrees(t *testing.T) {
+ 			t.Fatalf("insert task worktree for %q: %v", item.taskID, err)
+ 		}
+ 	}
++	if _, err := database.Exec(
++		"INSERT INTO task_environment_repos (id, task_environment_id, status, worktree_path) VALUES (?, ?, 'active', ?)",
++		"worktree-orphan", "env-missing", "/tasks/orphan/repo",
++	); err != nil {
++		t.Fatalf("insert active orphan worktree: %v", err)
++	}
++	if _, err := database.Exec(
++		"INSERT INTO task_environment_repos (id, task_environment_id, status, worktree_path, deleted_at) VALUES (?, ?, 'deleted', ?, ?)",
++		"worktree-tombstone", "env-missing", "/tasks/tombstone/repo", time.Now().UTC(),
++	); err != nil {
++		t.Fatalf("insert deleted tombstone: %v", err)
++	}
+ 
+ 	paths, err := (&storageInventory{reader: database}).activeWorktreePaths(context.Background())
+ 	if err != nil {
+ 		t.Fatalf("activeWorktreePaths: %v", err)
+ 	}
+-	want := []string{"/tasks/active_abc/repo"}
+-	if !reflect.DeepEqual(paths, want) {
+-		t.Fatalf("active worktree paths = %#v, want %#v", paths, want)
++	want := map[string]bool{
++		"/tasks/active_abc/repo":   true,
++		"/tasks/archived_def/repo": true,
++		"/tasks/deleted_ghi/repo":  true,
++		"/tasks/orphan/repo":       true,
++	}
++	got := make(map[string]bool, len(paths))
++	for _, path := range paths {
++		got[path] = true
++	}
++	if !reflect.DeepEqual(got, want) {
++		t.Fatalf("active worktree paths = %#v, want %#v", got, want)
+ 	}
+ }
+ 
+diff --git a/apps/backend/internal/task/repository/sqlite/base_schema.go b/apps/backend/internal/task/repository/sqlite/base_schema.go
+index a8c8059389e9611c5eeb4285e35e87ce5fae443b..16d8919ba1f9c0cbad18a7dc470f01be178b9021 100644
+--- a/apps/backend/internal/task/repository/sqlite/base_schema.go
++++ b/apps/backend/internal/task/repository/sqlite/base_schema.go
+@@ -32,6 +32,7 @@ func (r *Repository) initSchema() error {
+ 		r.runMigrations,
+ 		r.hideBuiltinWorkflows,
+ 		r.normalizeTaskWorktreeOwnership,
++		r.detachTaskEnvironmentRepoLifecycle,
+ 		r.healDuplicateTaskEnvironments,
+ 		r.ensureTaskEnvironmentTaskUniqueIndex,
+ 		r.healSessionTaskEnvironmentIDs,
+@@ -746,7 +747,6 @@ const sessionWorktreeSchemaDDL = `
+ 		updated_at TIMESTAMP NOT NULL,
+ 		merged_at TIMESTAMP,
+ 		deleted_at TIMESTAMP,
+-		FOREIGN KEY (task_environment_id) REFERENCES task_environments(id) ON DELETE CASCADE,
+ 		UNIQUE(task_environment_id, repository_id, branch_slug)
+ 	);
+ 
+diff --git a/apps/backend/internal/task/repository/sqlite/postgres_schema_test.go b/apps/backend/internal/task/repository/sqlite/postgres_schema_test.go
+index 04520c739774c12f9e297caaa2de7d41715b6b19..1f03a48ea66711310e0e76f16b702a2d549ae9e1 100644
+--- a/apps/backend/internal/task/repository/sqlite/postgres_schema_test.go
++++ b/apps/backend/internal/task/repository/sqlite/postgres_schema_test.go
+@@ -440,6 +440,140 @@ func TestPostgresNormalizeTaskWorktreeOwnershipIsNoOpOnFreshSchema(t *testing.T)
+ 	}
+ }
+ 
++func TestPostgresTaskEnvironmentRepoSurvivesLogicalEnvironmentDelete(t *testing.T) {
++	db := testutil.OpenIsolatedPostgres(t, testutil.PostgresDSNFromEnv(t))
++	repo, err := NewWithDB(db, db, nil)
++	if err != nil {
++		t.Fatalf("init fresh postgres schema: %v", err)
++	}
++	now := time.Now().UTC().Truncate(time.Microsecond)
++	if _, err := db.Exec(db.Rebind(`
++		INSERT INTO tasks (id, title, created_at, updated_at)
++		VALUES (?, ?, ?, ?)
++	`), "task-retained-reference", "Retained reference", now, now); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec(db.Rebind(`
++		INSERT INTO task_environments (id, task_id, executor_type, status, created_at, updated_at)
++		VALUES (?, ?, ?, ?, ?, ?)
++	`), "env-retained-reference", "task-retained-reference", "worktree", "ready", now, now); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec(db.Rebind(`
++		INSERT INTO task_environment_repos (
++			id, task_environment_id, repository_id, branch_slug,
++			worktree_id, worktree_path, worktree_branch,
++			position, error_message, status, created_at, updated_at
++		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
++	`), "row-retained-reference", "env-retained-reference", "repo-retained-reference", "",
++		"wt-retained-reference", "/tmp/retained-reference", "feature/retained-reference",
++		2, "", "active", now, now); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec(`DELETE FROM task_environments WHERE id = 'env-retained-reference'`); err != nil {
++		t.Fatal(err)
++	}
++	var count int
++	if err := db.Get(&count, `SELECT COUNT(*) FROM task_environment_repos WHERE id = 'row-retained-reference'`); err != nil {
++		t.Fatal(err)
++	}
++	if count != 1 {
++		t.Fatalf("retained reference count = %d, want 1", count)
++	}
++	if err := repo.detachTaskEnvironmentRepoLifecycle(); err != nil {
++		t.Fatalf("migration replay: %v", err)
++	}
++}
++
++func TestPostgresDetachTaskEnvironmentRepoLifecycleIsExactAndFailClosed(t *testing.T) {
++	t.Run("one exact lifecycle key and replay", func(t *testing.T) {
++		db := testutil.OpenIsolatedPostgres(t, testutil.PostgresDSNFromEnv(t))
++		repo, err := NewWithDB(db, db, nil)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if _, err := db.Exec(`
++			ALTER TABLE task_environment_repos
++			ADD CONSTRAINT task_environment_repos_legacy_environment_fk
++			FOREIGN KEY (task_environment_id) REFERENCES task_environments(id) ON DELETE CASCADE
++		`); err != nil {
++			t.Fatal(err)
++		}
++		if err := repo.detachTaskEnvironmentRepoLifecycle(); err != nil {
++			t.Fatal(err)
++		}
++		if err := repo.detachTaskEnvironmentRepoLifecycle(); err != nil {
++			t.Fatalf("replay: %v", err)
++		}
++		if count := postgresEnvironmentRepoForeignKeyCount(t, db); count != 0 {
++			t.Fatalf("foreign key count = %d, want 0", count)
++		}
++	})
++
++	t.Run("unknown foreign key is retained", func(t *testing.T) {
++		db := testutil.OpenIsolatedPostgres(t, testutil.PostgresDSNFromEnv(t))
++		repo, err := NewWithDB(db, db, nil)
++		if err != nil {
++			t.Fatal(err)
++		}
++		for _, statement := range []string{
++			`ALTER TABLE task_environment_repos ADD CONSTRAINT exact_environment_fk
++				FOREIGN KEY (task_environment_id) REFERENCES task_environments(id) ON DELETE CASCADE`,
++			`ALTER TABLE task_environment_repos ADD CONSTRAINT unexpected_repository_fk
++				FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE`,
++		} {
++			if _, err := db.Exec(statement); err != nil {
++				t.Fatal(err)
++			}
++		}
++		if err := repo.detachTaskEnvironmentRepoLifecycle(); err == nil {
++			t.Fatal("unknown foreign key was silently dropped")
++		}
++		if count := postgresEnvironmentRepoForeignKeyCount(t, db); count != 2 {
++			t.Fatalf("foreign key count after rejection = %d, want 2", count)
++		}
++	})
++
++	t.Run("multiple exact lifecycle keys are retained", func(t *testing.T) {
++		db := testutil.OpenIsolatedPostgres(t, testutil.PostgresDSNFromEnv(t))
++		repo, err := NewWithDB(db, db, nil)
++		if err != nil {
++			t.Fatal(err)
++		}
++		for _, name := range []string{"environment_fk_one", "environment_fk_two"} {
++			if _, err := db.Exec(fmt.Sprintf(`
++				ALTER TABLE task_environment_repos ADD CONSTRAINT %s
++				FOREIGN KEY (task_environment_id) REFERENCES task_environments(id) ON DELETE CASCADE
++			`, name)); err != nil {
++				t.Fatal(err)
++			}
++		}
++		if err := repo.detachTaskEnvironmentRepoLifecycle(); err == nil {
++			t.Fatal("multiple lifecycle keys were silently accepted")
++		}
++		if count := postgresEnvironmentRepoForeignKeyCount(t, db); count != 2 {
++			t.Fatalf("foreign key count after rejection = %d, want 2", count)
++		}
++	})
++}
++
++func postgresEnvironmentRepoForeignKeyCount(t *testing.T, db *sqlx.DB) int {
++	t.Helper()
++	var count int
++	if err := db.Get(&count, `
++		SELECT COUNT(*)
++		FROM pg_constraint con
++		JOIN pg_class source ON source.oid = con.conrelid
++		JOIN pg_namespace nsp ON nsp.oid = source.relnamespace
++		WHERE source.relname = 'task_environment_repos'
++			AND nsp.nspname = current_schema()
++			AND con.contype = 'f'
++	`); err != nil {
++		t.Fatal(err)
++	}
++	return count
++}
++
+ func TestPostgresCutoverHybridNormalizedEnvironmentWithLegacySessionWorktrees(t *testing.T) {
+ 	db := testutil.OpenIsolatedPostgres(t, testutil.PostgresDSNFromEnv(t))
+ 	if _, err := NewWithDB(db, db, nil); err != nil {
+diff --git a/apps/backend/internal/task/repository/sqlite/resource_cleanup.go b/apps/backend/internal/task/repository/sqlite/resource_cleanup.go
+index f1fafa7af5f385bf5883a117f97784b8bb8f0dad..fedb21634f2655597252ca6bd5058ee4a76db781 100644
+--- a/apps/backend/internal/task/repository/sqlite/resource_cleanup.go
++++ b/apps/backend/internal/task/repository/sqlite/resource_cleanup.go
+@@ -8,8 +8,10 @@ import (
+ 	"time"
+ 
+ 	"github.com/google/uuid"
++	"github.com/jmoiron/sqlx"
+ 
+ 	"github.com/kandev/kandev/internal/task/models"
++	"github.com/kandev/kandev/internal/task/repository/repoerrors"
+ )
+ 
+ const taskResourceCleanupColumns = `
+@@ -17,6 +19,9 @@ const taskResourceCleanupColumns = `
+ 	next_attempt_at, last_error, created_at, updated_at, completed_at`
+ 
+ func (r *Repository) CreateTaskResourceCleanupJob(ctx context.Context, job *models.TaskResourceCleanupJob) error {
++	if job == nil {
++		return fmt.Errorf("task resource cleanup job is required")
++	}
+ 	if job.ID == "" {
+ 		job.ID = uuid.NewString()
+ 	}
+@@ -26,14 +31,131 @@ func (r *Repository) CreateTaskResourceCleanupJob(ctx context.Context, job *mode
+ 	if job.State == "" {
+ 		job.State = models.TaskResourceCleanupStatePending
+ 	}
+-	_, err := r.db.ExecContext(ctx, r.db.Rebind(`
++
++	tx, err := r.db.BeginTxx(ctx, nil)
++	if err != nil {
++		return fmt.Errorf("begin task resource cleanup reservation: %w", err)
++	}
++	defer func() { _ = tx.Rollback() }()
++
++	if taskCleanupBarrierState(job.State) {
++		// Reservation for a live task takes the same task-row lock as every
++		// ownership mutation, before inspecting operation replay or active jobs. A
++		// mutation that commits first is therefore visible before this INSERT;
++		// a reservation that commits first is visible to the mutation's barrier
++		// read. A replay after logical task deletion remains a zero-write no-op.
++		if err := r.lockTaskCleanupDomainLocked(ctx, tx, job.TaskID); err != nil {
++			if !errors.Is(err, ErrTaskNotFound) {
++				return err
++			}
++			replay, replayErr := r.taskResourceCleanupOperationExistsLocked(ctx, tx, job.OperationID)
++			if replayErr != nil {
++				return replayErr
++			}
++			if replay {
++				return tx.Commit()
++			}
++			// Durable cleanup jobs intentionally outlive task deletion. Recovery
++			// and late workspace-cascade capture may therefore persist a job after
++			// the exact logical task row is gone. There is then no live ownership
++			// mutation domain to race; preserve that established behavior, but
++			// re-read active-job semantics in this same writer transaction before
++			// inserting the orphan recovery intent.
++			active, activeErr := r.activeTaskResourceCleanupJobLocked(ctx, tx, job.TaskID)
++			if activeErr != nil {
++				return activeErr
++			}
++			if active {
++				return fmt.Errorf("%w: %s", repoerrors.ErrTaskCleanupInProgress, job.TaskID)
++			}
++			// Continue to the insert below.
++		} else {
++			replay, err := r.taskResourceCleanupOperationExistsLocked(ctx, tx, job.OperationID)
++			if err != nil {
++				return err
++			}
++			if replay {
++				return tx.Commit()
++			}
++			active, err := r.activeTaskResourceCleanupJobLocked(ctx, tx, job.TaskID)
++			if err != nil {
++				return err
++			}
++			if active {
++				return fmt.Errorf("%w: %s", repoerrors.ErrTaskCleanupInProgress, job.TaskID)
++			}
++		}
++	}
++
++	result, err := tx.ExecContext(ctx, r.db.Rebind(`
+ 		INSERT INTO task_resource_cleanup_jobs (`+taskResourceCleanupColumns+`)
+ 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ 		ON CONFLICT(operation_id) DO NOTHING
+ 	`), job.ID, job.OperationID, job.TaskID, job.Trigger, job.State,
+ 		job.ResourceSnapshot, job.Attempts, job.NextAttemptAt, job.LastError,
+ 		job.CreatedAt, job.UpdatedAt, job.CompletedAt)
+-	return err
++	if err != nil {
++		return err
++	}
++	rows, err := result.RowsAffected()
++	if err != nil {
++		return fmt.Errorf("read task resource cleanup reservation result: %w", err)
++	}
++	if rows == 0 {
++		replay, replayErr := r.taskResourceCleanupOperationExistsLocked(ctx, tx, job.OperationID)
++		if replayErr != nil {
++			return replayErr
++		}
++		if !replay {
++			return fmt.Errorf("task resource cleanup reservation lost without operation replay")
++		}
++	} else if rows != 1 {
++		return fmt.Errorf("task resource cleanup reservation affected %d rows", rows)
++	}
++	return tx.Commit()
++}
++
++func taskCleanupBarrierState(state models.TaskResourceCleanupState) bool {
++	return state == models.TaskResourceCleanupStatePrepared ||
++		state == models.TaskResourceCleanupStatePending ||
++		state == models.TaskResourceCleanupStateRunning ||
++		state == models.TaskResourceCleanupStateRetryWait
++}
++
++func (r *Repository) taskResourceCleanupOperationExistsLocked(
++	ctx context.Context,
++	tx *sqlx.Tx,
++	operationID string,
++) (bool, error) {
++	var exists bool
++	if err := tx.QueryRowContext(ctx, r.db.Rebind(`
++		SELECT EXISTS (
++			SELECT 1 FROM task_resource_cleanup_jobs WHERE operation_id = ?
++		)`), operationID).Scan(&exists); err != nil {
++		return false, fmt.Errorf("check task resource cleanup operation replay: %w", err)
++	}
++	return exists, nil
++}
++
++func (r *Repository) activeTaskResourceCleanupJobLocked(
++	ctx context.Context,
++	tx *sqlx.Tx,
++	taskID string,
++) (bool, error) {
++	var active bool
++	if err := tx.QueryRowContext(ctx, r.db.Rebind(`
++		SELECT EXISTS (
++			SELECT 1 FROM task_resource_cleanup_jobs
++			WHERE task_id = ? AND state IN (?, ?, ?, ?)
++		)`), taskID,
++		models.TaskResourceCleanupStatePrepared,
++		models.TaskResourceCleanupStatePending,
++		models.TaskResourceCleanupStateRunning,
++		models.TaskResourceCleanupStateRetryWait,
++	).Scan(&active); err != nil {
++		return false, fmt.Errorf("check active task resource cleanup reservation: %w", err)
++	}
++	return active, nil
+ }
+ 
+ // UpdateTaskResourceCleanupSnapshot writes the resource inventory captured
+diff --git a/apps/backend/internal/task/repository/sqlite/resource_cleanup_test.go b/apps/backend/internal/task/repository/sqlite/resource_cleanup_test.go
+index 6baf4c314f84b4c9db177c76b29147203cb39193..c408ea80ab5b57a33a24cc7aaeb8d72e407ab570 100644
+--- a/apps/backend/internal/task/repository/sqlite/resource_cleanup_test.go
++++ b/apps/backend/internal/task/repository/sqlite/resource_cleanup_test.go
+@@ -2,12 +2,64 @@ package sqlite
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"testing"
+ 	"time"
+ 
+ 	"github.com/kandev/kandev/internal/task/models"
++	"github.com/kandev/kandev/internal/task/repository/repoerrors"
+ )
+ 
++func TestTaskResourceCleanupReservationReplayAndActiveSemantics(t *testing.T) {
++	ctx := context.Background()
++	repo := newRepoForHealTests(t)
++	seedBarrierTask(t, repo, "task-reservation-semantics")
++	first := &models.TaskResourceCleanupJob{
++		ID: "job-reservation-first", OperationID: "delete:reservation-semantics",
++		TaskID: "task-reservation-semantics", Trigger: models.TaskResourceCleanupTriggerDelete,
++		State: models.TaskResourceCleanupStatePrepared, ResourceSnapshot: `{"generation":"first"}`,
++	}
++	if err := repo.CreateTaskResourceCleanupJob(ctx, first); err != nil {
++		t.Fatal(err)
++	}
++	second := &models.TaskResourceCleanupJob{
++		ID: "job-reservation-second", OperationID: "delete:reservation-other",
++		TaskID: first.TaskID, Trigger: models.TaskResourceCleanupTriggerDelete,
++		State: models.TaskResourceCleanupStatePending,
++	}
++	if err := repo.CreateTaskResourceCleanupJob(ctx, second); !errors.Is(err, repoerrors.ErrTaskCleanupInProgress) {
++		t.Fatalf("second active reservation error = %v, want ErrTaskCleanupInProgress", err)
++	}
++
++	if err := repo.DeleteTask(ctx, first.TaskID); err != nil {
++		t.Fatal(err)
++	}
++	replay := &models.TaskResourceCleanupJob{
++		ID: "job-replay-different", OperationID: first.OperationID,
++		TaskID: first.TaskID, Trigger: models.TaskResourceCleanupTriggerArchive,
++		State: models.TaskResourceCleanupStatePending, ResourceSnapshot: `{"generation":"different"}`,
++	}
++	if err := repo.CreateTaskResourceCleanupJob(ctx, replay); err != nil {
++		t.Fatalf("operation replay after task deletion: %v", err)
++	}
++	stored, err := repo.GetTaskResourceCleanupJobByOperationID(ctx, first.OperationID)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if stored.ID != first.ID || stored.TaskID != first.TaskID || stored.Trigger != first.Trigger ||
++		stored.ResourceSnapshot != first.ResourceSnapshot {
++		t.Fatalf("operation replay changed winner: %+v", stored)
++	}
++	missing := &models.TaskResourceCleanupJob{
++		ID: "job-missing-task", OperationID: "delete:missing-task-new-operation",
++		TaskID: first.TaskID, Trigger: models.TaskResourceCleanupTriggerDelete,
++		State: models.TaskResourceCleanupStatePending,
++	}
++	if err := repo.CreateTaskResourceCleanupJob(ctx, missing); !errors.Is(err, repoerrors.ErrTaskCleanupInProgress) {
++		t.Fatalf("new reservation beside active orphan error = %v, want ErrTaskCleanupInProgress", err)
++	}
++}
++
+ func TestTaskResourceCleanupJobSurvivesTaskDeletion(t *testing.T) {
+ 	ctx := context.Background()
+ 	repo := newRepoForHealTests(t)
+@@ -42,6 +94,7 @@ func TestTaskResourceCleanupJobSurvivesTaskDeletion(t *testing.T) {
+ func TestTaskResourceCleanupJobClaimAndRetry(t *testing.T) {
+ 	ctx := context.Background()
+ 	repo := newRepoForHealTests(t)
++	seedBarrierTask(t, repo, "task-retry")
+ 	job := &models.TaskResourceCleanupJob{
+ 		ID: "job-retry", OperationID: "delete:retry", TaskID: "task-retry",
+ 		Trigger: models.TaskResourceCleanupTriggerDelete,
+@@ -81,6 +134,7 @@ func TestListPreparedTaskResourceCleanupJobsExcludesRunnableStates(t *testing.T)
+ 			Trigger: models.TaskResourceCleanupTriggerDelete, State: models.TaskResourceCleanupStatePending,
+ 		},
+ 	} {
++		seedBarrierTask(t, repo, job.TaskID)
+ 		if err := repo.CreateTaskResourceCleanupJob(ctx, job); err != nil {
+ 			t.Fatalf("CreateTaskResourceCleanupJob(%s): %v", job.ID, err)
+ 		}
+@@ -113,6 +167,7 @@ func TestHasActiveTaskResourceCleanupJobTracksAdmissionStates(t *testing.T) {
+ 	for _, tt := range states {
+ 		t.Run(string(tt.state), func(t *testing.T) {
+ 			taskID := "task-" + string(tt.state)
++			seedBarrierTask(t, repo, taskID)
+ 			job := &models.TaskResourceCleanupJob{
+ 				ID: "job-" + string(tt.state), OperationID: "delete:" + taskID, TaskID: taskID,
+ 				Trigger: models.TaskResourceCleanupTriggerDelete, State: tt.state, ResourceSnapshot: `{}`,
+@@ -134,6 +189,7 @@ func TestHasActiveTaskResourceCleanupJobTracksAdmissionStates(t *testing.T) {
+ func TestTaskResourceCleanupJobStaleClaimCannotOverwriteCancellation(t *testing.T) {
+ 	ctx := context.Background()
+ 	repo := newRepoForHealTests(t)
++	seedBarrierTask(t, repo, "task-cancel-race")
+ 	job := &models.TaskResourceCleanupJob{
+ 		ID: "job-cancel-race", OperationID: "archive:cancel-race", TaskID: "task-cancel-race",
+ 		Trigger: models.TaskResourceCleanupTriggerArchive,
+@@ -177,6 +233,7 @@ func TestTaskResourceCleanupJobStaleClaimCannotOverwriteCancellation(t *testing.
+ func TestTaskResourceCleanupFailedJobIsTerminalAndNotDue(t *testing.T) {
+ 	ctx := context.Background()
+ 	repo := newRepoForHealTests(t)
++	seedBarrierTask(t, repo, "task-failed")
+ 	job := &models.TaskResourceCleanupJob{
+ 		ID: "job-failed", OperationID: "delete:failed", TaskID: "task-failed",
+ 		Trigger: models.TaskResourceCleanupTriggerDelete,
+@@ -217,6 +274,7 @@ func TestTaskResourceCleanupFailedJobIsTerminalAndNotDue(t *testing.T) {
+ func TestTaskResourceCleanupFailedUnclaimedCompletionHasTimestamp(t *testing.T) {
+ 	ctx := context.Background()
+ 	repo := newRepoForHealTests(t)
++	seedBarrierTask(t, repo, "task-failed-unclaimed")
+ 	job := &models.TaskResourceCleanupJob{
+ 		ID: "job-failed-unclaimed", OperationID: "delete:failed-unclaimed", TaskID: "task-failed-unclaimed",
+ 		Trigger: models.TaskResourceCleanupTriggerDelete,
+@@ -242,6 +300,7 @@ func TestTaskResourceCleanupFailedUnclaimedCompletionHasTimestamp(t *testing.T)
+ func TestPreparedCleanupSnapshotStartAndRunningReset(t *testing.T) {
+ 	ctx := context.Background()
+ 	repo := newRepoForHealTests(t)
++	seedBarrierTask(t, repo, "task-prepared-lifecycle")
+ 	job := &models.TaskResourceCleanupJob{
+ 		ID: "job-prepared-lifecycle", OperationID: "delete:prepared-lifecycle", TaskID: "task-prepared-lifecycle",
+ 		Trigger: models.TaskResourceCleanupTriggerDelete, State: models.TaskResourceCleanupStatePrepared,
+diff --git a/apps/backend/internal/task/repository/sqlite/session.go b/apps/backend/internal/task/repository/sqlite/session.go
+index 462bb3993541cebc3f67989c529a2687c9d11117..65c49cc17563a75e673e33809b647a1c5d5bf729 100644
+--- a/apps/backend/internal/task/repository/sqlite/session.go
++++ b/apps/backend/internal/task/repository/sqlite/session.go
+@@ -2146,14 +2146,43 @@ func (r *Repository) ListTaskSessionWorktrees(ctx context.Context, sessionID str
+ // (PR watch reconciliation, branch listings) see the current branch rather
+ // than the value captured at worktree creation.
+ func (r *Repository) UpdateTaskSessionWorktreeBranch(ctx context.Context, sessionID, branch string) error {
+-	now := time.Now().UTC()
+-	_, err := r.db.ExecContext(ctx, r.db.Rebind(`
++	return r.updateTaskSessionWorktreeBranch(ctx, sessionID, ``, nil, branch)
++}
++
++func (r *Repository) updateTaskSessionWorktreeBranch(
++	ctx context.Context,
++	sessionID string,
++	scope string,
++	scopeArgs []interface{},
++	branch string,
++) error {
++	tx, err := r.db.BeginTxx(ctx, nil)
++	if err != nil {
++		return err
++	}
++	defer func() { _ = tx.Rollback() }()
++	if err := r.mutableEnvironmentReposBySessionLocked(ctx, tx, sessionID); err != nil {
++		return err
++	}
++	query := `
+ 		UPDATE task_environment_repos SET worktree_branch = ?, updated_at = ?
+ 		WHERE task_environment_id = (SELECT task_environment_id FROM task_sessions WHERE id = ?)
+ 		  AND deleted_at IS NULL
+-		  AND status = 'active'
+-	`), branch, now, sessionID)
+-	return err
++		  AND status = 'active'` + scope
++	args := []interface{}{branch, time.Now().UTC(), sessionID}
++	args = append(args, scopeArgs...)
++	result, err := tx.ExecContext(ctx, r.db.Rebind(query), args...)
++	if err != nil {
++		return err
++	}
++	rows, err := result.RowsAffected()
++	if err != nil {
++		return err
++	}
++	if rows == 0 {
++		return fmt.Errorf("environment-repository branch mutation fenced: no active row")
++	}
++	return tx.Commit()
+ }
+ 
+ // UpdateTaskSessionWorktreeBranchByRepository updates the cached worktree_branch
+@@ -2161,32 +2190,18 @@ func (r *Repository) UpdateTaskSessionWorktreeBranch(ctx context.Context, sessio
+ // live git operations in multi-repo tasks so sibling repositories keep their
+ // branch snapshots.
+ func (r *Repository) UpdateTaskSessionWorktreeBranchByRepository(ctx context.Context, sessionID, repositoryID, branch string) error {
+-	now := time.Now().UTC()
+-	_, err := r.db.ExecContext(ctx, r.db.Rebind(`
+-		UPDATE task_environment_repos
+-		SET worktree_branch = ?, updated_at = ?
+-		WHERE task_environment_id = (SELECT task_environment_id FROM task_sessions WHERE id = ?)
+-		  AND repository_id = ?
+-		  AND deleted_at IS NULL
+-		  AND status = 'active'
+-	`), branch, now, sessionID, repositoryID)
+-	return err
++	return r.updateTaskSessionWorktreeBranch(
++		ctx, sessionID, ` AND repository_id = ?`, []interface{}{repositoryID}, branch,
++	)
+ }
+ 
+ // UpdateTaskSessionWorktreeBranchByWorktree updates exactly one worktree row.
+ // This is the repository-scoped variant needed when a task attaches multiple
+ // branches from the same repository.
+ func (r *Repository) UpdateTaskSessionWorktreeBranchByWorktree(ctx context.Context, sessionID, worktreeID, branch string) error {
+-	now := time.Now().UTC()
+-	_, err := r.db.ExecContext(ctx, r.db.Rebind(`
+-		UPDATE task_environment_repos
+-		SET worktree_branch = ?, updated_at = ?
+-		WHERE task_environment_id = (SELECT task_environment_id FROM task_sessions WHERE id = ?)
+-		  AND worktree_id = ?
+-		  AND deleted_at IS NULL
+-		  AND status = 'active'
+-	`), branch, now, sessionID, worktreeID)
+-	return err
++	return r.updateTaskSessionWorktreeBranch(
++		ctx, sessionID, ` AND worktree_id = ?`, []interface{}{worktreeID}, branch,
++	)
+ }
+ 
+ // ListWorktreesBySessionIDs returns the active environment-repository rows for
+diff --git a/apps/backend/internal/task/repository/sqlite/task_cleanup_barrier.go b/apps/backend/internal/task/repository/sqlite/task_cleanup_barrier.go
+index dcd96e62a4d38dc7d2383f352e40d6bbe3049688..7ef761ef9f1470de5d5743771f72985e85e66cf8 100644
+--- a/apps/backend/internal/task/repository/sqlite/task_cleanup_barrier.go
++++ b/apps/backend/internal/task/repository/sqlite/task_cleanup_barrier.go
+@@ -2,6 +2,7 @@ package sqlite
+ 
+ import (
+ 	"context"
++	"database/sql"
+ 	"fmt"
+ 
+ 	"github.com/jmoiron/sqlx"
+@@ -19,13 +20,8 @@ import (
+ // repoerrors.ErrTaskCleanupInProgress when a prepared/pending/running cleanup
+ // barrier exists for the task.
+ func (r *Repository) taskCleanupBarrierLocked(ctx context.Context, tx *sqlx.Tx, taskID string) error {
+-	if dialect.IsPostgres(r.db.DriverName()) {
+-		var lockedTaskID string
+-		if err := tx.QueryRowContext(ctx, r.db.Rebind(
+-			`SELECT id FROM tasks WHERE id = ? FOR UPDATE`,
+-		), taskID).Scan(&lockedTaskID); err != nil {
+-			return fmt.Errorf("lock task for creation barrier: %w", err)
+-		}
++	if err := r.lockTaskCleanupDomainLocked(ctx, tx, taskID); err != nil {
++		return err
+ 	}
+ 
+ 	var active bool
+@@ -47,3 +43,26 @@ func (r *Repository) taskCleanupBarrierLocked(ctx context.Context, tx *sqlx.Tx,
+ 	}
+ 	return nil
+ }
++
++// lockTaskCleanupDomainLocked is the shared linearization point for both
++// ownership mutations and cleanup-barrier reservation. PostgreSQL takes the
++// exact task row FOR UPDATE; SQLite executes inside the process-wide single
++// writer transaction, so the same query validates the task identity while the
++// writer connection remains exclusively held.
++func (r *Repository) lockTaskCleanupDomainLocked(ctx context.Context, tx *sqlx.Tx, taskID string) error {
++	query := `SELECT id FROM tasks WHERE id = ?`
++	if dialect.IsPostgres(r.db.DriverName()) {
++		query += ` FOR UPDATE`
++	}
++	var lockedTaskID string
++	if err := tx.QueryRowContext(ctx, r.db.Rebind(query), taskID).Scan(&lockedTaskID); err != nil {
++		if err == sql.ErrNoRows {
++			return fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
++		}
++		return fmt.Errorf("lock task cleanup domain: %w", err)
++	}
++	if lockedTaskID != taskID {
++		return fmt.Errorf("lock task cleanup domain: identity drift")
++	}
++	return nil
++}
+diff --git a/apps/backend/internal/task/repository/sqlite/task_cleanup_barrier_postgres_test.go b/apps/backend/internal/task/repository/sqlite/task_cleanup_barrier_postgres_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..650816e28704f2fe22ab089cab36e809aec41e4d
+--- /dev/null
++++ b/apps/backend/internal/task/repository/sqlite/task_cleanup_barrier_postgres_test.go
+@@ -0,0 +1,171 @@
++package sqlite
++
++import (
++	"context"
++	"errors"
++	"runtime"
++	"testing"
++	"time"
++
++	"github.com/jmoiron/sqlx"
++
++	"github.com/kandev/kandev/internal/task/models"
++	"github.com/kandev/kandev/internal/task/repository/repoerrors"
++	"github.com/kandev/kandev/internal/testutil"
++)
++
++func TestPostgresCleanupReservationAndEnvironmentMutationShareTaskRowLock(t *testing.T) {
++	dsn := testutil.PostgresDSNFromEnv(t)
++	root := testutil.OpenIsolatedPostgres(t, dsn)
++	if _, err := NewWithDB(root, root, nil); err != nil {
++		t.Fatalf("init postgres schema: %v", err)
++	}
++	var schema string
++	if err := root.Get(&schema, `SELECT current_schema()`); err != nil {
++		t.Fatal(err)
++	}
++	mutationDB := openPostgresSchemaHandle(t, dsn, schema)
++	reservationDB := openPostgresSchemaHandle(t, dsn, schema)
++	mutationRepo := &Repository{db: mutationDB, ro: mutationDB}
++	reservationRepo := &Repository{db: reservationDB, ro: reservationDB}
++	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
++	defer cancel()
++
++	seedPostgresBarrierEnvironment(t, root, "first")
++	mutationTx, err := mutationDB.BeginTxx(ctx, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer func() { _ = mutationTx.Rollback() }()
++	if err := mutationRepo.mutableEnvironmentRepoByIDLocked(ctx, mutationTx, "repo-row-first"); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := mutationTx.Exec(`
++		UPDATE task_environment_repos
++		SET worktree_path = '/tmp/mutation-winner'
++		WHERE id = 'repo-row-first'
++	`); err != nil {
++		t.Fatal(err)
++	}
++	var reservationPID int
++	if err := reservationDB.Get(&reservationPID, `SELECT pg_backend_pid()`); err != nil {
++		t.Fatal(err)
++	}
++	started := make(chan struct{})
++	reserved := make(chan error, 1)
++	go func() {
++		close(started)
++		reserved <- reservationRepo.CreateTaskResourceCleanupJob(ctx, &models.TaskResourceCleanupJob{
++			ID: "job-first", OperationID: "archive:first", TaskID: "task-first",
++			Trigger: models.TaskResourceCleanupTriggerArchive,
++			State:   models.TaskResourceCleanupStatePrepared,
++		})
++	}()
++	<-started
++	waitForPostgresBlock(t, root, reservationPID)
++	if err := mutationTx.Commit(); err != nil {
++		t.Fatal(err)
++	}
++	if err := <-reserved; err != nil {
++		t.Fatalf("reservation after mutation commit: %v", err)
++	}
++	var path string
++	if err := root.Get(&path, `SELECT worktree_path FROM task_environment_repos WHERE id = 'repo-row-first'`); err != nil {
++		t.Fatal(err)
++	}
++	if path != "/tmp/mutation-winner" {
++		t.Fatalf("winning mutation path = %q", path)
++	}
++
++	seedPostgresBarrierEnvironment(t, root, "reverse")
++	reverseStarted := make(chan struct{})
++	reverseReserved := make(chan error, 1)
++	go func() {
++		close(reverseStarted)
++		reverseReserved <- reservationRepo.CreateTaskResourceCleanupJob(ctx, &models.TaskResourceCleanupJob{
++			ID: "job-reverse", OperationID: "archive:reverse", TaskID: "task-reverse",
++			Trigger: models.TaskResourceCleanupTriggerArchive,
++			State:   models.TaskResourceCleanupStatePrepared,
++		})
++	}()
++	<-reverseStarted
++	if err := <-reverseReserved; err != nil {
++		t.Fatalf("reverse reservation: %v", err)
++	}
++	update := &models.TaskEnvironmentRepo{
++		ID: "repo-row-reverse", RepositoryID: "repository-reverse",
++		WorktreeID: "worktree-reverse", WorktreePath: "/tmp/late-mutation",
++		WorktreeBranch: "feature/late", Status: "active",
++	}
++	if err := mutationRepo.UpdateTaskEnvironmentRepo(ctx, update); !errors.Is(err, repoerrors.ErrTaskCleanupInProgress) {
++		t.Fatalf("mutation after reservation error = %v, want ErrTaskCleanupInProgress", err)
++	}
++	if err := root.Get(&path, `SELECT worktree_path FROM task_environment_repos WHERE id = 'repo-row-reverse'`); err != nil {
++		t.Fatal(err)
++	}
++	if path != "/tmp/reverse" {
++		t.Fatalf("late mutation changed reverse path to %q", path)
++	}
++}
++
++func openPostgresSchemaHandle(t *testing.T, dsn, schema string) *sqlx.DB {
++	t.Helper()
++	database, err := sqlx.Open("pgx", dsn)
++	if err != nil {
++		t.Fatal(err)
++	}
++	database.SetMaxOpenConns(1)
++	database.SetMaxIdleConns(1)
++	t.Cleanup(func() { _ = database.Close() })
++	if _, err := database.Exec(`SET search_path TO ` + schema); err != nil {
++		t.Fatal(err)
++	}
++	return database
++}
++
++func seedPostgresBarrierEnvironment(t *testing.T, database *sqlx.DB, suffix string) {
++	t.Helper()
++	now := time.Now().UTC()
++	if _, err := database.Exec(database.Rebind(`
++		INSERT INTO tasks (id, title, created_at, updated_at)
++		VALUES (?, ?, ?, ?)
++	`), "task-"+suffix, "Task "+suffix, now, now); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := database.Exec(database.Rebind(`
++		INSERT INTO task_environments (
++			id, task_id, executor_type, status, created_at, updated_at
++		) VALUES (?, ?, 'worktree', 'ready', ?, ?)
++	`), "environment-"+suffix, "task-"+suffix, now, now); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := database.Exec(database.Rebind(`
++		INSERT INTO task_environment_repos (
++			id, task_environment_id, repository_id, worktree_id,
++			worktree_path, worktree_branch, status, created_at, updated_at
++		) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
++	`), "repo-row-"+suffix, "environment-"+suffix, "repository-"+suffix,
++		"worktree-"+suffix, "/tmp/"+suffix, "feature/"+suffix, now, now); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func waitForPostgresBlock(t *testing.T, observer *sqlx.DB, backendPID int) {
++	t.Helper()
++	deadline := time.Now().Add(10 * time.Second)
++	for {
++		var blockers int
++		if err := observer.Get(&blockers, observer.Rebind(`
++			SELECT COALESCE(cardinality(pg_blocking_pids(?)), 0)
++		`), backendPID); err != nil {
++			t.Fatal(err)
++		}
++		if blockers > 0 {
++			return
++		}
++		if time.Now().After(deadline) {
++			t.Fatal("cleanup reservation did not block on the mutation task-row lock")
++		}
++		runtime.Gosched()
++	}
++}
+diff --git a/apps/backend/internal/task/repository/sqlite/task_cleanup_barrier_test.go b/apps/backend/internal/task/repository/sqlite/task_cleanup_barrier_test.go
+index cae9d19137ee8f7ab3cc134308674119a7c40bdb..bad64bc26056e3535694f64c3ce2dd30d3e92ab0 100644
+--- a/apps/backend/internal/task/repository/sqlite/task_cleanup_barrier_test.go
++++ b/apps/backend/internal/task/repository/sqlite/task_cleanup_barrier_test.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"errors"
+ 	"path/filepath"
++	"runtime"
+ 	"testing"
+ 	"time"
+ 
+@@ -128,6 +129,186 @@ func TestTaskCleanupBarrier_AllowsCreationWithoutBarrier(t *testing.T) {
+ 	}
+ }
+ 
++func TestTaskCleanupBarrierRejectsEnvironmentRepoMutationAndBranchUpdate(t *testing.T) {
++	repo := newBarrierTestRepo(t)
++	ctx := context.Background()
++	seedBarrierTask(t, repo, "task-barrier-mutation")
++	if err := repo.CreateTaskEnvironment(ctx, &models.TaskEnvironment{
++		ID: "env-barrier-mutation", TaskID: "task-barrier-mutation",
++		ExecutorType: "worktree", WorkspacePath: "/tmp", Status: models.TaskEnvironmentStatusReady,
++		Repos: []*models.TaskEnvironmentRepo{{
++			ID: "repo-row-barrier-mutation", RepositoryID: "repository",
++			WorktreeID: "worktree", WorktreePath: "/tmp/worktree",
++			WorktreeBranch: "feature/original", Status: "active",
++		}},
++	}); err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.CreateTaskSession(ctx, &models.TaskSession{
++		ID: "session-barrier-mutation", TaskID: "task-barrier-mutation",
++		TaskEnvironmentID: "env-barrier-mutation", State: models.TaskSessionStateCreated,
++	}); err != nil {
++		t.Fatal(err)
++	}
++	reserveBarrier(t, repo, "task-barrier-mutation", "op-mutation")
++
++	envRepo := &models.TaskEnvironmentRepo{
++		ID: "repo-row-barrier-mutation", BranchSlug: "changed",
++		WorktreeID: "worktree", WorktreePath: "/tmp/changed",
++		WorktreeBranch: "feature/changed", Status: "active",
++	}
++	wantUpdatedAt := envRepo.UpdatedAt
++	for name, mutate := range map[string]func() error{
++		"update": func() error { return repo.UpdateTaskEnvironmentRepo(ctx, envRepo) },
++		"delete": func() error { return repo.DeleteTaskEnvironmentRepo(ctx, envRepo.ID) },
++		"delete by environment": func() error {
++			return repo.DeleteTaskEnvironmentReposByEnv(ctx, "env-barrier-mutation")
++		},
++		"branch": func() error {
++			return repo.UpdateTaskSessionWorktreeBranch(ctx, "session-barrier-mutation", "feature/changed")
++		},
++	} {
++		t.Run(name, func(t *testing.T) {
++			if err := mutate(); !errors.Is(err, repoerrors.ErrTaskCleanupInProgress) {
++				t.Fatalf("mutation error = %v, want ErrTaskCleanupInProgress", err)
++			}
++		})
++	}
++	if !envRepo.UpdatedAt.Equal(wantUpdatedAt) {
++		t.Fatalf("fenced update changed caller generation: got %v want %v", envRepo.UpdatedAt, wantUpdatedAt)
++	}
++	var path, branch, status string
++	if err := repo.db.QueryRow(`
++		SELECT worktree_path, worktree_branch, status
++		FROM task_environment_repos WHERE id = 'repo-row-barrier-mutation'
++	`).Scan(&path, &branch, &status); err != nil {
++		t.Fatal(err)
++	}
++	if path != "/tmp/worktree" || branch != "feature/original" || status != "active" {
++		t.Fatalf("barrier mutation changed row: path=%q branch=%q status=%q", path, branch, status)
++	}
++}
++
++func TestEnvironmentRepoOrphanRejectsMutationAndEnvironmentIDReuse(t *testing.T) {
++	repo := newBarrierTestRepo(t)
++	ctx := context.Background()
++	seedBarrierTask(t, repo, "task-orphan-owner")
++	if err := repo.CreateTaskEnvironment(ctx, &models.TaskEnvironment{
++		ID: "env-durable-orphan", TaskID: "task-orphan-owner",
++		ExecutorType: "worktree", WorkspacePath: "/tmp", Status: models.TaskEnvironmentStatusReady,
++		Repos: []*models.TaskEnvironmentRepo{{
++			ID: "repo-row-durable-orphan", RepositoryID: "repository",
++			WorktreeID: "worktree", WorktreePath: "/tmp/worktree",
++			WorktreeBranch: "feature/original", Status: "active",
++		}},
++	}); err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.DeleteTask(ctx, "task-orphan-owner"); err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.UpdateTaskEnvironmentRepo(ctx, &models.TaskEnvironmentRepo{
++		ID: "repo-row-durable-orphan", WorktreeID: "worktree", WorktreePath: "/tmp/changed",
++		Status: "active",
++	}); err == nil {
++		t.Fatal("orphan update succeeded")
++	}
++	if err := repo.DeleteTaskEnvironmentRepo(ctx, "repo-row-durable-orphan"); err == nil {
++		t.Fatal("orphan delete succeeded")
++	}
++	seedBarrierTask(t, repo, "task-reuse-attempt")
++	err := repo.CreateTaskEnvironment(ctx, &models.TaskEnvironment{
++		ID: "env-durable-orphan", TaskID: "task-reuse-attempt",
++		ExecutorType: "worktree", WorkspacePath: "/tmp/reused", Status: models.TaskEnvironmentStatusReady,
++	})
++	if err == nil {
++		t.Fatal("environment ID with durable tombstone was reused")
++	}
++}
++
++func TestSQLiteCleanupReservationAndEnvironmentMutationShareWriterOrder(t *testing.T) {
++	repo := newBarrierTestRepo(t)
++	ctx := context.Background()
++	seedBarrierTask(t, repo, "task-sqlite-linearization")
++	if err := repo.CreateTaskEnvironment(ctx, &models.TaskEnvironment{
++		ID: "env-sqlite-linearization", TaskID: "task-sqlite-linearization",
++		ExecutorType: "worktree", WorkspacePath: "/tmp", Status: models.TaskEnvironmentStatusReady,
++		Repos: []*models.TaskEnvironmentRepo{{
++			ID: "repo-row-sqlite-linearization", RepositoryID: "repository",
++			WorktreeID: "worktree", WorktreePath: "/tmp/original",
++			WorktreeBranch: "feature/original", Status: "active",
++		}},
++	}); err != nil {
++		t.Fatal(err)
++	}
++
++	mutationTx, err := repo.db.BeginTxx(ctx, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer func() { _ = mutationTx.Rollback() }()
++	if err := repo.mutableEnvironmentRepoByIDLocked(ctx, mutationTx, "repo-row-sqlite-linearization"); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := mutationTx.Exec(`
++		UPDATE task_environment_repos
++		SET worktree_path = '/tmp/mutation-winner'
++		WHERE id = 'repo-row-sqlite-linearization'
++	`); err != nil {
++		t.Fatal(err)
++	}
++
++	waitsBefore := repo.db.Stats().WaitCount
++	started := make(chan struct{})
++	reserved := make(chan error, 1)
++	go func() {
++		close(started)
++		reserved <- repo.CreateTaskResourceCleanupJob(ctx, &models.TaskResourceCleanupJob{
++			ID: "job-sqlite-linearization", OperationID: "archive:sqlite-linearization",
++			TaskID: "task-sqlite-linearization", Trigger: models.TaskResourceCleanupTriggerArchive,
++			State: models.TaskResourceCleanupStatePrepared,
++		})
++	}()
++	<-started
++	waitForSQLiteWriterWait(t, repo.db, waitsBefore)
++	if err := mutationTx.Commit(); err != nil {
++		t.Fatal(err)
++	}
++	if err := <-reserved; err != nil {
++		t.Fatalf("reservation after mutation commit: %v", err)
++	}
++
++	update := &models.TaskEnvironmentRepo{
++		ID: "repo-row-sqlite-linearization", RepositoryID: "repository",
++		WorktreeID: "worktree", WorktreePath: "/tmp/late-mutation",
++		WorktreeBranch: "feature/late", Status: "active",
++	}
++	if err := repo.UpdateTaskEnvironmentRepo(ctx, update); !errors.Is(err, repoerrors.ErrTaskCleanupInProgress) {
++		t.Fatalf("mutation after reservation error = %v, want ErrTaskCleanupInProgress", err)
++	}
++	var path string
++	if err := repo.db.Get(&path, `
++		SELECT worktree_path FROM task_environment_repos
++		WHERE id = 'repo-row-sqlite-linearization'
++	`); err != nil {
++		t.Fatal(err)
++	}
++	if path != "/tmp/mutation-winner" {
++		t.Fatalf("late mutation changed path to %q", path)
++	}
++}
++
++func waitForSQLiteWriterWait(t *testing.T, database *sqlx.DB, before int64) {
++	t.Helper()
++	deadline := time.Now().Add(5 * time.Second)
++	for database.Stats().WaitCount <= before {
++		if time.Now().After(deadline) {
++			t.Fatal("cleanup reservation did not wait for the SQLite writer transaction")
++		}
++		runtime.Gosched()
++	}
++}
++
+ // TestTaskCleanupBarrier_CommittedCreationIsIncludedInInventory proves the
+ // inverse race ordering: a session/worktree that commits before the barrier
+ // is reserved remains visible to the later inventory.
+diff --git a/apps/backend/internal/task/repository/sqlite/task_environment.go b/apps/backend/internal/task/repository/sqlite/task_environment.go
+index 2ffed1f582927f5d41b3944a77bc85e2a102abe7..86b17e71ecdc02ec6937f5eb52a4fa460ff030f6 100644
+--- a/apps/backend/internal/task/repository/sqlite/task_environment.go
++++ b/apps/backend/internal/task/repository/sqlite/task_environment.go
+@@ -40,6 +40,16 @@ func (r *Repository) CreateTaskEnvironment(ctx context.Context, env *models.Task
+ 	if err := r.taskCleanupBarrierLocked(ctx, tx, env.TaskID); err != nil {
+ 		return err
+ 	}
++	var residual bool
++	if err := tx.QueryRowContext(ctx, r.db.Rebind(`
++		SELECT EXISTS (
++			SELECT 1 FROM task_environment_repos WHERE task_environment_id = ?
++		)`), env.ID).Scan(&residual); err != nil {
++		return fmt.Errorf("check residual environment-repository authority: %w", err)
++	}
++	if residual {
++		return fmt.Errorf("create task environment: id %s has durable worktree tombstones", env.ID)
++	}
+ 
+ 	if _, err := tx.ExecContext(ctx, r.db.Rebind(`
+ 		INSERT INTO task_environments (
+@@ -194,8 +204,8 @@ func (r *Repository) TransferTaskEnvironmentToTask(ctx context.Context, envID, t
+ 	return nil
+ }
+ 
+-// DeleteTaskEnvironment deletes a task environment by ID.
+-// Per-repo rows are removed via ON DELETE CASCADE.
++// DeleteTaskEnvironment deletes the logical task environment. Durable
++// environment-repository rows remain until exact release CAS tombstones them.
+ func (r *Repository) DeleteTaskEnvironment(ctx context.Context, id string) error {
+ 	result, err := r.db.ExecContext(ctx, r.db.Rebind(`
+ 		DELETE FROM task_environments WHERE id = ?
+@@ -343,9 +353,16 @@ func (r *Repository) ListTaskEnvironmentRepos(ctx context.Context, envID string)
+ 
+ // UpdateTaskEnvironmentRepo updates an existing per-repo row.
+ func (r *Repository) UpdateTaskEnvironmentRepo(ctx context.Context, repo *models.TaskEnvironmentRepo) error {
+-	repo.UpdatedAt = time.Now().UTC()
+-
+-	result, err := r.db.ExecContext(ctx, r.db.Rebind(`
++	updatedAt := time.Now().UTC()
++	tx, err := r.db.BeginTxx(ctx, nil)
++	if err != nil {
++		return err
++	}
++	defer func() { _ = tx.Rollback() }()
++	if err := r.mutableEnvironmentRepoByIDLocked(ctx, tx, repo.ID); err != nil {
++		return err
++	}
++	result, err := tx.ExecContext(ctx, r.db.Rebind(`
+ 		UPDATE task_environment_repos SET
+ 			branch_slug = ?,
+ 			worktree_id = ?, worktree_path = ?, worktree_branch = ?,
+@@ -355,7 +372,7 @@ func (r *Repository) UpdateTaskEnvironmentRepo(ctx context.Context, repo *models
+ 	`),
+ 		repo.BranchSlug, repo.WorktreeID, repo.WorktreePath, repo.WorktreeBranch,
+ 		repo.Position, repo.ErrorMessage, repo.Status,
+-		repo.MergedAt, repo.DeletedAt, repo.UpdatedAt,
++		repo.MergedAt, repo.DeletedAt, updatedAt,
+ 		repo.ID,
+ 	)
+ 	if err != nil {
+@@ -365,12 +382,24 @@ func (r *Repository) UpdateTaskEnvironmentRepo(ctx context.Context, repo *models
+ 	if rows == 0 {
+ 		return fmt.Errorf("task environment repo not found: %s", repo.ID)
+ 	}
++	if err := tx.Commit(); err != nil {
++		return err
++	}
++	repo.UpdatedAt = updatedAt
+ 	return nil
+ }
+ 
+ // DeleteTaskEnvironmentRepo removes a single per-repo row.
+ func (r *Repository) DeleteTaskEnvironmentRepo(ctx context.Context, id string) error {
+-	result, err := r.db.ExecContext(ctx, r.db.Rebind(`
++	tx, err := r.db.BeginTxx(ctx, nil)
++	if err != nil {
++		return err
++	}
++	defer func() { _ = tx.Rollback() }()
++	if err := r.mutableEnvironmentRepoByIDLocked(ctx, tx, id); err != nil {
++		return err
++	}
++	result, err := tx.ExecContext(ctx, r.db.Rebind(`
+ 		DELETE FROM task_environment_repos WHERE id = ?
+ 	`), id)
+ 	if err != nil {
+@@ -380,13 +409,23 @@ func (r *Repository) DeleteTaskEnvironmentRepo(ctx context.Context, id string) e
+ 	if rows == 0 {
+ 		return fmt.Errorf("task environment repo not found: %s", id)
+ 	}
+-	return nil
++	return tx.Commit()
+ }
+ 
+ // DeleteTaskEnvironmentReposByEnv removes all per-repo rows for an environment.
+ func (r *Repository) DeleteTaskEnvironmentReposByEnv(ctx context.Context, envID string) error {
+-	_, err := r.db.ExecContext(ctx, r.db.Rebind(`
++	tx, err := r.db.BeginTxx(ctx, nil)
++	if err != nil {
++		return err
++	}
++	defer func() { _ = tx.Rollback() }()
++	if err := r.mutableEnvironmentReposByEnvironmentLocked(ctx, tx, envID); err != nil {
++		return err
++	}
++	if _, err := tx.ExecContext(ctx, r.db.Rebind(`
+ 		DELETE FROM task_environment_repos WHERE task_environment_id = ?
+-	`), envID)
+-	return err
++	`), envID); err != nil {
++		return err
++	}
++	return tx.Commit()
+ }
+diff --git a/apps/backend/internal/task/repository/sqlite/task_environment_repo_fence.go b/apps/backend/internal/task/repository/sqlite/task_environment_repo_fence.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..77aabbf5645739f73f53a2971fffdbafd34d7524
+--- /dev/null
++++ b/apps/backend/internal/task/repository/sqlite/task_environment_repo_fence.go
+@@ -0,0 +1,71 @@
++package sqlite
++
++import (
++	"context"
++	"database/sql"
++	"fmt"
++
++	"github.com/jmoiron/sqlx"
++)
++
++func (r *Repository) mutableEnvironmentRepoByIDLocked(
++	ctx context.Context,
++	tx *sqlx.Tx,
++	repoID string,
++) error {
++	return r.mutableEnvironmentRepoTaskLocked(ctx, tx, `ter.id = ?`, repoID)
++}
++
++func (r *Repository) mutableEnvironmentReposByEnvironmentLocked(
++	ctx context.Context,
++	tx *sqlx.Tx,
++	environmentID string,
++) error {
++	var taskID string
++	query := `
++		SELECT task.id
++		FROM task_environments environment
++		INNER JOIN tasks task ON task.id = environment.task_id
++		WHERE environment.id = ?`
++	if err := tx.QueryRowContext(ctx, r.db.Rebind(query), environmentID).Scan(&taskID); err != nil {
++		if err == sql.ErrNoRows {
++			return fmt.Errorf("environment-repository mutation fenced: logical parent is absent")
++		}
++		return fmt.Errorf("resolve environment-repository mutation owner: %w", err)
++	}
++	return r.taskCleanupBarrierLocked(ctx, tx, taskID)
++}
++
++func (r *Repository) mutableEnvironmentReposBySessionLocked(
++	ctx context.Context,
++	tx *sqlx.Tx,
++	sessionID string,
++) error {
++	return r.mutableEnvironmentRepoTaskLocked(ctx, tx, `EXISTS (
++		SELECT 1 FROM task_sessions session
++		WHERE session.id = ? AND session.task_environment_id = ter.task_environment_id
++	)`, sessionID)
++}
++
++func (r *Repository) mutableEnvironmentRepoTaskLocked(
++	ctx context.Context,
++	tx *sqlx.Tx,
++	predicate string,
++	argument string,
++) error {
++	var taskID string
++	query := `
++		SELECT task.id
++		FROM task_environment_repos ter
++		INNER JOIN task_environments environment ON environment.id = ter.task_environment_id
++		INNER JOIN tasks task ON task.id = environment.task_id
++		WHERE ` + predicate + `
++		LIMIT 1`
++	if err := tx.QueryRowContext(ctx, r.db.Rebind(query), argument).Scan(&taskID); err != nil {
++		if err == sql.ErrNoRows {
++			return fmt.Errorf("environment-repository mutation fenced: logical parent is absent")
++		}
++		return fmt.Errorf("resolve environment-repository mutation owner: %w", err)
++	}
++	return r.taskCleanupBarrierLocked(ctx, tx, taskID)
++}
+diff --git a/apps/backend/internal/task/repository/sqlite/workspace_test.go b/apps/backend/internal/task/repository/sqlite/workspace_test.go
+index 67aaaed544441715141e1cd4d17072727d651517..6954bee1d2face2dff3d4821361e4fa40e3bd2bc 100644
+--- a/apps/backend/internal/task/repository/sqlite/workspace_test.go
++++ b/apps/backend/internal/task/repository/sqlite/workspace_test.go
+@@ -320,7 +320,6 @@ func assertNoWorkspaceCascadeDependents(t *testing.T, repo *Repository) {
+ 		"task_repositories",
+ 		"task_sessions",
+ 		"task_environments",
+-		"task_environment_repos",
+ 		"task_session_turns",
+ 		"task_session_messages",
+ 		"task_plans",
+@@ -328,6 +327,20 @@ func assertNoWorkspaceCascadeDependents(t *testing.T, repo *Repository) {
+ 	} {
+ 		assertTableRowCount(t, repo, table, 0)
+ 	}
++	// Environment-repository rows are durable physical-reference authority.
++	// The logical workspace cascade must not erase the exact generation before
++	// the cleanup workflow releases it through its fourteen-column CAS.
++	assertTableRowCount(t, repo, "task_environment_repos", 1)
++	var id, environmentID, status string
++	if err := repo.ro.QueryRow(`
++		SELECT id, task_environment_id, status
++		FROM task_environment_repos
++	`).Scan(&id, &environmentID, &status); err != nil {
++		t.Fatalf("read durable workspace cleanup authority: %v", err)
++	}
++	if id != "env-repo-delete" || environmentID != "env-delete" || status != "active" {
++		t.Fatalf("durable workspace cleanup authority = (%q, %q, %q)", id, environmentID, status)
++	}
+ }
+ 
+ func assertTableRowCount(t *testing.T, repo *Repository, table string, want int) {
+diff --git a/apps/backend/internal/task/repository/sqlite/worktree_ownership_migration.go b/apps/backend/internal/task/repository/sqlite/worktree_ownership_migration.go
+index c08d75b06cd205d2f8e50f72c87425c660cb24b9..9a629bdde3792e879e010c7d6cd1008d6eb057cc 100644
+--- a/apps/backend/internal/task/repository/sqlite/worktree_ownership_migration.go
++++ b/apps/backend/internal/task/repository/sqlite/worktree_ownership_migration.go
+@@ -54,12 +54,11 @@ func finalTaskEnvironmentsDDL(tableName string) string {
+ }
+ 
+ // finalTaskEnvironmentReposDDL is the task_environment_repos shape with the
+-// physical-worktree lifecycle columns (status, merged_at, deleted_at).
+-// refTable is the environment table the FK targets (the shadow name during
+-// the cutover). SQLite rewrites FK references when the parent table is
+-// renamed; PostgreSQL binds by OID, so the shadow constraint keeps its
+-// shadow-scoped name and is renamed after the swap.
+-func finalTaskEnvironmentReposDDL(tableName, refTable string) string {
++// physical-worktree lifecycle columns (status, merged_at, deleted_at). The
++// environment ID is an immutable lifecycle binding, not an ON DELETE child:
++// the row must survive task/environment deletion until physical cleanup can
++// bind and tombstone its exact fourteen-column generation.
++func finalTaskEnvironmentReposDDL(tableName, _ string) string {
+ 	return fmt.Sprintf(`
+ 		CREATE TABLE IF NOT EXISTS %s (
+ 			id TEXT PRIMARY KEY,
+@@ -76,9 +75,8 @@ func finalTaskEnvironmentReposDDL(tableName, refTable string) string {
+ 			updated_at TIMESTAMP NOT NULL,
+ 			merged_at TIMESTAMP,
+ 			deleted_at TIMESTAMP,
+-			FOREIGN KEY (task_environment_id) REFERENCES %s(id) ON DELETE CASCADE,
+ 			UNIQUE(task_environment_id, repository_id, branch_slug)
+-		)`, tableName, refTable)
++		)`, tableName)
+ }
+ 
+ // normalizeTaskWorktreeOwnership performs the one-time cutover to the
+diff --git a/apps/backend/internal/task/repository/sqlite/worktree_ownership_postgres_test.go b/apps/backend/internal/task/repository/sqlite/worktree_ownership_postgres_test.go
+index 4d5e8f6a2ac6543facad7b2a1adb93929fbdcde4..41751c23450091ce746db519c60f4b7cf6aeb626 100644
+--- a/apps/backend/internal/task/repository/sqlite/worktree_ownership_postgres_test.go
++++ b/apps/backend/internal/task/repository/sqlite/worktree_ownership_postgres_test.go
+@@ -324,8 +324,8 @@ func TestCutoverPostgres_FreshSchemaIsFinal(t *testing.T) {
+ 	if tableCount != 0 {
+ 		t.Fatal("fresh postgres database must not contain task_session_worktrees")
+ 	}
+-	// The environment FK must reference tasks and the repos FK must
+-	// reference task_environments after the swap.
++	// The physical-reference row must not be an ON DELETE child of the logical
++	// task environment; it survives until exact release CAS tombstones it.
+ 	var fkCount int
+ 	if err := db.Get(&fkCount, `
+ 		SELECT COUNT(*) FROM information_schema.table_constraints tc
+@@ -339,7 +339,7 @@ func TestCutoverPostgres_FreshSchemaIsFinal(t *testing.T) {
+ 		  AND tc.table_schema = current_schema()`); err != nil {
+ 		t.Fatalf("count env-repo FK: %v", err)
+ 	}
+-	if fkCount != 1 {
+-		t.Fatalf("task_environment_repos FK to task_environments missing: %d", fkCount)
++	if fkCount != 0 {
++		t.Fatalf("task_environment_repos lifecycle FK count = %d, want 0", fkCount)
+ 	}
+ }
+diff --git a/apps/backend/internal/task/repository/sqlite/worktree_ownership_targets.go b/apps/backend/internal/task/repository/sqlite/worktree_ownership_targets.go
+index 371816c6a4789e414f346472e80191f3870682f6..c698960d50e2ab56cca29fbc5fbe9d08e443b2cf 100644
+--- a/apps/backend/internal/task/repository/sqlite/worktree_ownership_targets.go
++++ b/apps/backend/internal/task/repository/sqlite/worktree_ownership_targets.go
+@@ -464,9 +464,9 @@ func (r *Repository) tableColumns(tx *sqlx.Tx, table string) (map[string]bool, e
+ 
+ // cutoverSwap drops the legacy schema and renames the shadow tables into
+ // place. The environment-repository table is dropped before the environment
+-// table because PostgreSQL refuses to drop a table referenced by a foreign
+-// key; SQLite has FK enforcement disabled for the swap. Postgres constraint
+-// names are restored to their canonical form afterwards.
++// table. Postgres constraint names are restored to their canonical form
++// afterwards; the durable environment-repository authority has no lifecycle
++// foreign key to rename.
+ func (r *Repository) cutoverSwap(tx *sqlx.Tx) error {
+ 	if _, err := tx.Exec(`DROP TABLE task_session_worktrees`); err != nil {
+ 		return fmt.Errorf("cutover: drop task_session_worktrees: %w", err)
+@@ -523,7 +523,6 @@ func (r *Repository) cutoverRenamePostgresConstraints(tx *sqlx.Tx) error {
+ 		constraintType   string
+ 	}{
+ 		{"task_environments", "task_environments_task_id_fkey", "task_environments_shadow_task_id_fkey", "f"},
+-		{tableTaskEnvRepos, "task_environment_repos_task_environment_id_fkey", "task_environment_repos_shadow_task_environment_id_fkey", "f"},
+ 		{tableTaskEnvRepos, "task_environment_repos_env_repo_branch_key", "task_environment_repos_shadow_task_environment_id_", "u"},
+ 	}
+ 	for _, rename := range renames {
+diff --git a/apps/backend/internal/task/repository/sqlite/worktree_reference_lifecycle_migration.go b/apps/backend/internal/task/repository/sqlite/worktree_reference_lifecycle_migration.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2633f83ca0a3683e7f815a4ddb0b6e9a340d9c7a
+--- /dev/null
++++ b/apps/backend/internal/task/repository/sqlite/worktree_reference_lifecycle_migration.go
+@@ -0,0 +1,180 @@
++package sqlite
++
++import (
++	"fmt"
++	"strings"
++
++	"github.com/kandev/kandev/internal/db/dialect"
++)
++
++// detachTaskEnvironmentRepoLifecycle makes task_environment_repos a durable
++// physical-reference authority. Its environment ID remains an immutable
++// identity field, but deleting the logical parent must not erase the exact
++// generation before physical cleanup can bind and tombstone it.
++func (r *Repository) detachTaskEnvironmentRepoLifecycle() error {
++	if dialect.IsPostgres(r.db.DriverName()) {
++		return r.detachTaskEnvironmentRepoLifecyclePostgres()
++	}
++	return r.detachTaskEnvironmentRepoLifecycleSQLite()
++}
++
++func (r *Repository) detachTaskEnvironmentRepoLifecyclePostgres() error {
++	rows, err := r.db.Query(`
++		SELECT con.conname, src.attname, target.relname, dst.attname
++		FROM pg_constraint con
++		JOIN pg_class source ON source.oid = con.conrelid
++		JOIN pg_namespace nsp ON nsp.oid = source.relnamespace
++		JOIN pg_class target ON target.oid = con.confrelid
++		JOIN LATERAL unnest(con.conkey) WITH ORDINALITY source_key(attnum, ord) ON true
++		JOIN LATERAL unnest(con.confkey) WITH ORDINALITY target_key(attnum, ord)
++			ON target_key.ord = source_key.ord
++		JOIN pg_attribute src ON src.attrelid = source.oid AND src.attnum = source_key.attnum
++		JOIN pg_attribute dst ON dst.attrelid = target.oid AND dst.attnum = target_key.attnum
++		WHERE source.relname = 'task_environment_repos'
++			AND nsp.nspname = current_schema()
++			AND con.contype = 'f'
++		ORDER BY con.conname, source_key.ord`)
++	if err != nil {
++		return fmt.Errorf("inspect task_environment_repos lifecycle foreign key: %w", err)
++	}
++	defer func() { _ = rows.Close() }()
++	var targetNames []string
++	seen := make(map[string]int)
++	for rows.Next() {
++		var name, sourceColumn, targetTable, targetColumn string
++		if err := rows.Scan(&name, &sourceColumn, &targetTable, &targetColumn); err != nil {
++			return fmt.Errorf("scan task_environment_repos lifecycle foreign key: %w", err)
++		}
++		seen[name]++
++		if sourceColumn == "task_environment_id" && targetTable == "task_environments" && targetColumn == "id" {
++			targetNames = append(targetNames, name)
++		}
++	}
++	if err := rows.Err(); err != nil {
++		return fmt.Errorf("inspect task_environment_repos lifecycle foreign key: %w", err)
++	}
++	for name, columns := range seen {
++		if columns != 1 || !containsString(targetNames, name) {
++			return fmt.Errorf("detach task_environment_repos lifecycle: unknown foreign key %q", name)
++		}
++	}
++	targetNames = uniqueStrings(targetNames)
++	if len(targetNames) > 1 {
++		return fmt.Errorf("detach task_environment_repos lifecycle: multiple lifecycle foreign keys")
++	}
++	if len(targetNames) == 0 {
++		return nil
++	}
++	name := strings.ReplaceAll(targetNames[0], `"`, `""`)
++	if _, err := r.db.Exec(`ALTER TABLE task_environment_repos DROP CONSTRAINT "` + name + `"`); err != nil {
++		return fmt.Errorf("detach task_environment_repos lifecycle foreign key: %w", err)
++	}
++	return nil
++}
++
++func (r *Repository) detachTaskEnvironmentRepoLifecycleSQLite() error {
++	attached, err := r.sqliteTaskEnvironmentRepoLifecycleAttached()
++	if err != nil || !attached {
++		return err
++	}
++	tx, err := r.db.Beginx()
++	if err != nil {
++		return fmt.Errorf("detach task_environment_repos lifecycle: begin: %w", err)
++	}
++	defer func() { _ = tx.Rollback() }()
++	statements := []string{
++		`CREATE TABLE task_environment_repos_detached (
++			id TEXT PRIMARY KEY,
++			task_environment_id TEXT NOT NULL,
++			repository_id TEXT NOT NULL,
++			branch_slug TEXT NOT NULL DEFAULT '',
++			worktree_id TEXT DEFAULT '',
++			worktree_path TEXT DEFAULT '',
++			worktree_branch TEXT DEFAULT '',
++			position INTEGER DEFAULT 0,
++			error_message TEXT DEFAULT '',
++			status TEXT NOT NULL DEFAULT 'active',
++			created_at TIMESTAMP NOT NULL,
++			updated_at TIMESTAMP NOT NULL,
++			merged_at TIMESTAMP,
++			deleted_at TIMESTAMP,
++			UNIQUE(task_environment_id, repository_id, branch_slug)
++		)`,
++		`INSERT INTO task_environment_repos_detached (
++			id, task_environment_id, repository_id, branch_slug,
++			worktree_id, worktree_path, worktree_branch,
++			position, error_message, status,
++			created_at, updated_at, merged_at, deleted_at
++		) SELECT
++			id, task_environment_id, repository_id, branch_slug,
++			worktree_id, worktree_path, worktree_branch,
++			position, error_message, status,
++			created_at, updated_at, merged_at, deleted_at
++		FROM task_environment_repos`,
++		`DROP TABLE task_environment_repos`,
++		`ALTER TABLE task_environment_repos_detached RENAME TO task_environment_repos`,
++		`CREATE INDEX IF NOT EXISTS idx_task_environment_repos_env_id
++			ON task_environment_repos(task_environment_id)`,
++		`CREATE INDEX IF NOT EXISTS idx_task_environment_repos_repository_id
++			ON task_environment_repos(repository_id)`,
++	}
++	for _, statement := range statements {
++		if _, err := tx.Exec(statement); err != nil {
++			return fmt.Errorf("detach task_environment_repos lifecycle: %w", err)
++		}
++	}
++	if err := tx.Commit(); err != nil {
++		return fmt.Errorf("detach task_environment_repos lifecycle: commit: %w", err)
++	}
++	return nil
++}
++
++func (r *Repository) sqliteTaskEnvironmentRepoLifecycleAttached() (bool, error) {
++	rows, err := r.db.Query(`PRAGMA foreign_key_list(task_environment_repos)`)
++	if err != nil {
++		return false, fmt.Errorf("inspect task_environment_repos foreign keys: %w", err)
++	}
++	defer func() { _ = rows.Close() }()
++	exact := 0
++	for rows.Next() {
++		var id, sequence int
++		var table, from, to, onUpdate, onDelete, match string
++		if err := rows.Scan(&id, &sequence, &table, &from, &to, &onUpdate, &onDelete, &match); err != nil {
++			return false, fmt.Errorf("scan task_environment_repos foreign key: %w", err)
++		}
++		if table == "task_environments" && from == "task_environment_id" && to == "id" {
++			exact++
++			continue
++		}
++		return false, fmt.Errorf("inspect task_environment_repos foreign keys: unknown %s.%s", table, from)
++	}
++	if err := rows.Err(); err != nil {
++		return false, fmt.Errorf("inspect task_environment_repos foreign keys: %w", err)
++	}
++	if exact > 1 {
++		return false, fmt.Errorf("inspect task_environment_repos foreign keys: multiple lifecycle keys")
++	}
++	return exact == 1, nil
++}
++
++func containsString(values []string, want string) bool {
++	for _, value := range values {
++		if value == want {
++			return true
++		}
++	}
++	return false
++}
++
++func uniqueStrings(values []string) []string {
++	seen := make(map[string]struct{}, len(values))
++	result := make([]string, 0, len(values))
++	for _, value := range values {
++		if _, ok := seen[value]; ok {
++			continue
++		}
++		seen[value] = struct{}{}
++		result = append(result, value)
++	}
++	return result
++}
+diff --git a/apps/backend/internal/task/repository/sqlite/worktree_reference_lifecycle_migration_test.go b/apps/backend/internal/task/repository/sqlite/worktree_reference_lifecycle_migration_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c7dcbd59d6e46df3fda37bb6283f3115bc058f48
+--- /dev/null
++++ b/apps/backend/internal/task/repository/sqlite/worktree_reference_lifecycle_migration_test.go
+@@ -0,0 +1,238 @@
++package sqlite
++
++import (
++	"context"
++	"database/sql"
++	"path/filepath"
++	"reflect"
++	"testing"
++	"time"
++
++	"github.com/jmoiron/sqlx"
++
++	"github.com/kandev/kandev/internal/db"
++	"github.com/kandev/kandev/internal/task/models"
++)
++
++func TestTaskDeletePreservesEnvironmentRepoReleaseGeneration(t *testing.T) {
++	repo := newRepoForEntityTests(t)
++	ctx := context.Background()
++	seedWorkspace(t, repo, "ws-release-authority")
++	if err := repo.CreateWorkflow(ctx, &models.Workflow{
++		ID: "wf-release-authority", WorkspaceID: "ws-release-authority", Name: "workflow",
++	}); err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.CreateTask(ctx, &models.Task{
++		ID: "task-release-authority", WorkspaceID: "ws-release-authority",
++		WorkflowID: "wf-release-authority", Title: "task",
++	}); err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.CreateRepository(ctx, &models.Repository{
++		ID: "repo-release-authority", WorkspaceID: "ws-release-authority", Name: "repo",
++	}); err != nil {
++		t.Fatal(err)
++	}
++	createdAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
++	updatedAt := createdAt.Add(time.Second)
++	if err := repo.CreateTaskEnvironment(ctx, &models.TaskEnvironment{
++		ID: "env-release-authority", TaskID: "task-release-authority",
++		ExecutorType: "worktree", WorkspacePath: "/tmp/release-authority-root",
++		Status:    models.TaskEnvironmentStatusReady,
++		CreatedAt: createdAt, UpdatedAt: updatedAt,
++		Repos: []*models.TaskEnvironmentRepo{{
++			ID: "env-repo-release-authority", RepositoryID: "repo-release-authority",
++			BranchSlug: "release", WorktreeID: "worktree-release-authority",
++			WorktreePath: "/tmp/release-authority", WorktreeBranch: "feature/release-authority",
++			Position: 4, ErrorMessage: "preserved", Status: "active",
++			CreatedAt: createdAt, UpdatedAt: updatedAt,
++		}},
++	}); err != nil {
++		t.Fatal(err)
++	}
++
++	type generation struct {
++		ID, EnvironmentID, RepositoryID, BranchSlug string
++		WorktreeID, WorktreePath, WorktreeBranch    string
++		Position                                    int
++		ErrorMessage, Status                        string
++		CreatedAt, UpdatedAt                        time.Time
++		MergedAt, DeletedAt                         *time.Time
++	}
++	load := func() generation {
++		t.Helper()
++		var got generation
++		if err := repo.db.QueryRowxContext(ctx, `
++			SELECT id, task_environment_id, repository_id, branch_slug,
++				worktree_id, worktree_path, worktree_branch,
++				position, error_message, status,
++				created_at, updated_at, merged_at, deleted_at
++			FROM task_environment_repos WHERE id = ?
++		`, "env-repo-release-authority").Scan(
++			&got.ID, &got.EnvironmentID, &got.RepositoryID, &got.BranchSlug,
++			&got.WorktreeID, &got.WorktreePath, &got.WorktreeBranch,
++			&got.Position, &got.ErrorMessage, &got.Status,
++			&got.CreatedAt, &got.UpdatedAt, &got.MergedAt, &got.DeletedAt,
++		); err != nil {
++			t.Fatalf("load authoritative row: %v", err)
++		}
++		return got
++	}
++	want := load()
++	if err := repo.DeleteTask(ctx, "task-release-authority"); err != nil {
++		t.Fatal(err)
++	}
++	var count int
++	if err := repo.db.GetContext(ctx, &count, `SELECT COUNT(*) FROM task_environments WHERE id = ?`, "env-release-authority"); err != nil {
++		t.Fatal(err)
++	}
++	if count != 0 {
++		t.Fatalf("task environment count = %d, want cascade delete", count)
++	}
++	got := load()
++	if !reflect.DeepEqual(got, want) {
++		t.Fatalf("authoritative generation drifted:\n got: %+v\nwant: %+v", got, want)
++	}
++}
++
++func TestDetachTaskEnvironmentRepoLifecycleMigratesExistingSQLite(t *testing.T) {
++	dbPath := filepath.Join(t.TempDir(), "lifecycle-attached.db")
++	dbConn, err := db.OpenSQLite(dbPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	sqlDB := sqlx.NewDb(dbConn, "sqlite3")
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	for _, statement := range []string{
++		`CREATE TABLE task_environments (id TEXT PRIMARY KEY)`,
++		`CREATE TABLE task_environment_repos (
++			id TEXT PRIMARY KEY, task_environment_id TEXT NOT NULL,
++			repository_id TEXT NOT NULL, branch_slug TEXT NOT NULL DEFAULT '',
++			worktree_id TEXT DEFAULT '', worktree_path TEXT DEFAULT '',
++			worktree_branch TEXT DEFAULT '', position INTEGER DEFAULT 0,
++			error_message TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'active',
++			created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL,
++			merged_at TIMESTAMP, deleted_at TIMESTAMP,
++			FOREIGN KEY (task_environment_id) REFERENCES task_environments(id) ON DELETE CASCADE,
++			UNIQUE(task_environment_id, repository_id, branch_slug))`,
++		`INSERT INTO task_environments VALUES ('env-legacy')`,
++		`INSERT INTO task_environment_repos VALUES (
++			'row-legacy', 'env-legacy', 'repo-legacy', '', 'wt-legacy', '/tmp/legacy',
++			'feature/legacy', 3, 'warning', 'active',
++			'2026-08-15T01:02:03Z', '2026-08-15T01:02:04Z', NULL, NULL)`,
++	} {
++		if _, err := sqlDB.Exec(statement); err != nil {
++			t.Fatal(err)
++		}
++	}
++	repo := &Repository{db: sqlDB, ro: sqlDB}
++	want := loadSQLiteLifecycleGeneration(t, sqlDB, "row-legacy")
++	if err := repo.detachTaskEnvironmentRepoLifecycle(); err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.detachTaskEnvironmentRepoLifecycle(); err != nil {
++		t.Fatalf("migration replay: %v", err)
++	}
++	attached, err := repo.sqliteTaskEnvironmentRepoLifecycleAttached()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if attached {
++		t.Fatal("environment lifecycle foreign key remains attached")
++	}
++	if got := loadSQLiteLifecycleGeneration(t, sqlDB, "row-legacy"); !reflect.DeepEqual(got, want) {
++		t.Fatalf("existing generation changed during detach:\n got: %+v\nwant: %+v", got, want)
++	}
++	if _, err := sqlDB.Exec(`DELETE FROM task_environments WHERE id = 'env-legacy'`); err != nil {
++		t.Fatal(err)
++	}
++	var count int
++	if err := sqlDB.Get(&count, `SELECT COUNT(*) FROM task_environment_repos WHERE id = 'row-legacy'`); err != nil {
++		t.Fatal(err)
++	}
++	if count != 1 {
++		t.Fatalf("migrated authority row count = %d, want 1", count)
++	}
++}
++
++type sqliteLifecycleGeneration struct {
++	ID, EnvironmentID, RepositoryID, BranchSlug string
++	WorktreeID, WorktreePath, WorktreeBranch    string
++	Position                                    int
++	ErrorMessage, Status                        string
++	CreatedAt, UpdatedAt                        string
++	MergedAt, DeletedAt                         sql.NullString
++}
++
++func loadSQLiteLifecycleGeneration(t *testing.T, database *sqlx.DB, id string) sqliteLifecycleGeneration {
++	t.Helper()
++	var got sqliteLifecycleGeneration
++	if err := database.QueryRow(`
++		SELECT id, task_environment_id, repository_id, branch_slug,
++			worktree_id, worktree_path, worktree_branch,
++			position, error_message, status,
++			CAST(created_at AS TEXT), CAST(updated_at AS TEXT),
++			CAST(merged_at AS TEXT), CAST(deleted_at AS TEXT)
++		FROM task_environment_repos WHERE id = ?
++	`, id).Scan(
++		&got.ID, &got.EnvironmentID, &got.RepositoryID, &got.BranchSlug,
++		&got.WorktreeID, &got.WorktreePath, &got.WorktreeBranch,
++		&got.Position, &got.ErrorMessage, &got.Status,
++		&got.CreatedAt, &got.UpdatedAt, &got.MergedAt, &got.DeletedAt,
++	); err != nil {
++		t.Fatalf("load SQLite lifecycle generation %s: %v", id, err)
++	}
++	return got
++}
++
++func TestDetachTaskEnvironmentRepoLifecycleSQLiteFailureRollsBack(t *testing.T) {
++	dbPath := filepath.Join(t.TempDir(), "lifecycle-rollback.db")
++	dbConn, err := db.OpenSQLite(dbPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	sqlDB := sqlx.NewDb(dbConn, "sqlite3")
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	for _, statement := range []string{
++		`CREATE TABLE task_environments (id TEXT PRIMARY KEY)`,
++		`CREATE TABLE task_environment_repos (
++			id TEXT PRIMARY KEY, task_environment_id TEXT NOT NULL,
++			repository_id TEXT NOT NULL, branch_slug TEXT NOT NULL DEFAULT '',
++			worktree_id TEXT DEFAULT '', worktree_path TEXT DEFAULT '',
++			worktree_branch TEXT DEFAULT '', position INTEGER DEFAULT 0,
++			error_message TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'active',
++			created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL,
++			merged_at TIMESTAMP, deleted_at TIMESTAMP,
++			FOREIGN KEY (task_environment_id) REFERENCES task_environments(id) ON DELETE CASCADE,
++			UNIQUE(task_environment_id, repository_id, branch_slug))`,
++		`INSERT INTO task_environments VALUES ('env-rollback')`,
++		`INSERT INTO task_environment_repos (
++			id, task_environment_id, repository_id, created_at, updated_at
++		) VALUES ('row-rollback', 'env-rollback', 'repo-rollback', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
++		// Force the first migration statement to fail inside the transaction.
++		`CREATE TABLE task_environment_repos_detached (sentinel TEXT)`,
++	} {
++		if _, err := sqlDB.Exec(statement); err != nil {
++			t.Fatal(err)
++		}
++	}
++	repo := &Repository{db: sqlDB, ro: sqlDB}
++	if err := repo.detachTaskEnvironmentRepoLifecycle(); err == nil {
++		t.Fatal("migration failure returned nil")
++	}
++	attached, err := repo.sqliteTaskEnvironmentRepoLifecycleAttached()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !attached {
++		t.Fatal("failed migration detached the original lifecycle key")
++	}
++	var count int
++	if err := sqlDB.Get(&count, `SELECT COUNT(*) FROM task_environment_repos WHERE id = 'row-rollback'`); err != nil {
++		t.Fatal(err)
++	}
++	if count != 1 {
++		t.Fatalf("original row count after rollback = %d, want 1", count)
++	}
++}
+diff --git a/apps/backend/internal/worktree/manager_cleanup.go b/apps/backend/internal/worktree/manager_cleanup.go
+index 94ac458dac5af42176c91cd5bc82bd0868c5996d..a2e1b39cecdc0e97b2f881efa1033e872f8f4918 100644
+--- a/apps/backend/internal/worktree/manager_cleanup.go
++++ b/apps/backend/internal/worktree/manager_cleanup.go
+@@ -213,6 +213,9 @@ func (m *Manager) removeWorktree(ctx context.Context, wt *Worktree, removeBranch
+ 		if err != nil {
+ 			return fmt.Errorf("prepare worktree release %s: %w", wt.ID, err)
+ 		}
++		if err := validateCleanupWorktreeBinding(wt, releaseSnapshot); err != nil {
++			return err
++		}
+ 	}
+ 
+ 	// Execute cleanup script BEFORE removing directory
+@@ -270,6 +273,26 @@ func (m *Manager) removeWorktree(ctx context.Context, wt *Worktree, removeBranch
+ 	return nil
+ }
+ 
++// validateCleanupWorktreeBinding prevents a stale durable cleanup snapshot
++// from crossing into scripts, Git, or filesystem mutation after its projected
++// identity/path/branch drifted from the authoritative fourteen-column row.
++func validateCleanupWorktreeBinding(wt *Worktree, snapshot *WorktreeReleaseSnapshot) error {
++	if wt == nil || snapshot == nil ||
++		wt.ID != snapshot.WorktreeID ||
++		wt.TaskEnvironmentID != snapshot.TaskEnvironmentID ||
++		wt.RepositoryID != snapshot.RepositoryID ||
++		wt.BranchSlug != snapshot.BranchSlug ||
++		wt.Path != snapshot.WorktreePath ||
++		wt.Branch != snapshot.WorktreeBranch {
++		worktreeID := ""
++		if wt != nil {
++			worktreeID = wt.ID
++		}
++		return worktreeReleaseConflict(worktreeID, "cleanup projection drifted from authoritative generation")
++	}
++	return nil
++}
++
+ // ReleaseWorktreeReference marks one session's association deleted without
+ // removing the shared directory or branch.
+ func (m *Manager) ReleaseWorktreeReference(ctx context.Context, wt *Worktree) error {
+diff --git a/apps/backend/internal/worktree/manager_cleanup_error_test.go b/apps/backend/internal/worktree/manager_cleanup_error_test.go
+index 6e84fd87d521f34c635a5de8d421e3397ec91d27..569ded87e5cfc5ba53bc96ffa25a70edfdc50f88 100644
+--- a/apps/backend/internal/worktree/manager_cleanup_error_test.go
++++ b/apps/backend/internal/worktree/manager_cleanup_error_test.go
+@@ -15,6 +15,7 @@ type cleanupFailureStore struct {
+ 	referenceErrors map[string]error
+ 	referenceCalls  []string
+ 	prepareErrors   map[string]error
++	prepareMutators map[string]func(*WorktreeReleaseSnapshot)
+ 	prepareCalls    []string
+ 	releaseErrors   map[string]error
+ 	releaseCalls    []string
+@@ -26,6 +27,7 @@ func newCleanupFailureStore() *cleanupFailureStore {
+ 		mockStore:       newMockStore(),
+ 		referenceErrors: make(map[string]error),
+ 		prepareErrors:   make(map[string]error),
++		prepareMutators: make(map[string]func(*WorktreeReleaseSnapshot)),
+ 		releaseErrors:   make(map[string]error),
+ 	}
+ }
+@@ -58,7 +60,14 @@ func (s *cleanupFailureStore) PrepareWorktreeRelease(
+ 	if err := s.prepareErrors[worktreeID]; err != nil {
+ 		return nil, err
+ 	}
+-	return s.mockStore.PrepareWorktreeRelease(ctx, worktreeID, taskEnvironmentID, repositoryID, branchSlug)
++	snapshot, err := s.mockStore.PrepareWorktreeRelease(ctx, worktreeID, taskEnvironmentID, repositoryID, branchSlug)
++	if err != nil {
++		return nil, err
++	}
++	if mutate := s.prepareMutators[worktreeID]; mutate != nil {
++		mutate(snapshot)
++	}
++	return snapshot, nil
+ }
+ 
+ func (s *cleanupFailureStore) ReleaseWorktreeReferenceCAS(
+@@ -126,6 +135,91 @@ func TestCleanupWorktreesCapturesReleaseBeforePhysicalMutation(t *testing.T) {
+ 	}
+ }
+ 
++func TestCleanupWorktreesRejectsProjectionDriftBeforePhysicalMutation(t *testing.T) {
++	store := newCleanupFailureStore()
++	mgr, err := NewManager(newTestConfig(t), store, newTestLogger())
++	if err != nil {
++		t.Fatalf("NewManager: %v", err)
++	}
++	repoPath := initGitRepoWithRemote(t)
++	wt, err := mgr.Create(context.Background(), CreateRequest{
++		TaskID:         "task-projection-drift",
++		SessionID:      "session-projection-drift",
++		TaskTitle:      "Projection drift",
++		RepositoryID:   "repository-projection-drift",
++		RepositoryPath: repoPath,
++		BaseBranch:     "main",
++		TaskDirName:    "task-projection-drift",
++		RepoName:       "repository-projection-drift",
++	})
++	if err != nil {
++		t.Fatalf("Create: %v", err)
++	}
++	store.prepareMutators[wt.ID] = func(snapshot *WorktreeReleaseSnapshot) {
++		snapshot.WorktreePath += "-replacement"
++	}
++
++	branchRef := "refs/heads/" + wt.Branch
++	branchOID := strings.TrimSpace(runGit(t, repoPath, "rev-parse", branchRef))
++	registeredPath, err := filepath.EvalSymlinks(wt.Path)
++	if err != nil {
++		t.Fatalf("resolve worktree path: %v", err)
++	}
++	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
++	if !errors.Is(err, ErrWorktreeReleaseConflict) {
++		t.Fatalf("CleanupWorktrees error = %v, want generation conflict", err)
++	}
++	if _, err := os.Stat(wt.Path); err != nil {
++		t.Fatalf("projection drift changed path: %v", err)
++	}
++	if got := strings.TrimSpace(runGit(t, repoPath, "rev-parse", branchRef)); got != branchOID {
++		t.Fatalf("projection drift changed branch: got %q want %q", got, branchOID)
++	}
++	registration := runGit(t, repoPath, "worktree", "list", "--porcelain")
++	if !strings.Contains(registration, "worktree "+registeredPath+"\n") {
++		t.Fatalf("projection drift changed Git registration: %s", registration)
++	}
++	if len(store.releaseCalls) != 0 || store.updateCalls != 0 {
++		t.Fatalf("projection drift reached store mutation: release=%v update=%d", store.releaseCalls, store.updateCalls)
++	}
++	if _, ok := mgr.worktrees[cacheKey(wt.SessionID, wt.RepositoryID, wt.BranchSlug)]; !ok {
++		t.Fatal("projection drift evicted cache")
++	}
++}
++
++func TestValidateCleanupWorktreeBindingRejectsEveryProjectedIdentityDrift(t *testing.T) {
++	wt := &Worktree{
++		ID: "worktree-binding", TaskEnvironmentID: "environment-binding",
++		RepositoryID: "repository-binding", BranchSlug: "slug-binding",
++		Path: "/tmp/binding", Branch: "feature/binding",
++	}
++	valid := &WorktreeReleaseSnapshot{
++		WorktreeID: wt.ID, TaskEnvironmentID: wt.TaskEnvironmentID,
++		RepositoryID: wt.RepositoryID, BranchSlug: wt.BranchSlug,
++		WorktreePath: wt.Path, WorktreeBranch: wt.Branch,
++	}
++	if err := validateCleanupWorktreeBinding(wt, valid); err != nil {
++		t.Fatalf("valid binding rejected: %v", err)
++	}
++	tests := map[string]func(*WorktreeReleaseSnapshot){
++		"worktree ID": func(snapshot *WorktreeReleaseSnapshot) { snapshot.WorktreeID += "-drift" },
++		"environment": func(snapshot *WorktreeReleaseSnapshot) { snapshot.TaskEnvironmentID += "-drift" },
++		"repository":  func(snapshot *WorktreeReleaseSnapshot) { snapshot.RepositoryID += "-drift" },
++		"branch slug": func(snapshot *WorktreeReleaseSnapshot) { snapshot.BranchSlug += "-drift" },
++		"path":        func(snapshot *WorktreeReleaseSnapshot) { snapshot.WorktreePath += "-drift" },
++		"branch":      func(snapshot *WorktreeReleaseSnapshot) { snapshot.WorktreeBranch += "-drift" },
++	}
++	for name, mutate := range tests {
++		t.Run(name, func(t *testing.T) {
++			drifted := *valid
++			mutate(&drifted)
++			if err := validateCleanupWorktreeBinding(wt, &drifted); !errors.Is(err, ErrWorktreeReleaseConflict) {
++				t.Fatalf("binding error = %v, want ErrWorktreeReleaseConflict", err)
++			}
++		})
++	}
++}
++
+ func TestCleanupWorktreesPropagatesReleaseConflictWithoutCacheEviction(t *testing.T) {
+ 	store := newCleanupFailureStore()
+ 	mgr, err := NewManager(newTestConfig(t), store, newTestLogger())
+diff --git a/apps/backend/internal/worktree/store.go b/apps/backend/internal/worktree/store.go
+index ff663cbf254129453936f8c6ca38a6d1ac325591..85b2919fe39b86296c757339a9e028e58437fe0a 100644
+--- a/apps/backend/internal/worktree/store.go
++++ b/apps/backend/internal/worktree/store.go
+@@ -571,6 +571,33 @@ func (s *SQLiteStore) checkTaskCleanupBarrierLocked(ctx context.Context, tx *sql
+ 	return nil
+ }
+ 
++// checkEnvironmentRepoMutableLocked fences every non-release mutation. A
++// durable orphan is cleanup authority, not a mutable live row. The exact
++// ReleaseWorktreeReferenceCAS path is the only writer allowed after the
++// logical parent disappears or a cleanup barrier becomes active.
++func (s *SQLiteStore) checkEnvironmentRepoMutableLocked(
++	ctx context.Context,
++	tx *sqlx.Tx,
++	predicate string,
++	value string,
++) error {
++	var taskID string
++	query := `
++		SELECT task.id
++		FROM task_environment_repos ter
++		INNER JOIN task_environments environment ON environment.id = ter.task_environment_id
++		INNER JOIN tasks task ON task.id = environment.task_id
++		WHERE ` + predicate + `
++		LIMIT 1`
++	if err := tx.QueryRowContext(ctx, s.db.Rebind(query), value).Scan(&taskID); err != nil {
++		if err == sql.ErrNoRows {
++			return worktreeReleaseConflict(value, "logical parent absent; mutation fenced")
++		}
++		return fmt.Errorf("resolve worktree mutation owner: %w", err)
++	}
++	return s.checkTaskCleanupBarrierLocked(ctx, tx, taskID)
++}
++
+ // GetWorktreeByID retrieves a worktree by its unique ID.
+ func (s *SQLiteStore) GetWorktreeByID(ctx context.Context, id string) (*Worktree, error) {
+ 	row := s.ro.QueryRowContext(ctx, s.ro.Rebind(`
+@@ -660,7 +687,15 @@ func (s *SQLiteStore) GetWorktreesByRepositoryID(ctx context.Context, repoID str
+ 
+ // UpdateWorktree updates an existing worktree record.
+ func (s *SQLiteStore) UpdateWorktree(ctx context.Context, wt *Worktree) error {
+-	wt.UpdatedAt = time.Now().UTC()
++	updatedAt := time.Now().UTC()
++	tx, err := s.db.BeginTxx(ctx, nil)
++	if err != nil {
++		return err
++	}
++	defer func() { _ = tx.Rollback() }()
++	if err := s.checkEnvironmentRepoMutableLocked(ctx, tx, `ter.worktree_id = ?`, wt.ID); err != nil {
++		return err
++	}
+ 
+ 	query := `
+ 		UPDATE task_environment_repos SET
+@@ -672,7 +707,7 @@ func (s *SQLiteStore) UpdateWorktree(ctx context.Context, wt *Worktree) error {
+ 		wt.Path,
+ 		wt.Branch,
+ 		wt.Status,
+-		wt.UpdatedAt,
++		updatedAt,
+ 		wt.MergedAt,
+ 		wt.DeletedAt,
+ 		wt.ID,
+@@ -682,30 +717,42 @@ func (s *SQLiteStore) UpdateWorktree(ctx context.Context, wt *Worktree) error {
+ 		args = append(args, wt.TaskEnvironmentID)
+ 	}
+ 
+-	result, err := s.db.ExecContext(ctx, s.db.Rebind(query), args...)
++	result, err := tx.ExecContext(ctx, s.db.Rebind(query), args...)
+ 	if err != nil {
+ 		return err
+ 	}
+ 
+ 	rows, _ := result.RowsAffected()
+-	if rows == 0 {
++	if rows != 1 {
+ 		return fmt.Errorf("%w: %s", ErrWorktreeNotFound, wt.ID)
+ 	}
++	if err := tx.Commit(); err != nil {
++		return err
++	}
++	wt.UpdatedAt = updatedAt
+ 	return nil
+ }
+ 
+ // DeleteWorktree removes a worktree record.
+ func (s *SQLiteStore) DeleteWorktree(ctx context.Context, id string) error {
+-	result, err := s.db.ExecContext(ctx, s.db.Rebind(`DELETE FROM task_environment_repos WHERE worktree_id = ?`), id)
++	tx, err := s.db.BeginTxx(ctx, nil)
++	if err != nil {
++		return err
++	}
++	defer func() { _ = tx.Rollback() }()
++	if err := s.checkEnvironmentRepoMutableLocked(ctx, tx, `ter.worktree_id = ?`, id); err != nil {
++		return err
++	}
++	result, err := tx.ExecContext(ctx, s.db.Rebind(`DELETE FROM task_environment_repos WHERE worktree_id = ?`), id)
+ 	if err != nil {
+ 		return err
+ 	}
+ 
+ 	rows, _ := result.RowsAffected()
+-	if rows == 0 {
++	if rows != 1 {
+ 		return fmt.Errorf("worktree not found: %s", id)
+ 	}
+-	return nil
++	return tx.Commit()
+ }
+ 
+ // ListActiveWorktrees returns all worktrees with status 'active'.
+diff --git a/apps/backend/internal/worktree/store_test.go b/apps/backend/internal/worktree/store_test.go
+index 5b4e159a54ffbc00201d6cb3f8a91e40a2405f12..77854c782a764893b7479156adf8df1938c295cb 100644
+--- a/apps/backend/internal/worktree/store_test.go
++++ b/apps/backend/internal/worktree/store_test.go
+@@ -2,6 +2,7 @@ package worktree
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"path/filepath"
+ 	"sort"
+ 	"testing"
+@@ -14,6 +15,87 @@ import (
+ 	tasksqlite "github.com/kandev/kandev/internal/task/repository/sqlite"
+ )
+ 
++func TestSQLiteStoreMutationFenceRejectsCleanupBarrier(t *testing.T) {
++	store := newTestStore(t)
++	ctx := context.Background()
++	store.seedSessionWithEnvironment(t, "session-fenced", "task-fenced")
++	wt := &Worktree{
++		ID: "worktree-fenced", SessionID: "session-fenced", RepositoryID: "repo-fenced",
++		Path: "/tmp/original", Branch: "feature/original", Status: StatusActive,
++	}
++	if err := store.CreateWorktree(ctx, wt); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := store.db.ExecContext(ctx, `
++		INSERT INTO task_resource_cleanup_jobs (
++			id, operation_id, task_id, trigger, state, resource_snapshot,
++			created_at, updated_at
++		) VALUES (
++			'cleanup-fenced', 'operation-fenced', 'task-fenced', 'archive', 'prepared', '{}',
++			CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
++		)`); err != nil {
++		t.Fatal(err)
++	}
++	update := *wt
++	update.Path = "/tmp/changed"
++	update.Branch = "feature/changed"
++	wantUpdatedAt := update.UpdatedAt
++	if err := store.UpdateWorktree(ctx, &update); !errors.Is(err, ErrTaskCleanupInProgress) {
++		t.Fatalf("UpdateWorktree error = %v, want ErrTaskCleanupInProgress", err)
++	}
++	if !update.UpdatedAt.Equal(wantUpdatedAt) {
++		t.Fatalf("fenced update changed caller generation: got %v want %v", update.UpdatedAt, wantUpdatedAt)
++	}
++	if err := store.DeleteWorktree(ctx, wt.ID); !errors.Is(err, ErrTaskCleanupInProgress) {
++		t.Fatalf("DeleteWorktree error = %v, want ErrTaskCleanupInProgress", err)
++	}
++	assertPersistedWorktreeBinding(t, store, wt.ID, "/tmp/original", "feature/original", StatusActive)
++}
++
++func TestSQLiteStoreMutationFenceRejectsDurableOrphan(t *testing.T) {
++	store := newTestStore(t)
++	ctx := context.Background()
++	store.seedSessionWithEnvironment(t, "session-orphan", "task-orphan")
++	wt := &Worktree{
++		ID: "worktree-orphan", SessionID: "session-orphan", RepositoryID: "repo-orphan",
++		Path: "/tmp/orphan", Branch: "feature/orphan", Status: StatusActive,
++	}
++	if err := store.CreateWorktree(ctx, wt); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := store.db.ExecContext(ctx, `DELETE FROM tasks WHERE id = 'task-orphan'`); err != nil {
++		t.Fatal(err)
++	}
++	update := *wt
++	update.Path = "/tmp/replacement"
++	wantUpdatedAt := update.UpdatedAt
++	if err := store.UpdateWorktree(ctx, &update); !errors.Is(err, ErrWorktreeReleaseConflict) {
++		t.Fatalf("UpdateWorktree error = %v, want ErrWorktreeReleaseConflict", err)
++	}
++	if !update.UpdatedAt.Equal(wantUpdatedAt) {
++		t.Fatalf("orphan fence changed caller generation: got %v want %v", update.UpdatedAt, wantUpdatedAt)
++	}
++	if err := store.DeleteWorktree(ctx, wt.ID); !errors.Is(err, ErrWorktreeReleaseConflict) {
++		t.Fatalf("DeleteWorktree error = %v, want ErrWorktreeReleaseConflict", err)
++	}
++	assertPersistedWorktreeBinding(t, store, wt.ID, "/tmp/orphan", "feature/orphan", StatusActive)
++}
++
++func assertPersistedWorktreeBinding(t *testing.T, store *SQLiteStore, worktreeID, path, branch, status string) {
++	t.Helper()
++	var gotPath, gotBranch, gotStatus string
++	if err := store.db.QueryRow(`
++		SELECT worktree_path, worktree_branch, status
++		FROM task_environment_repos WHERE worktree_id = ?
++	`, worktreeID).Scan(&gotPath, &gotBranch, &gotStatus); err != nil {
++		t.Fatal(err)
++	}
++	if gotPath != path || gotBranch != branch || gotStatus != status {
++		t.Fatalf("persisted binding = (%q, %q, %q), want (%q, %q, %q)",
++			gotPath, gotBranch, gotStatus, path, branch, status)
++	}
++}
++
+ // newTestStore opens a SQLite DB with the task repository schema (which owns
+ // the task_environment_repos tables the store reads and writes) and
+ // constructs a *SQLiteStore on it.
+diff --git a/docs/specs/tasks/archived-resource-safety/spec.md b/docs/specs/tasks/archived-resource-safety/spec.md
+index c1ba8f9e7e825cb051f07342caa646b54fc793e2..57eb2a953c81e221455c4b1d4d11dc5b3d90cb73 100644
+--- a/docs/specs/tasks/archived-resource-safety/spec.md
++++ b/docs/specs/tasks/archived-resource-safety/spec.md
+@@ -80,6 +80,12 @@ drift in any one of the fourteen columns fails closed. Tests mutate each column
+ independently so a generic claim such as "all generation fields" cannot hide a
+ missing predicate.
+ 
++These rows are permanent durable control-plane tombstones in this port. Their
++capacity grows with the number of distinct physical references ever admitted;
++purge, compaction, and environment-ID reuse are deliberately out of scope. Any
++future retention policy requires a separate design that preserves the complete
++generation CAS and proves that no retained cleanup can still address the row.
++
+ The removed `task_session_worktrees` schema is historical input only and is not
+ reintroduced, dual-read, or dual-written.
+ 
+-- 
+2.55.0
+

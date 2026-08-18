@@ -1,0 +1,3625 @@
+From 0fc8f4917044e859315a32e2033e9828f8f722bd Mon Sep 17 00:00:00 2001
+From: WaleWangPW <396218656@qq.com>
+Date: Sun, 16 Aug 2026 16:56:15 +0800
+Subject: [PATCH 12/22] feat(task): port terminal DB-only archived-resource
+ actions
+
+Adds the three terminal actions that consume the retained-anchor identity
+built in Task05: exact-generation stale pending move cancellation,
+absent-target release admission sealed behind central physicaldelete,
+and environment retirement as one serializable exact-set transaction.
+
+- Models: archived_resource_release.go and archived_resource_environment_retirement.go
+  with strict canonical JSON, immutable digest binding, fourteen-column per-row
+  generation, and the released lifecycle state.
+- Physicaldelete inventory: ActionReleaseAbsent routed through ExecutorNone with
+  the sealed absence proof; types.go carries the new action, executor, and denial.
+- Repository: CancelStaleArchivedResourcePendingMove CAS-clears the target row only;
+  ReleaseAbsentArchivedResourceAnchor verifies inventory absence and CAS-transitions
+  retained -> released in one serializable transaction; RetireStaleArchivedResourceEnvironmentReference
+  scans workspace-group inventory for the four accepted states and rejects any v2/v3
+  participant including non-coordinators before deleting exact repository rows.
+- Service: three metadata-only methods gated by archivedResourceReconcileOn /
+  archivedResourcePhysicalReleaseOn; terminal session precheck for the cancel.
+- Handlers: three new routes registered under admin auth, gated by the same two flags.
+- Tests: model canonical/drift tests, repository fail-closed tests (inventory
+  retention, header drift, sibling isolation, unknown workspace group state),
+  service disabled-by-default tests, handler flag-and-shape tests.
+---
+ .../physicaldelete/executor_release.go        |  19 +
+ .../internal/physicaldelete/service.go        |   3 +
+ apps/backend/internal/physicaldelete/types.go |  13 +
+ .../internal/physicaldelete/verifier.go       |   3 +-
+ .../internal/task/handlers/task_handlers.go   |  34 +-
+ .../task/handlers/task_http_handlers.go       | 142 ++++++
+ .../task_http_terminal_actions_test.go        |  91 ++++
+ ...rchived_resource_environment_retirement.go | 431 ++++++++++++++++
+ ...ed_resource_environment_retirement_test.go | 137 +++++
+ .../models/archived_resource_reconcile.go     |  23 +-
+ .../task/models/archived_resource_release.go  | 388 ++++++++++++++
+ .../models/archived_resource_release_test.go  | 117 +++++
+ .../internal/task/models/resource_cleanup.go  |   1 +
+ .../internal/task/repository/interface.go     |  23 +
+ ...resource_cleanup_environment_retirement.go | 327 ++++++++++++
+ .../sqlite/resource_cleanup_reconcile.go      |  51 ++
+ .../sqlite/resource_cleanup_release.go        | 245 +++++++++
+ .../resource_cleanup_terminal_release_test.go | 325 ++++++++++++
+ ...source_cleanup_terminal_retirement_test.go | 204 ++++++++
+ .../service/resource_cleanup_reconcile.go     |   8 +
+ .../resource_cleanup_terminal_actions.go      | 480 ++++++++++++++++++
+ .../resource_cleanup_terminal_actions_test.go |  86 ++++
+ .../task-06-terminal-db-only-actions.md       | 147 +++++-
+ 23 files changed, 3279 insertions(+), 19 deletions(-)
+ create mode 100644 apps/backend/internal/physicaldelete/executor_release.go
+ create mode 100644 apps/backend/internal/task/handlers/task_http_terminal_actions_test.go
+ create mode 100644 apps/backend/internal/task/models/archived_resource_environment_retirement.go
+ create mode 100644 apps/backend/internal/task/models/archived_resource_environment_retirement_test.go
+ create mode 100644 apps/backend/internal/task/models/archived_resource_release.go
+ create mode 100644 apps/backend/internal/task/models/archived_resource_release_test.go
+ create mode 100644 apps/backend/internal/task/repository/sqlite/resource_cleanup_environment_retirement.go
+ create mode 100644 apps/backend/internal/task/repository/sqlite/resource_cleanup_release.go
+ create mode 100644 apps/backend/internal/task/repository/sqlite/resource_cleanup_terminal_release_test.go
+ create mode 100644 apps/backend/internal/task/repository/sqlite/resource_cleanup_terminal_retirement_test.go
+ create mode 100644 apps/backend/internal/task/service/resource_cleanup_terminal_actions.go
+ create mode 100644 apps/backend/internal/task/service/resource_cleanup_terminal_actions_test.go
+
+diff --git a/apps/backend/internal/physicaldelete/executor_release.go b/apps/backend/internal/physicaldelete/executor_release.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8d32302318b6027ae8fe04ee85e847623851d95f
+--- /dev/null
++++ b/apps/backend/internal/physicaldelete/executor_release.go
+@@ -0,0 +1,19 @@
++package physicaldelete
++
++import "context"
++
++// releaseExecutor is the sealed absence-only admission executor. A request
++// routed here has already proven that the targeted path and Git worktree
++// registration are absent from the writer-DB inventory, that no resource
++// protects it, and that the root policy does not shield it. The executor
++// therefore performs no filesystem, Git, or database mutation: it returns a
++// receipt with Mutated=false so the caller knows the release was admitted but
++// produced zero effect.
++type releaseExecutor struct{}
++
++func (releaseExecutor) execute(_ context.Context, request Request, receipt Receipt) (Receipt, error) {
++	receipt.Executor = ExecutorNone
++	receipt.Action = request.Action
++	receipt.Mutated = false
++	return receipt, nil
++}
+diff --git a/apps/backend/internal/physicaldelete/service.go b/apps/backend/internal/physicaldelete/service.go
+index cf4e131bd00d3e3a7b835f65edd66d7627eceaa6..f74e23273db5b12c37c3f9eabaeb3c1236761478 100644
+--- a/apps/backend/internal/physicaldelete/service.go
++++ b/apps/backend/internal/physicaldelete/service.go
+@@ -15,6 +15,7 @@ type Service struct {
+ 	now       func() time.Time
+ 	fs        filesystemExecutor
+ 	git       gitExecutor
++	release   releaseExecutor
+ }
+ 
+ func New(config Config) (*Service, error) {
+@@ -129,6 +130,8 @@ func (s *Service) executeUnavailable(ctx context.Context, request Request, recei
+ 		return s.fs.execute(ctx, request, receipt)
+ 	case ExecutorGit:
+ 		return s.git.execute(ctx, request, receipt)
++	case ExecutorNone:
++		return s.release.execute(ctx, request, receipt)
+ 	default:
+ 		return withReason(receipt, DenialInvalidRequest), fmt.Errorf("%w: unknown executor", ErrInvalidRequest)
+ 	}
+diff --git a/apps/backend/internal/physicaldelete/types.go b/apps/backend/internal/physicaldelete/types.go
+index 80c12e57206c3b042f79c55e85232ee8d7d8bfe1..27ea8a18b5365f2d2381a4b0d44753893b26ba89 100644
+--- a/apps/backend/internal/physicaldelete/types.go
++++ b/apps/backend/internal/physicaldelete/types.go
+@@ -23,6 +23,10 @@ var (
+ 	ErrProvisionalTarget       = errors.New("physicaldelete: provisional target already exists")
+ 	ErrProvisionalLeaseUsed    = errors.New("physicaldelete: provisional lease is already bound")
+ 	ErrProvisionalTargetExists = ErrProvisionalTarget
++	// ErrReleaseNotAdmitted is returned when the absent-target release cannot
++	// prove that the targeted retained anchor exists, the physical path is
++	// absent from inventory, and the Git worktree registration is absent.
++	ErrReleaseNotAdmitted = errors.New("physicaldelete: absent-target release was not admitted")
+ )
+ 
+ type Action string
+@@ -36,6 +40,10 @@ const (
+ 	ActionRestore                  Action = "restore"
+ 	ActionPurge                    Action = "purge"
+ 	ActionParentRemove             Action = "parent_remove"
++	// ActionReleaseAbsent is the metadata-only release admission for a
++	// retained target whose physical path and Git worktree registration are
++	// already absent. It produces no physical or Git mutation.
++	ActionReleaseAbsent Action = "release_absent"
+ 
+ 	ActionRegisteredWorktreeRemoval Action = ActionRegisteredWorktreeRemove
+ 	ActionBranchRemoval             Action = ActionBranchDelete
+@@ -81,6 +89,10 @@ type Executor string
+ const (
+ 	ExecutorFilesystem Executor = "filesystem"
+ 	ExecutorGit        Executor = "git"
++	// ExecutorNone marks an admission that produces no physical or Git
++	// mutation. The release admission routes through this executor so the
++	// sealed absence proof in inventory is the only authoritative signal.
++	ExecutorNone Executor = "none"
+ )
+ 
+ type Decision string
+@@ -99,6 +111,7 @@ const (
+ 	DenialProtected           DenialReason = "protected_resource"
+ 	DenialExecutorUnavailable DenialReason = "executor_unavailable"
+ 	DenialLockUnavailable     DenialReason = "lock_unavailable"
++	DenialReleaseNotAdmitted  DenialReason = "release_not_admitted"
+ )
+ 
+ // Anchor retains the exact Lstat identity observed before the final gate. The
+diff --git a/apps/backend/internal/physicaldelete/verifier.go b/apps/backend/internal/physicaldelete/verifier.go
+index 07a6a2cfd498df971a69519ec1c3bdef64b040ee..b63ad7e416a20685973adc6a35bb81419b56edb2 100644
+--- a/apps/backend/internal/physicaldelete/verifier.go
++++ b/apps/backend/internal/physicaldelete/verifier.go
+@@ -214,6 +214,7 @@ var actionSpecs = map[Action]actionSpec{
+ 	ActionRestore:                  {executor: ExecutorFilesystem},
+ 	ActionPurge:                    {executor: ExecutorFilesystem},
+ 	ActionParentRemove:             {executor: ExecutorFilesystem},
++	ActionReleaseAbsent:            {executor: ExecutorNone},
+ }
+ 
+ func knownAuthority(authority Authority) bool {
+@@ -227,7 +228,7 @@ func knownAuthority(authority Authority) bool {
+ }
+ 
+ func knownExecutor(executor Executor) bool {
+-	return executor == ExecutorFilesystem || executor == ExecutorGit
++	return executor == ExecutorFilesystem || executor == ExecutorGit || executor == ExecutorNone
+ }
+ 
+ func resourcesOverlap(resource Resource, protected []string) bool {
+diff --git a/apps/backend/internal/task/handlers/task_handlers.go b/apps/backend/internal/task/handlers/task_handlers.go
+index 29ee8b3719fdfc325ef6b3fa18bf6d78412b5c87..eb53d1c0637f7b6191a7d0fe1a3ad0bb85c546fd 100644
+--- a/apps/backend/internal/task/handlers/task_handlers.go
++++ b/apps/backend/internal/task/handlers/task_handlers.go
+@@ -32,19 +32,20 @@ type handlerRepo interface {
+ }
+ 
+ type TaskHandlers struct {
+-	service                    *service.Service
+-	orchestrator               OrchestratorStarter
+-	foregroundActivity         dto.ForegroundActivityProvider
+-	cancellationPending        dto.CancellationPendingProvider
+-	repo                       handlerRepo
+-	planService                *service.PlanService
+-	handoffSvc                 *service.HandoffService
+-	workspaceRestorer          WorkspaceQuarantineRestorer
+-	unarchiveRecoveryTimeout   time.Duration
+-	taskCreateLastUsedRecorder taskCreateLastUsedRecorder
+-	onTaskCreatedWithPR        func(ctx context.Context, taskID, sessionID, prURL, branch string)
+-	archivedResourceReconcile  bool
+-	logger                     *logger.Logger
++	service                         *service.Service
++	orchestrator                    OrchestratorStarter
++	foregroundActivity              dto.ForegroundActivityProvider
++	cancellationPending             dto.CancellationPendingProvider
++	repo                            handlerRepo
++	planService                     *service.PlanService
++	handoffSvc                      *service.HandoffService
++	workspaceRestorer               WorkspaceQuarantineRestorer
++	unarchiveRecoveryTimeout        time.Duration
++	taskCreateLastUsedRecorder      taskCreateLastUsedRecorder
++	onTaskCreatedWithPR             func(ctx context.Context, taskID, sessionID, prURL, branch string)
++	archivedResourceReconcile       bool
++	archivedResourcePhysicalRelease bool
++	logger                          *logger.Logger
+ }
+ 
+ const defaultUnarchiveRecoveryTimeout = 30 * time.Second
+@@ -132,6 +133,7 @@ func NewTaskHandlers(svc *service.Service, orchestrator OrchestratorStarter, rep
+ func RegisterTaskRoutes(router *gin.Engine, dispatcher *ws.Dispatcher, svc *service.Service, orchestrator OrchestratorStarter, repo handlerRepo, planService *service.PlanService, log *logger.Logger, archivedResourceReconcile bool) *TaskHandlers {
+ 	handlers := NewTaskHandlers(svc, orchestrator, repo, planService, log)
+ 	handlers.archivedResourceReconcile = archivedResourceReconcile
++	handlers.archivedResourcePhysicalRelease = svc.ArchivedResourcePhysicalReleaseEnabled()
+ 	handlers.registerHTTP(router)
+ 	handlers.registerWS(dispatcher)
+ 	return handlers
+@@ -171,6 +173,12 @@ func (h *TaskHandlers) registerHTTP(router *gin.Engine) {
+ 		reconcile := api.Group("", authn.RequireRealIdentity(), authn.RequireAdmin())
+ 		reconcile.POST("/tasks/:id/resource-cleanup/reconcile", h.httpReconcileArchivedResource)
+ 		reconcile.POST("/system/resource-cleanup/reconcile-group", h.httpReconcileArchivedResourceGroup)
++		reconcile.POST("/system/resource-cleanup/cancel-stale-pending-move", h.httpCancelStaleArchivedResourcePendingMove)
++		reconcile.POST("/system/resource-cleanup/retire-stale-environment-reference", h.httpRetireStaleArchivedResourceEnvironmentReference)
++	}
++	if h.archivedResourcePhysicalRelease {
++		release := api.Group("", authn.RequireRealIdentity(), authn.RequireAdmin())
++		release.POST("/system/resource-cleanup/release-absent-retained-target", h.httpReleaseAbsentArchivedResourceTarget)
+ 	}
+ 	api.GET("/tasks/:id/subtask-count", h.httpTaskSubtaskCount)
+ 
+diff --git a/apps/backend/internal/task/handlers/task_http_handlers.go b/apps/backend/internal/task/handlers/task_http_handlers.go
+index b2c3e025778ed90b042e6b1a016bfa1645b7d11f..e43ed9cdc62a68a2de5e4e37b47889f037cf2e2c 100644
+--- a/apps/backend/internal/task/handlers/task_http_handlers.go
++++ b/apps/backend/internal/task/handlers/task_http_handlers.go
+@@ -2330,3 +2330,145 @@ func archivedResourceReconcileHTTPStatus(err error) int {
+ 		return http.StatusInternalServerError
+ 	}
+ }
++
++func archivedResourceReleaseHTTPStatus(err error) int {
++	switch {
++	case errors.Is(err, service.ErrArchivedResourceReleaseInvalid):
++		return http.StatusBadRequest
++	case errors.Is(err, service.ErrArchivedResourceReleaseUnknown):
++		return http.StatusNotFound
++	case errors.Is(err, service.ErrArchivedResourceReleaseDisabled):
++		return http.StatusNotFound
++	case errors.Is(err, service.ErrArchivedResourceReleaseUnavailable):
++		return http.StatusServiceUnavailable
++	default:
++		return http.StatusInternalServerError
++	}
++}
++
++func archivedResourceEnvironmentRetirementHTTPStatus(err error) int {
++	switch {
++	case errors.Is(err, service.ErrArchivedResourceEnvironmentRetirementInvalid):
++		return http.StatusBadRequest
++	case errors.Is(err, service.ErrArchivedResourceEnvironmentRetirementDisabled):
++		return http.StatusNotFound
++	case errors.Is(err, service.ErrArchivedResourceEnvironmentRetirementUnavailable):
++		return http.StatusServiceUnavailable
++	default:
++		return http.StatusInternalServerError
++	}
++}
++
++func archivedResourcePendingMoveHTTPStatus(err error) int {
++	switch {
++	case errors.Is(err, service.ErrArchivedResourcePendingMoveInvalid):
++		return http.StatusBadRequest
++	case errors.Is(err, service.ErrArchivedResourcePendingMoveSessionActive):
++		return http.StatusConflict
++	case errors.Is(err, service.ErrArchivedResourcePendingMoveDisabled):
++		return http.StatusNotFound
++	case errors.Is(err, service.ErrArchivedResourcePendingMoveUnavailable):
++		return http.StatusServiceUnavailable
++	default:
++		return http.StatusInternalServerError
++	}
++}
++
++func (h *TaskHandlers) httpCancelStaleArchivedResourcePendingMove(c *gin.Context) {
++	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, archivedResourceReconcileMaxBodyBytes)
++	raw, err := io.ReadAll(c.Request.Body)
++	if err != nil || rejectDuplicateArchivedResourceJSONKeys(raw) != nil {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid cancel stale pending move request"})
++		return
++	}
++	decoder := json.NewDecoder(bytes.NewReader(raw))
++	decoder.DisallowUnknownFields()
++	var body service.ArchivedResourcePendingMoveCancelRequest
++	if err := decoder.Decode(&body); err != nil {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid cancel stale pending move request"})
++		return
++	}
++	var trailing interface{}
++	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "request must contain exactly one JSON object"})
++		return
++	}
++	result, err := h.service.CancelStaleArchivedResourcePendingMove(c.Request.Context(), body)
++	if err != nil {
++		status := archivedResourcePendingMoveHTTPStatus(err)
++		if status >= http.StatusInternalServerError {
++			h.logger.Error("cancel stale archived resource pending move failed", zap.Error(err))
++			c.JSON(status, gin.H{"error": "cancel stale pending move request failed"})
++			return
++		}
++		c.JSON(status, gin.H{"error": err.Error()})
++		return
++	}
++	c.JSON(http.StatusOK, result)
++}
++
++func (h *TaskHandlers) httpReleaseAbsentArchivedResourceTarget(c *gin.Context) {
++	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, archivedResourceReconcileMaxBodyBytes)
++	raw, err := io.ReadAll(c.Request.Body)
++	if err != nil || rejectDuplicateArchivedResourceJSONKeys(raw) != nil {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid release absent request"})
++		return
++	}
++	decoder := json.NewDecoder(bytes.NewReader(raw))
++	decoder.DisallowUnknownFields()
++	var body service.ArchivedResourceReleaseRequest
++	if err := decoder.Decode(&body); err != nil {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid release absent request"})
++		return
++	}
++	var trailing interface{}
++	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "request must contain exactly one JSON object"})
++		return
++	}
++	result, err := h.service.ReleaseAbsentArchivedResourceTarget(c.Request.Context(), body)
++	if err != nil {
++		status := archivedResourceReleaseHTTPStatus(err)
++		if status >= http.StatusInternalServerError {
++			h.logger.Error("release absent archived resource target failed", zap.Error(err))
++			c.JSON(status, gin.H{"error": "release absent request failed"})
++			return
++		}
++		c.JSON(status, gin.H{"error": err.Error()})
++		return
++	}
++	c.JSON(http.StatusOK, result)
++}
++
++func (h *TaskHandlers) httpRetireStaleArchivedResourceEnvironmentReference(c *gin.Context) {
++	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, archivedResourceReconcileMaxBodyBytes)
++	raw, err := io.ReadAll(c.Request.Body)
++	if err != nil || rejectDuplicateArchivedResourceJSONKeys(raw) != nil {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid environment retirement request"})
++		return
++	}
++	decoder := json.NewDecoder(bytes.NewReader(raw))
++	decoder.DisallowUnknownFields()
++	var body service.ArchivedResourceEnvironmentRetirementRequest
++	if err := decoder.Decode(&body); err != nil {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid environment retirement request"})
++		return
++	}
++	var trailing interface{}
++	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "request must contain exactly one JSON object"})
++		return
++	}
++	result, err := h.service.RetireStaleArchivedResourceEnvironmentReference(c.Request.Context(), body)
++	if err != nil {
++		status := archivedResourceEnvironmentRetirementHTTPStatus(err)
++		if status >= http.StatusInternalServerError {
++			h.logger.Error("retire stale archived resource environment failed", zap.Error(err))
++			c.JSON(status, gin.H{"error": "environment retirement request failed"})
++			return
++		}
++		c.JSON(status, gin.H{"error": err.Error()})
++		return
++	}
++	c.JSON(http.StatusOK, result)
++}
+diff --git a/apps/backend/internal/task/handlers/task_http_terminal_actions_test.go b/apps/backend/internal/task/handlers/task_http_terminal_actions_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9effb12d55398c5d94e9c1f6b71bbd98dd04b555
+--- /dev/null
++++ b/apps/backend/internal/task/handlers/task_http_terminal_actions_test.go
+@@ -0,0 +1,91 @@
++package handlers
++
++import (
++	"bytes"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++
++	"github.com/kandev/kandev/internal/task/service"
++)
++
++func TestHTTPTerminalActionRoutesRespectFlags(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	taskSvc := service.NewService(service.Repos{}, nil, newTestLogger(t), service.RepositoryDiscoveryConfig{})
++	handler := &TaskHandlers{service: taskSvc, logger: newTestLogger(t)}
++	router := gin.New()
++	registerTerminalActionRoutes(router, handler, false, false)
++
++	for _, path := range []string{
++		"/api/v1/system/resource-cleanup/cancel-stale-pending-move",
++		"/api/v1/system/resource-cleanup/release-absent-retained-target",
++		"/api/v1/system/resource-cleanup/retire-stale-environment-reference",
++	} {
++		recorder := httptest.NewRecorder()
++		request := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(`{}`))
++		router.ServeHTTP(recorder, request)
++		if recorder.Code != http.StatusNotFound {
++			t.Fatalf("disabled %s status=%d body=%s", path, recorder.Code, recorder.Body.String())
++		}
++	}
++}
++
++func TestHTTPCancelStalePendingMoveRejectsInvalidJSON(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	taskSvc := service.NewService(service.Repos{}, nil, newTestLogger(t), service.RepositoryDiscoveryConfig{})
++	handler := &TaskHandlers{service: taskSvc, logger: newTestLogger(t)}
++	router := gin.New()
++	registerTerminalActionRoutes(router, handler, true, false)
++	recorder := httptest.NewRecorder()
++	request := httptest.NewRequest(http.MethodPost, "/api/v1/system/resource-cleanup/cancel-stale-pending-move",
++		bytes.NewBufferString("{not-json"))
++	router.ServeHTTP(recorder, request)
++	if recorder.Code != http.StatusBadRequest {
++		t.Fatalf("invalid JSON status = %d, want 400", recorder.Code)
++	}
++}
++
++func TestHTTPReleaseAbsentRejectsUnknownFields(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	taskSvc := service.NewService(service.Repos{}, nil, newTestLogger(t), service.RepositoryDiscoveryConfig{})
++	taskSvc.SetArchivedResourceFeatures(true, true)
++	handler := &TaskHandlers{service: taskSvc, logger: newTestLogger(t)}
++	router := gin.New()
++	registerTerminalActionRoutes(router, handler, true, true)
++	body := bytes.NewBufferString(`{"anchor_operation_id":"op","unknown":"x"}`)
++	recorder := httptest.NewRecorder()
++	request := httptest.NewRequest(http.MethodPost, "/api/v1/system/resource-cleanup/release-absent-retained-target", body)
++	router.ServeHTTP(recorder, request)
++	if recorder.Code != http.StatusBadRequest {
++		t.Fatalf("unknown-field status = %d, want 400 body=%s", recorder.Code, recorder.Body.String())
++	}
++}
++
++func TestHTTPRetireStaleEnvironmentRejectsInvalidJSON(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	taskSvc := service.NewService(service.Repos{}, nil, newTestLogger(t), service.RepositoryDiscoveryConfig{})
++	taskSvc.SetArchivedResourceFeatures(true, false)
++	handler := &TaskHandlers{service: taskSvc, logger: newTestLogger(t)}
++	router := gin.New()
++	registerTerminalActionRoutes(router, handler, true, false)
++	recorder := httptest.NewRecorder()
++	request := httptest.NewRequest(http.MethodPost, "/api/v1/system/resource-cleanup/retire-stale-environment-reference",
++		bytes.NewBufferString("{not-json"))
++	router.ServeHTTP(recorder, request)
++	if recorder.Code != http.StatusBadRequest {
++		t.Fatalf("invalid JSON status = %d, want 400", recorder.Code)
++	}
++}
++
++func registerTerminalActionRoutes(router *gin.Engine, handler *TaskHandlers, reconcileEnabled, physicalReleaseEnabled bool) {
++	api := router.Group("/api/v1")
++	if reconcileEnabled {
++		api.POST("/system/resource-cleanup/cancel-stale-pending-move", handler.httpCancelStaleArchivedResourcePendingMove)
++		api.POST("/system/resource-cleanup/retire-stale-environment-reference", handler.httpRetireStaleArchivedResourceEnvironmentReference)
++	}
++	if physicalReleaseEnabled {
++		api.POST("/system/resource-cleanup/release-absent-retained-target", handler.httpReleaseAbsentArchivedResourceTarget)
++	}
++}
+diff --git a/apps/backend/internal/task/models/archived_resource_environment_retirement.go b/apps/backend/internal/task/models/archived_resource_environment_retirement.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..159e764845d0680b9acf441b6c3d7ae004d7f2dc
+--- /dev/null
++++ b/apps/backend/internal/task/models/archived_resource_environment_retirement.go
+@@ -0,0 +1,431 @@
++package models
++
++import (
++	"bytes"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"path/filepath"
++	"sort"
++	"strings"
++	"time"
++	"unicode"
++	"unicode/utf8"
++)
++
++const (
++	ArchivedResourceEnvironmentRetirementSnapshotVersion = 2
++	ArchivedResourceEnvironmentRetirementSnapshotKind    = "archived_resource_environment_retirement"
++	ArchivedResourceEnvironmentRetirementSnapshotPhase   = "db_unbound_retired"
++
++	ArchivedResourceEnvironmentRetirementMaxSnapshotBytes = 16 * 1024
++	ArchivedResourceEnvironmentRetirementMaxRepositories  = 16
++)
++
++var (
++	ErrArchivedResourceEnvironmentRetirementInvalid  = errors.New("archived resource environment retirement snapshot is invalid")
++	ErrArchivedResourceEnvironmentRetirementTooLarge = errors.New("archived resource environment retirement snapshot exceeds size limit")
++)
++
++// ArchivedResourceEnvironmentRetirementSnapshot is the canonical, durable,
++// metadata-only retirement request. It binds one exact stopped/failed task
++// environment, its complete sorted repository reference set, and the exact
++// seven-field per-repository generation (the same fields that bound the v0.88
++// release snapshot in docs/specs/tasks/archived-resource-safety/spec.md).
++//
++// The retirement admission only succeeds when every active v2/v3 reconcile
++// anchor confirms the environment is not a participant and every workspace
++// group inventory state is one of the four accepted known states.
++type ArchivedResourceEnvironmentRetirementSnapshot struct {
++	SchemaVersion int                                            `json:"schema_version"`
++	Kind          string                                         `json:"kind"`
++	Phase         string                                         `json:"phase"`
++	Immutable     ArchivedResourceEnvironmentRetirementImmutable `json:"immutable"`
++	Retirement    ArchivedResourceEnvironmentRetirementProof     `json:"retirement"`
++}
++
++type ArchivedResourceEnvironmentRetirementImmutable struct {
++	EnvironmentID     string                                            `json:"environment_id"`
++	TaskID            string                                            `json:"task_id"`
++	EnvironmentStatus string                                            `json:"environment_status"`
++	Repositories      []ArchivedResourceEnvironmentRetirementRepository `json:"repositories"`
++}
++
++type ArchivedResourceEnvironmentRetirementRepository struct {
++	ID             string `json:"id"`
++	RepositoryID   string `json:"repository_id"`
++	BranchSlug     string `json:"branch_slug,omitempty"`
++	WorktreeID     string `json:"worktree_id,omitempty"`
++	WorktreePath   string `json:"worktree_path,omitempty"`
++	WorktreeBranch string `json:"worktree_branch,omitempty"`
++	Position       int    `json:"position"`
++	Status         string `json:"status,omitempty"`
++	CreatedAt      string `json:"created_at"`
++	UpdatedAt      string `json:"updated_at"`
++	MergedAt       string `json:"merged_at,omitempty"`
++	DeletedAt      string `json:"deleted_at,omitempty"`
++}
++
++type ArchivedResourceEnvironmentRetirementProof struct {
++	RetiredAt string `json:"retired_at"`
++}
++
++// ArchivedResourceEnvironmentRetirementIdentity is the redundant header set
++// bound alongside the resource_snapshot. Every field is derived from canonical
++// snapshot bytes so the admission cannot self-sign identity without re-encoding.
++type ArchivedResourceEnvironmentRetirementIdentity struct {
++	SnapshotDigest string
++	OperationID    string
++	ActiveScopeKey string
++	ResourceKind   string
++	ResourceID     string
++	ManagedRootKey string
++}
++
++// NewArchivedResourceEnvironmentRetirementSnapshot validates and
++// canonicalizes the exact-set retirement request. Repositories are sorted by
++// repository_id (then worktree_id) so the canonical form is deterministic.
++func NewArchivedResourceEnvironmentRetirementSnapshot(
++	immutable ArchivedResourceEnvironmentRetirementImmutable,
++	retirement ArchivedResourceEnvironmentRetirementProof,
++) (ArchivedResourceEnvironmentRetirementSnapshot, []byte, ArchivedResourceEnvironmentRetirementIdentity, error) {
++	repositories := append([]ArchivedResourceEnvironmentRetirementRepository(nil), immutable.Repositories...)
++	sort.Slice(repositories, func(i, j int) bool {
++		if repositories[i].ID != repositories[j].ID {
++			return repositories[i].ID < repositories[j].ID
++		}
++		if repositories[i].RepositoryID != repositories[j].RepositoryID {
++			return repositories[i].RepositoryID < repositories[j].RepositoryID
++		}
++		if repositories[i].WorktreeID != repositories[j].WorktreeID {
++			return repositories[i].WorktreeID < repositories[j].WorktreeID
++		}
++		return repositories[i].CreatedAt < repositories[j].CreatedAt
++	})
++	immutable.Repositories = repositories
++	if err := validateArchivedResourceEnvironmentRetirementImmutable(immutable); err != nil {
++		return ArchivedResourceEnvironmentRetirementSnapshot{}, nil, ArchivedResourceEnvironmentRetirementIdentity{}, err
++	}
++	if err := validateArchivedResourceEnvironmentRetirementProof(retirement); err != nil {
++		return ArchivedResourceEnvironmentRetirementSnapshot{}, nil, ArchivedResourceEnvironmentRetirementIdentity{}, err
++	}
++	snapshot := ArchivedResourceEnvironmentRetirementSnapshot{
++		SchemaVersion: ArchivedResourceEnvironmentRetirementSnapshotVersion,
++		Kind:          ArchivedResourceEnvironmentRetirementSnapshotKind,
++		Phase:         ArchivedResourceEnvironmentRetirementSnapshotPhase,
++		Immutable:     immutable,
++		Retirement:    retirement,
++	}
++	raw, err := json.Marshal(snapshot)
++	if err != nil {
++		return ArchivedResourceEnvironmentRetirementSnapshot{}, nil, ArchivedResourceEnvironmentRetirementIdentity{}, fmt.Errorf("%w: encode snapshot: %v", ErrArchivedResourceEnvironmentRetirementInvalid, err)
++	}
++	if len(raw) > ArchivedResourceEnvironmentRetirementMaxSnapshotBytes {
++		return ArchivedResourceEnvironmentRetirementSnapshot{}, nil, ArchivedResourceEnvironmentRetirementIdentity{}, ErrArchivedResourceEnvironmentRetirementTooLarge
++	}
++	identity := archivedResourceEnvironmentRetirementIdentity(snapshot, raw)
++	return snapshot, raw, identity, nil
++}
++
++// DecodeArchivedResourceEnvironmentRetirementSnapshot is the strict decoder
++// used to read a previously persisted retirement snapshot from the database.
++func DecodeArchivedResourceEnvironmentRetirementSnapshot(
++	raw []byte,
++) (ArchivedResourceEnvironmentRetirementSnapshot, ArchivedResourceEnvironmentRetirementIdentity, error) {
++	if len(raw) == 0 {
++		return ArchivedResourceEnvironmentRetirementSnapshot{}, ArchivedResourceEnvironmentRetirementIdentity{}, fmt.Errorf("%w: empty document", ErrArchivedResourceEnvironmentRetirementInvalid)
++	}
++	if len(raw) > ArchivedResourceEnvironmentRetirementMaxSnapshotBytes {
++		return ArchivedResourceEnvironmentRetirementSnapshot{}, ArchivedResourceEnvironmentRetirementIdentity{}, ErrArchivedResourceEnvironmentRetirementTooLarge
++	}
++	if err := rejectDuplicateRetirementJSONKeys(raw); err != nil {
++		return ArchivedResourceEnvironmentRetirementSnapshot{}, ArchivedResourceEnvironmentRetirementIdentity{}, err
++	}
++	decoder := json.NewDecoder(bytes.NewReader(raw))
++	decoder.DisallowUnknownFields()
++	var snapshot ArchivedResourceEnvironmentRetirementSnapshot
++	if err := decoder.Decode(&snapshot); err != nil {
++		return ArchivedResourceEnvironmentRetirementSnapshot{}, ArchivedResourceEnvironmentRetirementIdentity{}, fmt.Errorf("%w: decode: %v", ErrArchivedResourceEnvironmentRetirementInvalid, err)
++	}
++	if err := requireRetirementJSONEOF(decoder); err != nil {
++		return ArchivedResourceEnvironmentRetirementSnapshot{}, ArchivedResourceEnvironmentRetirementIdentity{}, err
++	}
++	if err := validateArchivedResourceEnvironmentRetirementSnapshot(snapshot); err != nil {
++		return ArchivedResourceEnvironmentRetirementSnapshot{}, ArchivedResourceEnvironmentRetirementIdentity{}, err
++	}
++	canonical, err := json.Marshal(snapshot)
++	if err != nil {
++		return ArchivedResourceEnvironmentRetirementSnapshot{}, ArchivedResourceEnvironmentRetirementIdentity{}, fmt.Errorf("%w: re-encode: %v", ErrArchivedResourceEnvironmentRetirementInvalid, err)
++	}
++	if !bytes.Equal(raw, canonical) {
++		return ArchivedResourceEnvironmentRetirementSnapshot{}, ArchivedResourceEnvironmentRetirementIdentity{}, fmt.Errorf("%w: document is not canonical", ErrArchivedResourceEnvironmentRetirementInvalid)
++	}
++	return snapshot, archivedResourceEnvironmentRetirementIdentity(snapshot, raw), nil
++}
++
++// ArchivedResourceEnvironmentRetirementManagedRootKey derives the canonical
++// managed root identity from the environment's first canonical worktree_path.
++// Returns an empty string when the environment has no repositories.
++func ArchivedResourceEnvironmentRetirementManagedRootKey(worktreePath string) (string, error) {
++	if worktreePath == "" {
++		return "", nil
++	}
++	if err := validateRetirementCanonicalAbsolutePath("worktree_path", worktreePath); err != nil {
++		return "", err
++	}
++	return "git_worktree:" + sha256Hex([]byte(worktreePath)), nil
++}
++
++func archivedResourceEnvironmentRetirementIdentity(
++	snapshot ArchivedResourceEnvironmentRetirementSnapshot,
++	raw []byte,
++) ArchivedResourceEnvironmentRetirementIdentity {
++	digest := sha256Hex(raw)
++	firstPath := ""
++	if len(snapshot.Immutable.Repositories) > 0 {
++		firstPath = snapshot.Immutable.Repositories[0].WorktreePath
++	}
++	managedRootKey, _ := ArchivedResourceEnvironmentRetirementManagedRootKey(firstPath)
++	return ArchivedResourceEnvironmentRetirementIdentity{
++		SnapshotDigest: digest,
++		OperationID:    "archived-resource-environment-retirement:" + digest,
++		ActiveScopeKey: "archived-resource-environment-retirement:" + sha256Hex([]byte(
++			snapshot.Immutable.EnvironmentID+"\x00"+snapshot.Immutable.TaskID+"\x00"+digest,
++		)),
++		ResourceKind:   "task_environment",
++		ResourceID:     snapshot.Immutable.EnvironmentID,
++		ManagedRootKey: managedRootKey,
++	}
++}
++
++func validateArchivedResourceEnvironmentRetirementSnapshot(snapshot ArchivedResourceEnvironmentRetirementSnapshot) error {
++	if snapshot.SchemaVersion != ArchivedResourceEnvironmentRetirementSnapshotVersion {
++		return fmt.Errorf("%w: schema_version must be %d", ErrArchivedResourceEnvironmentRetirementInvalid, ArchivedResourceEnvironmentRetirementSnapshotVersion)
++	}
++	if snapshot.Kind != ArchivedResourceEnvironmentRetirementSnapshotKind {
++		return fmt.Errorf("%w: unexpected kind", ErrArchivedResourceEnvironmentRetirementInvalid)
++	}
++	if snapshot.Phase != ArchivedResourceEnvironmentRetirementSnapshotPhase {
++		return fmt.Errorf("%w: unexpected phase", ErrArchivedResourceEnvironmentRetirementInvalid)
++	}
++	if err := validateArchivedResourceEnvironmentRetirementImmutable(snapshot.Immutable); err != nil {
++		return err
++	}
++	return validateArchivedResourceEnvironmentRetirementProof(snapshot.Retirement)
++}
++
++func validateArchivedResourceEnvironmentRetirementImmutable(immutable ArchivedResourceEnvironmentRetirementImmutable) error {
++	for name, value := range map[string]string{
++		"environment_id":     immutable.EnvironmentID,
++		"task_id":            immutable.TaskID,
++		"environment_status": immutable.EnvironmentStatus,
++	} {
++		if err := validateRetirementOpaque(name, value); err != nil {
++			return err
++		}
++	}
++	switch immutable.EnvironmentStatus {
++	case "stopped", "failed":
++	default:
++		return fmt.Errorf("%w: environment_status must be stopped or failed", ErrArchivedResourceEnvironmentRetirementInvalid)
++	}
++	if len(immutable.Repositories) == 0 || len(immutable.Repositories) > ArchivedResourceEnvironmentRetirementMaxRepositories {
++		return fmt.Errorf("%w: repositories count must be between 1 and %d", ErrArchivedResourceEnvironmentRetirementInvalid, ArchivedResourceEnvironmentRetirementMaxRepositories)
++	}
++	seen := make(map[string]struct{}, len(immutable.Repositories))
++	for i, repo := range immutable.Repositories {
++		if i > 0 && !retirementRepositoryLess(immutable.Repositories[i-1], repo) {
++			return fmt.Errorf("%w: repositories are not canonically sorted", ErrArchivedResourceEnvironmentRetirementInvalid)
++		}
++		if _, ok := seen[repo.ID]; ok {
++			return fmt.Errorf("%w: duplicate repository row id", ErrArchivedResourceEnvironmentRetirementInvalid)
++		}
++		seen[repo.ID] = struct{}{}
++		if err := validateRetirementRepository(repo); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++func validateRetirementRepository(repo ArchivedResourceEnvironmentRetirementRepository) error {
++	for name, value := range map[string]string{
++		"id":              repo.ID,
++		"repository_id":   repo.RepositoryID,
++		"worktree_id":     repo.WorktreeID,
++		"worktree_branch": repo.WorktreeBranch,
++		"status":          repo.Status,
++	} {
++		if err := validateRetirementOpaque(name, value); err != nil {
++			return err
++		}
++	}
++	if err := validateRetirementOptionalOpaque("branch_slug", repo.BranchSlug); err != nil {
++		return err
++	}
++	if repo.WorktreePath != "" {
++		if err := validateRetirementCanonicalAbsolutePath("worktree_path", repo.WorktreePath); err != nil {
++			return err
++		}
++	}
++	for name, value := range map[string]string{
++		"created_at": repo.CreatedAt,
++		"updated_at": repo.UpdatedAt,
++	} {
++		if err := validateRetirementCanonicalUTC(name, value); err != nil {
++			return err
++		}
++	}
++	if repo.MergedAt != "" {
++		if err := validateRetirementCanonicalUTC("merged_at", repo.MergedAt); err != nil {
++			return err
++		}
++	}
++	if repo.DeletedAt != "" {
++		if err := validateRetirementCanonicalUTC("deleted_at", repo.DeletedAt); err != nil {
++			return err
++		}
++	}
++	switch repo.Status {
++	case "active", "merged", "deleted":
++	default:
++		return fmt.Errorf("%w: repository status must be active, merged, or deleted", ErrArchivedResourceEnvironmentRetirementInvalid)
++	}
++	return nil
++}
++
++func validateArchivedResourceEnvironmentRetirementProof(proof ArchivedResourceEnvironmentRetirementProof) error {
++	if err := validateRetirementCanonicalUTC("retired_at", proof.RetiredAt); err != nil {
++		return err
++	}
++	return nil
++}
++
++func retirementRepositoryLess(left, right ArchivedResourceEnvironmentRetirementRepository) bool {
++	if left.ID != right.ID {
++		return left.ID < right.ID
++	}
++	if left.RepositoryID != right.RepositoryID {
++		return left.RepositoryID < right.RepositoryID
++	}
++	if left.WorktreeID != right.WorktreeID {
++		return left.WorktreeID < right.WorktreeID
++	}
++	return left.CreatedAt < right.CreatedAt
++}
++
++func validateRetirementOpaque(name, value string) error {
++	if !utf8.ValidString(value) || strings.TrimSpace(value) == "" || value != strings.TrimSpace(value) {
++		return fmt.Errorf("%w: %s is empty or not trimmed", ErrArchivedResourceEnvironmentRetirementInvalid, name)
++	}
++	for _, r := range value {
++		if unicode.IsControl(r) {
++			return fmt.Errorf("%w: %s contains a control character", ErrArchivedResourceEnvironmentRetirementInvalid, name)
++		}
++	}
++	return nil
++}
++
++func validateRetirementOptionalOpaque(name, value string) error {
++	if value == "" {
++		return nil
++	}
++	return validateRetirementOpaque(name, value)
++}
++
++func validateRetirementCanonicalAbsolutePath(name, value string) error {
++	if !utf8.ValidString(value) || value == "" || !filepath.IsAbs(value) || filepath.Clean(value) != value ||
++		filepath.Dir(value) == value || strings.ContainsRune(value, '\x00') {
++		return fmt.Errorf("%w: %s must be a canonical absolute path", ErrArchivedResourceEnvironmentRetirementInvalid, name)
++	}
++	return nil
++}
++
++func validateRetirementCanonicalUTC(name, value string) error {
++	parsed, err := time.Parse(time.RFC3339Nano, value)
++	if err != nil || parsed.Location() != time.UTC || parsed.Format(time.RFC3339Nano) != value {
++		return fmt.Errorf("%w: %s must be canonical RFC3339Nano UTC", ErrArchivedResourceEnvironmentRetirementInvalid, name)
++	}
++	return nil
++}
++
++func rejectDuplicateRetirementJSONKeys(raw []byte) error {
++	decoder := json.NewDecoder(bytes.NewReader(raw))
++	decoder.UseNumber()
++	if err := walkRetirementJSONValue(decoder); err != nil {
++		return fmt.Errorf("%w: %v", ErrArchivedResourceEnvironmentRetirementInvalid, err)
++	}
++	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
++		if err == nil {
++			return errors.New("trailing JSON value")
++		}
++		return fmt.Errorf("trailing JSON: %v", err)
++	}
++	return nil
++}
++
++func walkRetirementJSONValue(decoder *json.Decoder) error {
++	token, err := decoder.Token()
++	if err != nil {
++		return err
++	}
++	delim, ok := token.(json.Delim)
++	if !ok {
++		return nil
++	}
++	switch delim {
++	case '{':
++		seen := make(map[string]struct{})
++		for decoder.More() {
++			keyToken, err := decoder.Token()
++			if err != nil {
++				return err
++			}
++			key, ok := keyToken.(string)
++			if !ok {
++				return errors.New("object key is not a string")
++			}
++			if _, exists := seen[key]; exists {
++				return fmt.Errorf("duplicate object key %q", key)
++			}
++			seen[key] = struct{}{}
++			if err := walkRetirementJSONValue(decoder); err != nil {
++				return err
++			}
++		}
++		end, err := decoder.Token()
++		if err != nil {
++			return err
++		}
++		if end != json.Delim('}') {
++			return errors.New("object did not terminate")
++		}
++	case '[':
++		for decoder.More() {
++			if err := walkRetirementJSONValue(decoder); err != nil {
++				return err
++			}
++		}
++		end, err := decoder.Token()
++		if err != nil {
++			return err
++		}
++		if end != json.Delim(']') {
++			return errors.New("array did not terminate")
++		}
++	default:
++		return fmt.Errorf("unexpected delimiter %q", delim)
++	}
++	return nil
++}
++
++func requireRetirementJSONEOF(decoder *json.Decoder) error {
++	if token, err := decoder.Token(); !errors.Is(err, io.EOF) {
++		if err != nil {
++			return fmt.Errorf("%w: trailing JSON: %v", ErrArchivedResourceEnvironmentRetirementInvalid, err)
++		}
++		return fmt.Errorf("%w: trailing JSON value %v", ErrArchivedResourceEnvironmentRetirementInvalid, token)
++	}
++	return nil
++}
+diff --git a/apps/backend/internal/task/models/archived_resource_environment_retirement_test.go b/apps/backend/internal/task/models/archived_resource_environment_retirement_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5839c5b92f761a19aef8d2fd8e8f4c5595d340e2
+--- /dev/null
++++ b/apps/backend/internal/task/models/archived_resource_environment_retirement_test.go
+@@ -0,0 +1,137 @@
++package models
++
++import (
++	"bytes"
++	"encoding/json"
++	"errors"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestArchivedResourceEnvironmentRetirementSnapshotCanonicalRoundTrip(t *testing.T) {
++	immutable, proof := archivedResourceRetirementFixture(t)
++	snapshot, raw, identity, err := NewArchivedResourceEnvironmentRetirementSnapshot(immutable, proof)
++	if err != nil {
++		t.Fatalf("NewArchivedResourceEnvironmentRetirementSnapshot: %v", err)
++	}
++	if snapshot.SchemaVersion != ArchivedResourceEnvironmentRetirementSnapshotVersion ||
++		snapshot.Kind != ArchivedResourceEnvironmentRetirementSnapshotKind ||
++		snapshot.Phase != ArchivedResourceEnvironmentRetirementSnapshotPhase {
++		t.Fatalf("canonical contract violated: %#v", snapshot)
++	}
++	decoded, decodedIdentity, err := DecodeArchivedResourceEnvironmentRetirementSnapshot(raw)
++	if err != nil {
++		t.Fatalf("DecodeArchivedResourceEnvironmentRetirementSnapshot: %v", err)
++	}
++	if decodedIdentity != identity {
++		t.Fatalf("identity drift after decode:\n got %#v\nwant %#v", decodedIdentity, identity)
++	}
++	reEncoded, err := json.Marshal(decoded)
++	if err != nil {
++		t.Fatalf("re-encode: %v", err)
++	}
++	if !bytes.Equal(raw, reEncoded) {
++		t.Fatal("canonical raw bytes drifted across decode")
++	}
++}
++
++func TestArchivedResourceEnvironmentRetirementSnapshotSortsRepositoriesAndRejectsDuplicates(t *testing.T) {
++	immutable, proof := archivedResourceRetirementFixture(t)
++	immutable.Repositories = []ArchivedResourceEnvironmentRetirementRepository{
++		archivedResourceRetirementRepositoryFixture("repo-b", "wt-b"),
++		archivedResourceRetirementRepositoryFixture("repo-a", "wt-a"),
++	}
++	snapshot, _, _, err := NewArchivedResourceEnvironmentRetirementSnapshot(immutable, proof)
++	if err != nil {
++		t.Fatalf("sort: %v", err)
++	}
++	if got := snapshot.Immutable.Repositories[0].ID; got != "repo-a-row" {
++		t.Fatalf("repositories not sorted: first=%q", got)
++	}
++	immutable, proof = archivedResourceRetirementFixture(t)
++	immutable.Repositories = []ArchivedResourceEnvironmentRetirementRepository{
++		archivedResourceRetirementRepositoryFixture("repo-a", "wt-a"),
++		archivedResourceRetirementRepositoryFixture("repo-a", "wt-a"),
++	}
++	if _, _, _, err := NewArchivedResourceEnvironmentRetirementSnapshot(immutable, proof); !errors.Is(err, ErrArchivedResourceEnvironmentRetirementInvalid) {
++		t.Fatalf("duplicate row accepted: %v", err)
++	}
++}
++
++func TestArchivedResourceEnvironmentRetirementSnapshotRejectsInvalidStatusesAndTimestamps(t *testing.T) {
++	immutable, proof := archivedResourceRetirementFixture(t)
++	immutable.EnvironmentStatus = "ready"
++	if _, _, _, err := NewArchivedResourceEnvironmentRetirementSnapshot(immutable, proof); !errors.Is(err, ErrArchivedResourceEnvironmentRetirementInvalid) {
++		t.Fatalf("invalid environment status accepted: %v", err)
++	}
++	immutable, proof = archivedResourceRetirementFixture(t)
++	immutable.Repositories[0].Status = "future"
++	if _, _, _, err := NewArchivedResourceEnvironmentRetirementSnapshot(immutable, proof); !errors.Is(err, ErrArchivedResourceEnvironmentRetirementInvalid) {
++		t.Fatalf("invalid repository status accepted: %v", err)
++	}
++	immutable, proof = archivedResourceRetirementFixture(t)
++	immutable.Repositories[0].CreatedAt = "2026-08-12 10:00:00"
++	if _, _, _, err := NewArchivedResourceEnvironmentRetirementSnapshot(immutable, proof); !errors.Is(err, ErrArchivedResourceEnvironmentRetirementInvalid) {
++		t.Fatalf("non-canonical created_at accepted: %v", err)
++	}
++}
++
++func TestArchivedResourceEnvironmentRetirementSnapshotDecodeRejectsTrailingJSON(t *testing.T) {
++	immutable, proof := archivedResourceRetirementFixture(t)
++	_, raw, _, err := NewArchivedResourceEnvironmentRetirementSnapshot(immutable, proof)
++	if err != nil {
++		t.Fatalf("build: %v", err)
++	}
++	if _, _, err := DecodeArchivedResourceEnvironmentRetirementSnapshot(append(raw, ' ', 'y')); err == nil {
++		t.Fatal("trailing JSON accepted")
++	}
++}
++
++func archivedResourceRetirementFixture(t *testing.T) (ArchivedResourceEnvironmentRetirementImmutable, ArchivedResourceEnvironmentRetirementProof) {
++	t.Helper()
++	now := time.Date(2026, 8, 12, 1, 2, 3, 4, time.UTC).Format(time.RFC3339Nano)
++	return ArchivedResourceEnvironmentRetirementImmutable{
++			EnvironmentID:     "env-stopped",
++			TaskID:            "task-archived",
++			EnvironmentStatus: "stopped",
++			Repositories: []ArchivedResourceEnvironmentRetirementRepository{
++				archivedResourceRetirementRepositoryFixture("repo-a", "wt-a"),
++			},
++		}, ArchivedResourceEnvironmentRetirementProof{
++			RetiredAt: now,
++		}
++}
++
++func archivedResourceRetirementRepositoryFixture(repositoryID, worktreeID string) ArchivedResourceEnvironmentRetirementRepository {
++	createdAt := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
++	updatedAt := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
++	return ArchivedResourceEnvironmentRetirementRepository{
++		ID:             repositoryID + "-row",
++		RepositoryID:   repositoryID,
++		BranchSlug:     "feature/synthetic",
++		WorktreeID:     worktreeID,
++		WorktreePath:   "/tmp/kandev/worktree",
++		WorktreeBranch: "feature/synthetic",
++		Position:       0,
++		Status:         "deleted",
++		CreatedAt:      createdAt,
++		UpdatedAt:      updatedAt,
++		DeletedAt:      updatedAt,
++	}
++}
++
++func TestArchivedResourceEnvironmentRetirementManagedRootKeyIgnoresEmptyPath(t *testing.T) {
++	key, err := ArchivedResourceEnvironmentRetirementManagedRootKey("")
++	if err != nil {
++		t.Fatalf("empty path: %v", err)
++	}
++	if key != "" {
++		t.Fatalf("expected empty key for empty path: %q", key)
++	}
++	if _, err := ArchivedResourceEnvironmentRetirementManagedRootKey("relative"); err == nil {
++		t.Fatal("relative path accepted")
++	}
++}
++
++var _ = strings.HasPrefix // keep strings import
+diff --git a/apps/backend/internal/task/models/archived_resource_reconcile.go b/apps/backend/internal/task/models/archived_resource_reconcile.go
+index 50bd39d07c8bf9114beb1380c6327bc8a03c16ca..8dfe7ba1ed5a7adb70b76d6f9fb62b3904aedd59 100644
+--- a/apps/backend/internal/task/models/archived_resource_reconcile.go
++++ b/apps/backend/internal/task/models/archived_resource_reconcile.go
+@@ -180,8 +180,25 @@ func IsActiveArchivedResourceReconcileState(state TaskResourceCleanupState) bool
+ 	}
+ }
+ 
++// IsTerminalArchivedResourceReconcileState reports whether the state is a
++// durable terminal phase for a v2/v3 anchor: Succeeded/Failed/Cancelled never
++// apply to a versioned anchor (rejected by the validator above); Retained and
++// Released are durable anchor phases (Blocked is not terminal). Released keeps
++// the same revision and CompletedAt fields as Retained because the absent-target
++// release is metadata-only and never widens the anchor's durable contract.
++func IsTerminalArchivedResourceReconcileState(state TaskResourceCleanupState) bool {
++	switch state {
++	case TaskResourceCleanupStateRetained,
++		TaskResourceCleanupStateReleased:
++		return true
++	default:
++		return false
++	}
++}
++
+ func validateArchivedResourceAnchorLifecycle(job *TaskResourceCleanupJob) error {
+-	if !IsActiveArchivedResourceReconcileState(job.State) {
++	if !IsActiveArchivedResourceReconcileState(job.State) &&
++		!IsTerminalArchivedResourceReconcileState(job.State) {
+ 		return fmt.Errorf("%w: reconcile job state %q is not an active anchor", ErrArchivedResourceSnapshotInvalid, job.State)
+ 	}
+ 	switch job.State {
+@@ -192,9 +209,9 @@ func validateArchivedResourceAnchorLifecycle(job *TaskResourceCleanupJob) error
+ 		if job.AnchorRevision != 0 || job.CompletedAt != nil {
+ 			return fmt.Errorf("%w: pre-retention state has terminal anchor fields", ErrArchivedResourceSnapshotInvalid)
+ 		}
+-	case TaskResourceCleanupStateRetained:
++	case TaskResourceCleanupStateRetained, TaskResourceCleanupStateReleased:
+ 		if job.AnchorRevision != ArchivedResourceRetentionAnchorVersion || job.CompletedAt == nil || job.CompletedAt.IsZero() {
+-			return fmt.Errorf("%w: retained state requires revision one and completion time", ErrArchivedResourceSnapshotInvalid)
++			return fmt.Errorf("%w: %s state requires revision one and completion time", ErrArchivedResourceSnapshotInvalid, job.State)
+ 		}
+ 	case TaskResourceCleanupStateBlocked:
+ 		if job.AnchorRevision < 0 || job.AnchorRevision > ArchivedResourceRetentionAnchorVersion ||
+diff --git a/apps/backend/internal/task/models/archived_resource_release.go b/apps/backend/internal/task/models/archived_resource_release.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7d4a2a3db9e0de8f6de3c850d1d45ee705debef9
+--- /dev/null
++++ b/apps/backend/internal/task/models/archived_resource_release.go
+@@ -0,0 +1,388 @@
++package models
++
++import (
++	"bytes"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"path/filepath"
++	"strings"
++	"time"
++	"unicode"
++	"unicode/utf8"
++)
++
++const (
++	ArchivedResourceReleaseSnapshotVersion = 2
++	ArchivedResourceReleaseSnapshotKind    = "archived_resource_release"
++	ArchivedResourceReleaseSnapshotPhase   = "db_unbound_released"
++)
++
++const ArchivedResourceReleaseMaxSnapshotBytes = 16 * 1024
++
++var (
++	ErrArchivedResourceReleaseInvalid  = errors.New("archived resource release snapshot is invalid")
++	ErrArchivedResourceReleaseTooLarge = errors.New("archived resource release snapshot exceeds size limit")
++)
++
++// ArchivedResourceReleaseSnapshot is the canonical, durable, metadata-only
++// admission request for absent-target release. It binds exactly one retained
++// v2 anchor (operation_id + digest + task + target identity) to the canonical
++// physical path. The release admission proves the physical path is absent
++// from inventory and the Git worktree registration is absent before the
++// anchor transitions from retained to released.
++type ArchivedResourceReleaseSnapshot struct {
++	SchemaVersion int                                 `json:"schema_version"`
++	Kind          string                              `json:"kind"`
++	Phase         string                              `json:"phase"`
++	Immutable     ArchivedResourceReleaseImmutable    `json:"immutable"`
++	Release       ArchivedResourceReleaseReleaseProof `json:"release"`
++}
++
++type ArchivedResourceReleaseImmutable struct {
++	AnchorOperationID  string `json:"anchor_operation_id"`
++	AnchorDigest       string `json:"anchor_digest"`
++	AnchorTaskID       string `json:"anchor_task_id"`
++	AnchorWorktreeID   string `json:"anchor_worktree_id"`
++	AnchorRepository   string `json:"anchor_repository_id"`
++	AnchorBranch       string `json:"anchor_branch"`
++	AnchorHeadOID      string `json:"anchor_head_oid"`
++	AnchorWorktreePath string `json:"anchor_worktree_path"`
++	AnchorGitCommonDir string `json:"anchor_git_common_dir"`
++}
++
++// ArchivedResourceReleaseReleaseProof is the sealed admission proof that the
++// retained target is absent. PhysicalPath is the canonical absolute path the
++// admission verifies; GitWorktreeRegistration is the exact Git worktree
++// registration (path + branch + head_oid) that admission verifies as absent.
++// ReleasedAt is the RFC3339Nano UTC stamp the released anchor will carry.
++type ArchivedResourceReleaseReleaseProof struct {
++	PhysicalPath            string                                 `json:"physical_path"`
++	GitWorktreeRegistration ArchivedResourceReleaseGitRegistration `json:"git_worktree_registration"`
++	ReleasedAt              string                                 `json:"released_at"`
++}
++
++type ArchivedResourceReleaseGitRegistration struct {
++	WorktreePath string `json:"worktree_path"`
++	Branch       string `json:"branch"`
++	HeadOID      string `json:"head_oid"`
++}
++
++// ArchivedResourceReleaseIdentity is the redundant header set bound alongside
++// the resource_snapshot. Every field is derived from canonical snapshot bytes
++// so an admission cannot self-sign identity without re-encoding.
++type ArchivedResourceReleaseIdentity struct {
++	SnapshotDigest        string
++	AnchorOperationID     string
++	AnchorDigest          string
++	OperationID           string
++	ActiveScopeKey        string
++	ResourceKind          string
++	ResourceID            string
++	ManagedRootKey        string
++	CanonicalWorktreePath string
++}
++
++// ArchivedResourceReleaseAdmission is the durable receipt returned by the
++// release writer after a successful admission. Reason is metadata only.
++type ArchivedResourceReleaseAdmission struct {
++	Job    *TaskResourceCleanupJob
++	Reason string
++}
++
++// NewArchivedResourceReleaseSnapshot validates and canonicalizes the
++// metadata-only release request. The returned raw bytes are the only accepted
++// representation for the resource_snapshot column.
++func NewArchivedResourceReleaseSnapshot(
++	immutable ArchivedResourceReleaseImmutable,
++	release ArchivedResourceReleaseReleaseProof,
++) (ArchivedResourceReleaseSnapshot, []byte, ArchivedResourceReleaseIdentity, error) {
++	if err := validateArchivedResourceReleaseImmutable(immutable); err != nil {
++		return ArchivedResourceReleaseSnapshot{}, nil, ArchivedResourceReleaseIdentity{}, err
++	}
++	if err := validateArchivedResourceReleaseProof(release); err != nil {
++		return ArchivedResourceReleaseSnapshot{}, nil, ArchivedResourceReleaseIdentity{}, err
++	}
++	if immutable.AnchorWorktreePath != release.PhysicalPath {
++		return ArchivedResourceReleaseSnapshot{}, nil, ArchivedResourceReleaseIdentity{}, fmt.Errorf("%w: physical path does not bind anchor worktree_path", ErrArchivedResourceReleaseInvalid)
++	}
++	if immutable.AnchorWorktreePath != release.GitWorktreeRegistration.WorktreePath ||
++		immutable.AnchorBranch != release.GitWorktreeRegistration.Branch ||
++		immutable.AnchorHeadOID != release.GitWorktreeRegistration.HeadOID {
++		return ArchivedResourceReleaseSnapshot{}, nil, ArchivedResourceReleaseIdentity{}, fmt.Errorf("%w: git registration does not bind anchor target", ErrArchivedResourceReleaseInvalid)
++	}
++	snapshot := ArchivedResourceReleaseSnapshot{
++		SchemaVersion: ArchivedResourceReleaseSnapshotVersion,
++		Kind:          ArchivedResourceReleaseSnapshotKind,
++		Phase:         ArchivedResourceReleaseSnapshotPhase,
++		Immutable:     immutable,
++		Release:       release,
++	}
++	raw, err := json.Marshal(snapshot)
++	if err != nil {
++		return ArchivedResourceReleaseSnapshot{}, nil, ArchivedResourceReleaseIdentity{}, fmt.Errorf("%w: encode snapshot: %v", ErrArchivedResourceReleaseInvalid, err)
++	}
++	if len(raw) > ArchivedResourceReleaseMaxSnapshotBytes {
++		return ArchivedResourceReleaseSnapshot{}, nil, ArchivedResourceReleaseIdentity{}, ErrArchivedResourceReleaseTooLarge
++	}
++	identity := archivedResourceReleaseIdentity(snapshot, raw)
++	return snapshot, raw, identity, nil
++}
++
++// DecodeArchivedResourceReleaseSnapshot is the strict decoder used to read a
++// previously persisted release snapshot from the database.
++func DecodeArchivedResourceReleaseSnapshot(
++	raw []byte,
++) (ArchivedResourceReleaseSnapshot, ArchivedResourceReleaseIdentity, error) {
++	if len(raw) == 0 {
++		return ArchivedResourceReleaseSnapshot{}, ArchivedResourceReleaseIdentity{}, fmt.Errorf("%w: empty document", ErrArchivedResourceReleaseInvalid)
++	}
++	if len(raw) > ArchivedResourceReleaseMaxSnapshotBytes {
++		return ArchivedResourceReleaseSnapshot{}, ArchivedResourceReleaseIdentity{}, ErrArchivedResourceReleaseTooLarge
++	}
++	if err := rejectDuplicateReleaseJSONKeys(raw); err != nil {
++		return ArchivedResourceReleaseSnapshot{}, ArchivedResourceReleaseIdentity{}, err
++	}
++	decoder := json.NewDecoder(bytes.NewReader(raw))
++	decoder.DisallowUnknownFields()
++	var snapshot ArchivedResourceReleaseSnapshot
++	if err := decoder.Decode(&snapshot); err != nil {
++		return ArchivedResourceReleaseSnapshot{}, ArchivedResourceReleaseIdentity{}, fmt.Errorf("%w: decode: %v", ErrArchivedResourceReleaseInvalid, err)
++	}
++	if err := requireReleaseJSONEOF(decoder); err != nil {
++		return ArchivedResourceReleaseSnapshot{}, ArchivedResourceReleaseIdentity{}, err
++	}
++	if err := validateArchivedResourceReleaseSnapshot(snapshot); err != nil {
++		return ArchivedResourceReleaseSnapshot{}, ArchivedResourceReleaseIdentity{}, err
++	}
++	canonical, err := json.Marshal(snapshot)
++	if err != nil {
++		return ArchivedResourceReleaseSnapshot{}, ArchivedResourceReleaseIdentity{}, fmt.Errorf("%w: re-encode: %v", ErrArchivedResourceReleaseInvalid, err)
++	}
++	if !bytes.Equal(raw, canonical) {
++		return ArchivedResourceReleaseSnapshot{}, ArchivedResourceReleaseIdentity{}, fmt.Errorf("%w: document is not canonical", ErrArchivedResourceReleaseInvalid)
++	}
++	return snapshot, archivedResourceReleaseIdentity(snapshot, raw), nil
++}
++
++// ArchivedResourceReleaseManagedRootKey derives the canonical managed root
++// identity from the anchor's canonical worktree_path.
++func ArchivedResourceReleaseManagedRootKey(worktreePath string) (string, error) {
++	if err := validateReleaseCanonicalAbsolutePath("worktree_path", worktreePath); err != nil {
++		return "", err
++	}
++	return "git_worktree:" + sha256Hex([]byte(worktreePath)), nil
++}
++
++func archivedResourceReleaseIdentity(
++	snapshot ArchivedResourceReleaseSnapshot,
++	raw []byte,
++) ArchivedResourceReleaseIdentity {
++	digest := sha256Hex(raw)
++	managedRootKey, _ := ArchivedResourceReleaseManagedRootKey(snapshot.Immutable.AnchorWorktreePath)
++	return ArchivedResourceReleaseIdentity{
++		SnapshotDigest:        digest,
++		AnchorOperationID:     snapshot.Immutable.AnchorOperationID,
++		AnchorDigest:          snapshot.Immutable.AnchorDigest,
++		OperationID:           "archived-resource-release:" + digest,
++		ActiveScopeKey:        "archived-resource-release:" + sha256Hex([]byte(snapshot.Immutable.AnchorOperationID+"\x00"+snapshot.Immutable.AnchorDigest+"\x00"+digest)),
++		ResourceKind:          ArchivedResourceReconcileResourceKind,
++		ResourceID:            snapshot.Immutable.AnchorWorktreeID,
++		ManagedRootKey:        managedRootKey,
++		CanonicalWorktreePath: snapshot.Immutable.AnchorWorktreePath,
++	}
++}
++
++func validateArchivedResourceReleaseSnapshot(snapshot ArchivedResourceReleaseSnapshot) error {
++	if snapshot.SchemaVersion != ArchivedResourceReleaseSnapshotVersion {
++		return fmt.Errorf("%w: schema_version must be %d", ErrArchivedResourceReleaseInvalid, ArchivedResourceReleaseSnapshotVersion)
++	}
++	if snapshot.Kind != ArchivedResourceReleaseSnapshotKind {
++		return fmt.Errorf("%w: unexpected kind", ErrArchivedResourceReleaseInvalid)
++	}
++	if snapshot.Phase != ArchivedResourceReleaseSnapshotPhase {
++		return fmt.Errorf("%w: unexpected phase", ErrArchivedResourceReleaseInvalid)
++	}
++	if err := validateArchivedResourceReleaseImmutable(snapshot.Immutable); err != nil {
++		return err
++	}
++	if err := validateArchivedResourceReleaseProof(snapshot.Release); err != nil {
++		return err
++	}
++	if snapshot.Immutable.AnchorWorktreePath != snapshot.Release.PhysicalPath ||
++		snapshot.Immutable.AnchorWorktreePath != snapshot.Release.GitWorktreeRegistration.WorktreePath ||
++		snapshot.Immutable.AnchorBranch != snapshot.Release.GitWorktreeRegistration.Branch ||
++		snapshot.Immutable.AnchorHeadOID != snapshot.Release.GitWorktreeRegistration.HeadOID {
++		return fmt.Errorf("%w: release proof does not bind anchor identity", ErrArchivedResourceReleaseInvalid)
++	}
++	return nil
++}
++
++func validateArchivedResourceReleaseImmutable(immutable ArchivedResourceReleaseImmutable) error {
++	for name, value := range map[string]string{
++		"anchor_operation_id":   immutable.AnchorOperationID,
++		"anchor_digest":         immutable.AnchorDigest,
++		"anchor_task_id":        immutable.AnchorTaskID,
++		"anchor_worktree_id":    immutable.AnchorWorktreeID,
++		"anchor_repository_id":  immutable.AnchorRepository,
++		"anchor_branch":         immutable.AnchorBranch,
++		"anchor_head_oid":       immutable.AnchorHeadOID,
++		"anchor_worktree_path":  immutable.AnchorWorktreePath,
++		"anchor_git_common_dir": immutable.AnchorGitCommonDir,
++	} {
++		if err := validateReleaseOpaque(name, value); err != nil {
++			return err
++		}
++	}
++	if err := validateReleaseCanonicalAbsolutePath("anchor_worktree_path", immutable.AnchorWorktreePath); err != nil {
++		return err
++	}
++	if err := validateReleaseCanonicalAbsolutePath("anchor_git_common_dir", immutable.AnchorGitCommonDir); err != nil {
++		return err
++	}
++	if len(immutable.AnchorHeadOID) != 40 || strings.ToLower(immutable.AnchorHeadOID) != immutable.AnchorHeadOID {
++		return fmt.Errorf("%w: anchor_head_oid must be 40 lowercase hex characters", ErrArchivedResourceReleaseInvalid)
++	}
++	if _, err := hex.DecodeString(immutable.AnchorHeadOID); err != nil {
++		return fmt.Errorf("%w: anchor_head_oid must be hexadecimal", ErrArchivedResourceReleaseInvalid)
++	}
++	return nil
++}
++
++func validateArchivedResourceReleaseProof(release ArchivedResourceReleaseReleaseProof) error {
++	if err := validateReleaseCanonicalAbsolutePath("physical_path", release.PhysicalPath); err != nil {
++		return err
++	}
++	if release.PhysicalPath != release.GitWorktreeRegistration.WorktreePath {
++		return fmt.Errorf("%w: git worktree_path must equal physical_path", ErrArchivedResourceReleaseInvalid)
++	}
++	for name, value := range map[string]string{
++		"git_branch":   release.GitWorktreeRegistration.Branch,
++		"git_head_oid": release.GitWorktreeRegistration.HeadOID,
++	} {
++		if err := validateReleaseOpaque(name, value); err != nil {
++			return err
++		}
++	}
++	if len(release.GitWorktreeRegistration.HeadOID) != 40 ||
++		strings.ToLower(release.GitWorktreeRegistration.HeadOID) != release.GitWorktreeRegistration.HeadOID {
++		return fmt.Errorf("%w: git registration head_oid must be 40 lowercase hex characters", ErrArchivedResourceReleaseInvalid)
++	}
++	if _, err := hex.DecodeString(release.GitWorktreeRegistration.HeadOID); err != nil {
++		return fmt.Errorf("%w: git registration head_oid must be hexadecimal", ErrArchivedResourceReleaseInvalid)
++	}
++	if err := validateReleaseCanonicalUTC("released_at", release.ReleasedAt); err != nil {
++		return err
++	}
++	return nil
++}
++
++func validateReleaseOpaque(name, value string) error {
++	if !utf8.ValidString(value) || strings.TrimSpace(value) == "" || value != strings.TrimSpace(value) {
++		return fmt.Errorf("%w: %s is empty or not trimmed", ErrArchivedResourceReleaseInvalid, name)
++	}
++	for _, r := range value {
++		if unicode.IsControl(r) {
++			return fmt.Errorf("%w: %s contains a control character", ErrArchivedResourceReleaseInvalid, name)
++		}
++	}
++	return nil
++}
++
++func validateReleaseCanonicalAbsolutePath(name, value string) error {
++	if !utf8.ValidString(value) || value == "" || !filepath.IsAbs(value) || filepath.Clean(value) != value ||
++		filepath.Dir(value) == value || strings.ContainsRune(value, '\x00') {
++		return fmt.Errorf("%w: %s must be a canonical absolute path", ErrArchivedResourceReleaseInvalid, name)
++	}
++	return nil
++}
++
++func validateReleaseCanonicalUTC(name, value string) error {
++	parsed, err := time.Parse(time.RFC3339Nano, value)
++	if err != nil || parsed.Location() != time.UTC || parsed.Format(time.RFC3339Nano) != value {
++		return fmt.Errorf("%w: %s must be canonical RFC3339Nano UTC", ErrArchivedResourceReleaseInvalid, name)
++	}
++	return nil
++}
++
++func rejectDuplicateReleaseJSONKeys(raw []byte) error {
++	decoder := json.NewDecoder(bytes.NewReader(raw))
++	decoder.UseNumber()
++	if err := walkReleaseJSONValue(decoder); err != nil {
++		return fmt.Errorf("%w: %v", ErrArchivedResourceReleaseInvalid, err)
++	}
++	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
++		if err == nil {
++			return errors.New("trailing JSON value")
++		}
++		return fmt.Errorf("trailing JSON: %v", err)
++	}
++	return nil
++}
++
++func walkReleaseJSONValue(decoder *json.Decoder) error {
++	token, err := decoder.Token()
++	if err != nil {
++		return err
++	}
++	delim, ok := token.(json.Delim)
++	if !ok {
++		return nil
++	}
++	switch delim {
++	case '{':
++		seen := make(map[string]struct{})
++		for decoder.More() {
++			keyToken, err := decoder.Token()
++			if err != nil {
++				return err
++			}
++			key, ok := keyToken.(string)
++			if !ok {
++				return errors.New("object key is not a string")
++			}
++			if _, exists := seen[key]; exists {
++				return fmt.Errorf("duplicate object key %q", key)
++			}
++			seen[key] = struct{}{}
++			if err := walkReleaseJSONValue(decoder); err != nil {
++				return err
++			}
++		}
++		end, err := decoder.Token()
++		if err != nil {
++			return err
++		}
++		if end != json.Delim('}') {
++			return errors.New("object did not terminate")
++		}
++	case '[':
++		for decoder.More() {
++			if err := walkReleaseJSONValue(decoder); err != nil {
++				return err
++			}
++		}
++		end, err := decoder.Token()
++		if err != nil {
++			return err
++		}
++		if end != json.Delim(']') {
++			return errors.New("array did not terminate")
++		}
++	default:
++		return fmt.Errorf("unexpected delimiter %q", delim)
++	}
++	return nil
++}
++
++func requireReleaseJSONEOF(decoder *json.Decoder) error {
++	if token, err := decoder.Token(); !errors.Is(err, io.EOF) {
++		if err != nil {
++			return fmt.Errorf("%w: trailing JSON: %v", ErrArchivedResourceReleaseInvalid, err)
++		}
++		return fmt.Errorf("%w: trailing JSON value %v", ErrArchivedResourceReleaseInvalid, token)
++	}
++	return nil
++}
+diff --git a/apps/backend/internal/task/models/archived_resource_release_test.go b/apps/backend/internal/task/models/archived_resource_release_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e3a3bf26990dbf05d22e95813c7dd0403de5a7b4
+--- /dev/null
++++ b/apps/backend/internal/task/models/archived_resource_release_test.go
+@@ -0,0 +1,117 @@
++package models
++
++import (
++	"bytes"
++	"encoding/json"
++	"errors"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestArchivedResourceReleaseSnapshotCanonicalRoundTrip(t *testing.T) {
++	immutable, release := archivedResourceReleaseFixture(t)
++	snapshot, raw, identity, err := NewArchivedResourceReleaseSnapshot(immutable, release)
++	if err != nil {
++		t.Fatalf("NewArchivedResourceReleaseSnapshot: %v", err)
++	}
++	if snapshot.SchemaVersion != ArchivedResourceReleaseSnapshotVersion ||
++		snapshot.Kind != ArchivedResourceReleaseSnapshotKind ||
++		snapshot.Phase != ArchivedResourceReleaseSnapshotPhase {
++		t.Fatalf("canonical contract violated: %#v", snapshot)
++	}
++	decoded, decodedIdentity, err := DecodeArchivedResourceReleaseSnapshot(raw)
++	if err != nil {
++		t.Fatalf("DecodeArchivedResourceReleaseSnapshot: %v", err)
++	}
++	if decodedIdentity != identity {
++		t.Fatalf("identity drift after decode:\n got %#v\nwant %#v", decodedIdentity, identity)
++	}
++	reEncoded, err := json.Marshal(decoded)
++	if err != nil {
++		t.Fatalf("re-encode: %v", err)
++	}
++	if !bytes.Equal(raw, reEncoded) {
++		t.Fatal("canonical raw bytes drifted across decode")
++	}
++}
++
++func TestArchivedResourceReleaseSnapshotRejectsProofAndIdentityDrift(t *testing.T) {
++	immutable, release := archivedResourceReleaseFixture(t)
++	release.PhysicalPath = "/tmp/kandev/worktree-other"
++	if _, _, _, err := NewArchivedResourceReleaseSnapshot(immutable, release); !errors.Is(err, ErrArchivedResourceReleaseInvalid) {
++		t.Fatalf("mismatched physical path accepted: %v", err)
++	}
++	immutable, release = archivedResourceReleaseFixture(t)
++	release.GitWorktreeRegistration.Branch = "feature/other"
++	if _, _, _, err := NewArchivedResourceReleaseSnapshot(immutable, release); !errors.Is(err, ErrArchivedResourceReleaseInvalid) {
++		t.Fatalf("mismatched git registration branch accepted: %v", err)
++	}
++	immutable, release = archivedResourceReleaseFixture(t)
++	immutable.AnchorHeadOID = strings.Repeat("Z", 40)
++	if _, _, _, err := NewArchivedResourceReleaseSnapshot(immutable, release); !errors.Is(err, ErrArchivedResourceReleaseInvalid) {
++		t.Fatalf("uppercase head oid accepted: %v", err)
++	}
++}
++
++func TestArchivedResourceReleaseSnapshotRejectsMissingFields(t *testing.T) {
++	immutable, release := archivedResourceReleaseFixture(t)
++	immutable.AnchorWorktreePath = "not-absolute"
++	if _, _, _, err := NewArchivedResourceReleaseSnapshot(immutable, release); !errors.Is(err, ErrArchivedResourceReleaseInvalid) {
++		t.Fatalf("non-absolute path accepted: %v", err)
++	}
++	immutable, release = archivedResourceReleaseFixture(t)
++	release.ReleasedAt = "2026-08-12 10:00:00"
++	if _, _, _, err := NewArchivedResourceReleaseSnapshot(immutable, release); err == nil {
++		t.Fatal("non-canonical released_at accepted")
++	}
++}
++
++func TestArchivedResourceReleaseSnapshotDecodeRejectsTrailingJSON(t *testing.T) {
++	immutable, release := archivedResourceReleaseFixture(t)
++	_, raw, _, err := NewArchivedResourceReleaseSnapshot(immutable, release)
++	if err != nil {
++		t.Fatalf("build: %v", err)
++	}
++	if _, _, err := DecodeArchivedResourceReleaseSnapshot(append(raw, ' ', 'x')); err == nil {
++		t.Fatal("trailing JSON accepted")
++	}
++}
++
++func TestArchivedResourceReleaseManagedRootKeyCanonicalisesWorktreePath(t *testing.T) {
++	key, err := ArchivedResourceReleaseManagedRootKey("/tmp/kandev/worktree")
++	if err != nil {
++		t.Fatalf("ArchivedResourceReleaseManagedRootKey: %v", err)
++	}
++	if !strings.HasPrefix(key, "git_worktree:") || len(key) <= len("git_worktree:") {
++		t.Fatalf("managed root key shape wrong: %q", key)
++	}
++	if _, err := ArchivedResourceReleaseManagedRootKey("relative"); err == nil {
++		t.Fatal("relative path accepted")
++	}
++}
++
++func archivedResourceReleaseFixture(t *testing.T) (ArchivedResourceReleaseImmutable, ArchivedResourceReleaseReleaseProof) {
++	t.Helper()
++	now := time.Date(2026, 8, 12, 1, 2, 3, 4, time.UTC).Format(time.RFC3339Nano)
++	headOID := strings.Repeat("a", 40)
++	return ArchivedResourceReleaseImmutable{
++			AnchorOperationID:  "archived-resource-reconcile:abc",
++			AnchorDigest:       "digest",
++			AnchorTaskID:       "task-archived",
++			AnchorWorktreeID:   "worktree-shared",
++			AnchorRepository:   "repository-company",
++			AnchorBranch:       "feature/synthetic",
++			AnchorHeadOID:      headOID,
++			AnchorWorktreePath: "/tmp/kandev/worktree",
++			AnchorGitCommonDir: "/tmp/kandev/repo/.git",
++		}, ArchivedResourceReleaseReleaseProof{
++			PhysicalPath: "/tmp/kandev/worktree",
++			GitWorktreeRegistration: ArchivedResourceReleaseGitRegistration{
++				WorktreePath: "/tmp/kandev/worktree",
++				Branch:       "feature/synthetic",
++				HeadOID:      headOID,
++			},
++			ReleasedAt: now,
++		}
++}
+diff --git a/apps/backend/internal/task/models/resource_cleanup.go b/apps/backend/internal/task/models/resource_cleanup.go
+index 1f8c052d3184761940ad9c12f1b8dd91a0eb38f1..6d3f9511b1caede3245eaea299835496b39fffef 100644
+--- a/apps/backend/internal/task/models/resource_cleanup.go
++++ b/apps/backend/internal/task/models/resource_cleanup.go
+@@ -22,6 +22,7 @@ const (
+ 	TaskResourceCleanupStateRunning   TaskResourceCleanupState = "running"
+ 	TaskResourceCleanupStateRetryWait TaskResourceCleanupState = "retry_wait"
+ 	TaskResourceCleanupStateRetained  TaskResourceCleanupState = "retained"
++	TaskResourceCleanupStateReleased  TaskResourceCleanupState = "released"
+ 	TaskResourceCleanupStateBlocked   TaskResourceCleanupState = "blocked"
+ 	TaskResourceCleanupStateSucceeded TaskResourceCleanupState = "succeeded"
+ 	TaskResourceCleanupStateFailed    TaskResourceCleanupState = "failed"
+diff --git a/apps/backend/internal/task/repository/interface.go b/apps/backend/internal/task/repository/interface.go
+index e86057a7de1b3798686c0955f8a1d7228a79d041..e64b8c7f8bc0a4ef0b5246cea5dc806d0f2213fd 100644
+--- a/apps/backend/internal/task/repository/interface.go
++++ b/apps/backend/internal/task/repository/interface.go
+@@ -312,6 +312,11 @@ type ArchivedResourceReconcileRepository interface {
+ 	ClaimArchivedResourceReconcileJob(ctx context.Context, id string) (*models.TaskResourceCleanupJob, bool, error)
+ 	CompleteArchivedResourceReconcileRetention(ctx context.Context, id string, attempt int) (*models.ArchivedResourceReconcileCompletion, error)
+ 	CancelNeverClaimedArchivedResourceReconcile(ctx context.Context, expected *models.TaskResourceCleanupJob) (bool, error)
++	// CancelStaleArchivedResourcePendingMove is the exact-generation stale
++	// pending move cancellation: it only removes the exact pending row and
++	// never touches any other row, association, anchor, task, Git, or
++	// filesystem state.
++	CancelStaleArchivedResourcePendingMove(ctx context.Context, expected *models.TaskResourceCleanupJob) (bool, error)
+ 	ListArchivedResourceReconcileJobsByTaskID(ctx context.Context, taskID string) ([]*models.TaskResourceCleanupJob, error)
+ 	ListDueArchivedResourceReconcileJobs(ctx context.Context, now time.Time, limit int) ([]*models.TaskResourceCleanupJob, error)
+ 	ListRunningArchivedResourceReconcileJobs(ctx context.Context) ([]*models.TaskResourceCleanupJob, error)
+@@ -328,6 +333,24 @@ type ArchivedResourceReconcileRepository interface {
+ 		expectedCascadeID string,
+ 		reconcileEnabled bool,
+ 	) (bool, error)
++	// ReleaseAbsentArchivedResourceAnchor performs the sealed absent-target
++	// admission: the targeted retained v2 anchor must be the only candidate
++	// that matches every generation field, the physical path must be absent
++	// from the writer-DB inventory, the Git worktree registration must be
++	// absent, and the anchor must transition retained -> released in a
++	// single atomic CAS with no filesystem, Git, or runtime mutation.
++	ReleaseAbsentArchivedResourceAnchor(ctx context.Context, job *models.TaskResourceCleanupJob) (*models.ArchivedResourceReleaseAdmission, error)
++	// RetireStaleArchivedResourceEnvironmentReference performs the exact-set
++	// environment retirement transaction. It deletes only the exact stopped
++	// or failed task_environment_repos rows captured by admission and only
++	// when every active v2/v3 anchor confirms the environment is not a
++	// participant and the workspace-group inventory is one of the four
++	// accepted known states. Any malformed/unknown inventory or non-
++	// coordinator v3 participant causes fail-closed zero mutation.
++	RetireStaleArchivedResourceEnvironmentReference(
++		ctx context.Context,
++		job *models.TaskResourceCleanupJob,
++	) (*models.ArchivedResourceEnvironmentRetirementIdentity, error)
+ }
+ 
+ // GitSnapshotRepository handles git snapshots and session commit records.
+diff --git a/apps/backend/internal/task/repository/sqlite/resource_cleanup_environment_retirement.go b/apps/backend/internal/task/repository/sqlite/resource_cleanup_environment_retirement.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f4ac8ab6ce6a11c4247e7004ce990271199ebe84
+--- /dev/null
++++ b/apps/backend/internal/task/repository/sqlite/resource_cleanup_environment_retirement.go
+@@ -0,0 +1,327 @@
++package sqlite
++
++import (
++	"context"
++	"database/sql"
++	"errors"
++	"fmt"
++	"strings"
++	"time"
++
++	"github.com/jmoiron/sqlx"
++
++	"github.com/kandev/kandev/internal/task/models"
++)
++
++var (
++	ErrArchivedResourceEnvironmentRetirementNotAdmitted   = errors.New("archived resource environment retirement was not admitted")
++	ErrArchivedResourceEnvironmentRetirementParticipant   = errors.New("archived resource environment is a participant in an active cleanup")
++	ErrArchivedResourceEnvironmentRetirementUnknownRow    = errors.New("archived resource environment retirement target row is unknown")
++	ErrArchivedResourceEnvironmentRetirementIdentityDrift = errors.New("archived resource environment retirement identity drifted")
++)
++
++// KnownWorkspaceGroupRetirementStates are the four workspace-group inventory
++// states accepted by the retirement admission (docs/specs/tasks/archived-
++// resource-safety/spec.md). Any other value, including NULL or empty, causes
++// fail-closed zero mutation.
++var KnownWorkspaceGroupRetirementStates = []string{"active", "cleanup_pending", "cleaned", "cleanup_failed"}
++
++// RetireStaleArchivedResourceEnvironmentReference performs the exact-set
++// environment retirement transaction. The supplied job carries the canonical
++// retirement snapshot in resource_snapshot plus the redundant headers. The
++// repository:
++//
++//  1. decodes and validates the retirement snapshot;
++//  2. confirms every workspace-group inventory state is one of the four
++//     known states (unknown / malformed rows cause fail-closed zero mutation);
++//  3. confirms no active v2 or v3 reconcile anchor treats the environment as a
++//     participant, including non-coordinator v3 task participants;
++//  4. deletes only the exact task_environment_repos rows captured by admission
++//     inside a single serializable transaction.
++//
++// No filesystem, Git, runtime, or retained-anchor mutation occurs.
++func (r *Repository) RetireStaleArchivedResourceEnvironmentReference(
++	ctx context.Context,
++	job *models.TaskResourceCleanupJob,
++) (*models.ArchivedResourceEnvironmentRetirementIdentity, error) {
++	if job == nil {
++		return nil, fmt.Errorf("%w: nil retirement request", ErrArchivedResourceEnvironmentRetirementNotAdmitted)
++	}
++	snapshot, identity, err := models.DecodeArchivedResourceEnvironmentRetirementSnapshot([]byte(job.ResourceSnapshot))
++	if err != nil {
++		return nil, err
++	}
++	if err := validateRetirementHeaders(job, snapshot, identity); err != nil {
++		return nil, err
++	}
++
++	tx, err := r.db.BeginTxx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
++	if err != nil {
++		return nil, fmt.Errorf("begin retirement barrier: %w", err)
++	}
++	defer func() { _ = tx.Rollback() }()
++
++	if err := requireWorkspaceGroupInventoryKnownTx(ctx, tx); err != nil {
++		return nil, err
++	}
++
++	if err := requireRetirementEnvironmentStoppedOrFailedTx(ctx, tx, snapshot); err != nil {
++		return nil, err
++	}
++
++	if err := requireRetirementEnvironmentNotActiveParticipantTx(
++		ctx, tx, snapshot.Immutable.EnvironmentID, snapshot.Immutable.TaskID,
++	); err != nil {
++		return nil, err
++	}
++
++	if err := deleteRetirementEnvironmentReposTx(ctx, tx, snapshot); err != nil {
++		return nil, err
++	}
++
++	if err := tx.Commit(); err != nil {
++		return nil, fmt.Errorf("%w: commit retirement barrier: %v", ErrArchivedResourceEnvironmentRetirementIdentityDrift, err)
++	}
++	return &identity, nil
++}
++
++func validateRetirementHeaders(
++	job *models.TaskResourceCleanupJob,
++	snapshot models.ArchivedResourceEnvironmentRetirementSnapshot,
++	identity models.ArchivedResourceEnvironmentRetirementIdentity,
++) error {
++	if job == nil {
++		return fmt.Errorf("%w: nil retirement request", ErrArchivedResourceEnvironmentRetirementNotAdmitted)
++	}
++	if job.Trigger != models.TaskResourceCleanupTriggerReconcile {
++		return fmt.Errorf("%w: retirement trigger must be reconcile", ErrArchivedResourceEnvironmentRetirementNotAdmitted)
++	}
++	if job.SnapshotVersion != models.ArchivedResourceEnvironmentRetirementSnapshotVersion {
++		return fmt.Errorf("%w: retirement snapshot_version must match", ErrArchivedResourceEnvironmentRetirementNotAdmitted)
++	}
++	if job.OperationID != identity.OperationID ||
++		job.SnapshotDigest != identity.SnapshotDigest ||
++		job.ResourceKind != identity.ResourceKind ||
++		job.ResourceID != identity.ResourceID ||
++		job.ManagedRootKey != identity.ManagedRootKey {
++		return fmt.Errorf("%w: retirement headers do not bind retirement identity", ErrArchivedResourceEnvironmentRetirementNotAdmitted)
++	}
++	if job.TaskID != snapshot.Immutable.TaskID {
++		return fmt.Errorf("%w: retirement header task_id does not bind retirement task", ErrArchivedResourceEnvironmentRetirementNotAdmitted)
++	}
++	return nil
++}
++
++// requireWorkspaceGroupInventoryKnownTx fails closed when any
++// task_workspace_groups row has a state outside the four accepted values.
++// The table is owned by the office repository; when it is absent (e.g. in
++// tests that exercise only the task layer) the absence is treated as an
++// empty inventory rather than a malformed state, because no row can carry
++// an unknown state without the table existing first.
++func requireWorkspaceGroupInventoryKnownTx(ctx context.Context, tx *sqlx.Tx) error {
++	rows, err := tx.QueryxContext(ctx, tx.Rebind(`
++		SELECT DISTINCT cleanup_status FROM task_workspace_groups WHERE cleanup_status <> ''
++	`))
++	if err != nil {
++		if isSQLiteNoSuchTableError(err) {
++			return nil
++		}
++		return fmt.Errorf("%w: load workspace group inventory: %v", ErrArchivedResourceEnvironmentRetirementNotAdmitted, err)
++	}
++	defer func() { _ = rows.Close() }()
++	known := make(map[string]struct{}, len(KnownWorkspaceGroupRetirementStates))
++	for _, state := range KnownWorkspaceGroupRetirementStates {
++		known[state] = struct{}{}
++	}
++	seen := make(map[string]struct{})
++	for rows.Next() {
++		var state string
++		if err := rows.Scan(&state); err != nil {
++			return fmt.Errorf("%w: scan workspace group state: %v", ErrArchivedResourceEnvironmentRetirementNotAdmitted, err)
++		}
++		seen[state] = struct{}{}
++		if _, ok := known[state]; !ok {
++			return fmt.Errorf("%w: unknown workspace group state %q", ErrArchivedResourceEnvironmentRetirementNotAdmitted, state)
++		}
++	}
++	if err := rows.Err(); err != nil {
++		return fmt.Errorf("%w: scan workspace group states: %v", ErrArchivedResourceEnvironmentRetirementNotAdmitted, err)
++	}
++	return nil
++}
++
++// isSQLiteNoSuchTableError matches the SQLite "no such table" error text. The
++// driver-specific error type is not exported, so a substring check is the
++// only portable signal across the v0.85 lineage.
++func isSQLiteNoSuchTableError(err error) bool {
++	if err == nil {
++		return false
++	}
++	msg := err.Error()
++	return strings.Contains(msg, "no such table") || strings.Contains(msg, "does not exist")
++}
++
++// requireRetirementEnvironmentStoppedOrFailedTx fails closed when the
++// environment row is missing, was mutated away from the admission status, or
++// carries an active session reference.
++func requireRetirementEnvironmentStoppedOrFailedTx(
++	ctx context.Context,
++	tx *sqlx.Tx,
++	snapshot models.ArchivedResourceEnvironmentRetirementSnapshot,
++) error {
++	var status string
++	var hasActiveSession int
++	err := tx.QueryRowContext(ctx, tx.Rebind(`
++		SELECT te.status,
++			(SELECT COUNT(*) FROM task_sessions ts WHERE ts.task_environment_id = te.id AND ts.state IN ('running', 'starting', 'waiting_for_input'))
++		FROM task_environments te
++		WHERE te.id = ?
++	`), snapshot.Immutable.EnvironmentID).Scan(&status, &hasActiveSession)
++	if err != nil {
++		if errors.Is(err, sql.ErrNoRows) {
++			return fmt.Errorf("%w: environment %q no longer exists", ErrArchivedResourceEnvironmentRetirementUnknownRow, snapshot.Immutable.EnvironmentID)
++		}
++		return fmt.Errorf("%w: probe environment row: %v", ErrArchivedResourceEnvironmentRetirementNotAdmitted, err)
++	}
++	if status != snapshot.Immutable.EnvironmentStatus {
++		return fmt.Errorf("%w: environment status drifted from %q to %q", ErrArchivedResourceEnvironmentRetirementIdentityDrift, snapshot.Immutable.EnvironmentStatus, status)
++	}
++	if status != "stopped" && status != "failed" {
++		return fmt.Errorf("%w: environment status %q is not stoppable", ErrArchivedResourceEnvironmentRetirementNotAdmitted, status)
++	}
++	if hasActiveSession > 0 {
++		return fmt.Errorf("%w: environment has an active session", ErrArchivedResourceEnvironmentRetirementNotAdmitted)
++	}
++	return nil
++}
++
++// requireRetirementEnvironmentNotActiveParticipantTx scans every active v2/v3
++// anchor and fails closed when any treats the environment as a participant —
++// including non-coordinator v3 task participants. The check is a defense in
++// depth over the JSON immutable arrays; the strict decoder already rejects
++// the snapshot when a participant row drifts.
++func requireRetirementEnvironmentNotActiveParticipantTx(
++	ctx context.Context,
++	tx *sqlx.Tx,
++	environmentID, taskID string,
++) error {
++	rows, err := tx.QueryxContext(ctx, tx.Rebind(`
++		SELECT `+taskResourceCleanupColumns+`
++		FROM task_resource_cleanup_jobs
++		WHERE trigger = ? AND snapshot_version IN (?, ?) AND state IN (?, ?, ?, ?, ?)
++	`), models.TaskResourceCleanupTriggerReconcile,
++		models.ArchivedResourceReconcileSnapshotVersion,
++		models.ArchivedResourceGroupReconcileSnapshotVersion,
++		models.TaskResourceCleanupStatePrepared,
++		models.TaskResourceCleanupStatePending,
++		models.TaskResourceCleanupStateRunning,
++		models.TaskResourceCleanupStateRetryWait,
++		models.TaskResourceCleanupStateRetained,
++	)
++	if err != nil {
++		return fmt.Errorf("%w: load active reconcile anchors: %v", ErrArchivedResourceEnvironmentRetirementNotAdmitted, err)
++	}
++	defer func() { _ = rows.Close() }()
++	for rows.Next() {
++		job, scanErr := scanTaskResourceCleanupJob(rows)
++		if scanErr != nil {
++			return fmt.Errorf("%w: scan active anchor: %v", ErrArchivedResourceEnvironmentRetirementNotAdmitted, scanErr)
++		}
++		if job.TaskID == taskID {
++			// A v2 anchor bound to this task is a participant by definition;
++			// v3 anchors are participant-aware via the tasks array below.
++			return fmt.Errorf("%w: active v2 anchor %q targets task %q", ErrArchivedResourceEnvironmentRetirementParticipant, job.OperationID, taskID)
++		}
++		switch job.SnapshotVersion {
++		case models.ArchivedResourceReconcileSnapshotVersion:
++			snapshot, _, decodeErr := models.DecodeArchivedResourceReconcileSnapshot([]byte(job.ResourceSnapshot))
++			if decodeErr != nil {
++				return fmt.Errorf("%w: decode v2 anchor: %v", ErrArchivedResourceEnvironmentRetirementNotAdmitted, decodeErr)
++			}
++			for _, association := range snapshot.Immutable.Associations {
++				if association.TaskID == taskID {
++					return fmt.Errorf("%w: active v2 anchor %q carries task participant %q", ErrArchivedResourceEnvironmentRetirementParticipant, job.OperationID, taskID)
++				}
++			}
++		case models.ArchivedResourceGroupReconcileSnapshotVersion:
++			snapshot, _, decodeErr := models.DecodeArchivedResourceGroupReconcileSnapshot([]byte(job.ResourceSnapshot))
++			if decodeErr != nil {
++				return fmt.Errorf("%w: decode v3 anchor: %v", ErrArchivedResourceEnvironmentRetirementNotAdmitted, decodeErr)
++			}
++			for _, participant := range snapshot.Immutable.Tasks {
++				if participant.TaskID == taskID {
++					return fmt.Errorf("%w: active v3 anchor %q carries non-coordinator participant %q", ErrArchivedResourceEnvironmentRetirementParticipant, job.OperationID, taskID)
++				}
++			}
++		}
++	}
++	if err := rows.Err(); err != nil {
++		return fmt.Errorf("%w: scan active anchors: %v", ErrArchivedResourceEnvironmentRetirementNotAdmitted, err)
++	}
++	return nil
++}
++
++// deleteRetirementEnvironmentReposTx deletes only the exact repository rows
++// captured by admission. The CAS predicate binds the fourteen persisted
++// columns per row so a single drift fails the whole retirement.
++func deleteRetirementEnvironmentReposTx(
++	ctx context.Context,
++	tx *sqlx.Tx,
++	snapshot models.ArchivedResourceEnvironmentRetirementSnapshot,
++) error {
++	for _, repo := range snapshot.Immutable.Repositories {
++		var mergedAt interface{}
++		if repo.MergedAt != "" {
++			parsed, err := time.Parse(time.RFC3339Nano, repo.MergedAt)
++			if err != nil {
++				return fmt.Errorf("%w: repository merged_at is not canonical UTC", ErrArchivedResourceEnvironmentRetirementNotAdmitted)
++			}
++			mergedAt = parsed.UTC()
++		} else {
++			mergedAt = nil
++		}
++		var deletedAt interface{}
++		if repo.DeletedAt != "" {
++			parsed, err := time.Parse(time.RFC3339Nano, repo.DeletedAt)
++			if err != nil {
++				return fmt.Errorf("%w: repository deleted_at is not canonical UTC", ErrArchivedResourceEnvironmentRetirementNotAdmitted)
++			}
++			deletedAt = parsed.UTC()
++		} else {
++			deletedAt = nil
++		}
++		result, err := tx.ExecContext(ctx, tx.Rebind(`
++			DELETE FROM task_environment_repos
++			WHERE id = ? AND task_environment_id = ? AND repository_id = ?
++			  AND branch_slug = ? AND worktree_id = ? AND worktree_path = ?
++			  AND worktree_branch = ? AND position = ? AND status = ?
++			  AND created_at = ? AND updated_at = ?
++			  AND (merged_at IS NULL AND ? IS NULL OR merged_at = ?)
++			  AND (deleted_at IS NULL AND ? IS NULL OR deleted_at = ?)
++		`), repo.ID, snapshot.Immutable.EnvironmentID, repo.RepositoryID,
++			repo.BranchSlug, repo.WorktreeID, repo.WorktreePath,
++			repo.WorktreeBranch, repo.Position, repo.Status,
++			canonicalTimestamp(repo.CreatedAt), canonicalTimestamp(repo.UpdatedAt),
++			mergedAt, mergedAt, deletedAt, deletedAt,
++		)
++		if err != nil {
++			return fmt.Errorf("%w: delete environment repo %q: %v", ErrArchivedResourceEnvironmentRetirementIdentityDrift, repo.ID, err)
++		}
++		affected, rowsErr := result.RowsAffected()
++		if rowsErr != nil {
++			return fmt.Errorf("%w: read retirement delete affected rows: %v", ErrArchivedResourceEnvironmentRetirementIdentityDrift, rowsErr)
++		}
++		if affected != 1 {
++			return fmt.Errorf("%w: expected exactly one deletion; found %d for repository row %q", ErrArchivedResourceEnvironmentRetirementIdentityDrift, affected, repo.ID)
++		}
++	}
++	return nil
++}
++
++func canonicalTimestamp(value string) time.Time {
++	parsed, err := time.Parse(time.RFC3339Nano, value)
++	if err != nil {
++		return time.Time{}
++	}
++	return parsed.UTC()
++}
+diff --git a/apps/backend/internal/task/repository/sqlite/resource_cleanup_reconcile.go b/apps/backend/internal/task/repository/sqlite/resource_cleanup_reconcile.go
+index 29675984acb4c42b2677c60e3d591b2dd000baa5..461e7950acca9e92caaaeb589cf9fbdd117222be 100644
+--- a/apps/backend/internal/task/repository/sqlite/resource_cleanup_reconcile.go
++++ b/apps/backend/internal/task/repository/sqlite/resource_cleanup_reconcile.go
+@@ -361,6 +361,57 @@ func (r *Repository) CancelNeverClaimedArchivedResourceReconcile(
+ 	return count == 1, nil
+ }
+ 
++// CancelStaleArchivedResourcePendingMove cancels exactly one pristine pending
++// reconcile operation bound to a historical terminal session. The cancellation
++// is exact-generation: only the targeted pending row disappears, and the
++// retained anchor, association, task, Git, and filesystem state are byte-
++// equivalent before and after. The seven-field pending-row generation is the
++// CAS predicate (id, operation_id, trigger, task_id, snapshot_version,
++// snapshot_digest, resource_snapshot) plus the redundant typed headers
++// (resource_kind, resource_id, managed_root_key, active_scope_key, anchor_revision).
++//
++// The historical-terminal-session precheck lives in the service layer so the
++// repository stays a single CAS: callers pass a fully-pristine expected job.
++func (r *Repository) CancelStaleArchivedResourcePendingMove(
++	ctx context.Context,
++	expected *models.TaskResourceCleanupJob,
++) (bool, error) {
++	if !isPristineArchivedResourceJob(expected) {
++		return false, fmt.Errorf("%w: cancellation target is not pristine pending", ErrArchivedResourceReconcileConflict)
++	}
++	if _, err := models.ValidateArchivedResourceAnyReconcileJobHeaders(expected); err != nil {
++		return false, err
++	}
++	if expected.Trigger != models.TaskResourceCleanupTriggerReconcile {
++		return false, fmt.Errorf("%w: cancellation target trigger is not reconcile", ErrArchivedResourceReconcileConflict)
++	}
++	now := time.Now().UTC()
++	result, err := r.db.ExecContext(ctx, r.db.Rebind(`
++		UPDATE task_resource_cleanup_jobs
++		SET state = ?, active_scope_key = NULL, completed_at = ?, updated_at = ?, last_error = ''
++		WHERE id = ? AND operation_id = ? AND trigger = ? AND state = ?
++		  AND task_id = ? AND attempts = 0 AND next_attempt_at IS NULL
++		  AND completed_at IS NULL AND last_error = ''
++		  AND snapshot_version = ? AND snapshot_digest = ?
++		  AND resource_kind = ? AND resource_id = ? AND managed_root_key = ?
++		  AND anchor_revision = 0 AND active_scope_key = ?
++		  AND resource_snapshot = ?
++	`), models.TaskResourceCleanupStateCancelled, now, now,
++		expected.ID, expected.OperationID, models.TaskResourceCleanupTriggerReconcile,
++		models.TaskResourceCleanupStatePending, expected.TaskID,
++		expected.SnapshotVersion, expected.SnapshotDigest,
++		expected.ResourceKind, expected.ResourceID, expected.ManagedRootKey,
++		expected.ActiveScopeKey, expected.ResourceSnapshot)
++	if err != nil {
++		return false, err
++	}
++	count, rowsErr := result.RowsAffected()
++	if rowsErr != nil {
++		return false, fmt.Errorf("read cancelled stale pending move affected rows: %w", rowsErr)
++	}
++	return count == 1, nil
++}
++
+ // ListArchivedResourceReconcileJobsByTaskID returns only the durable reconcile
+ // anchors for one task. It intentionally excludes generic cleanup rows so the
+ // disabled unarchive exception never needs to inspect an unrelated snapshot.
+diff --git a/apps/backend/internal/task/repository/sqlite/resource_cleanup_release.go b/apps/backend/internal/task/repository/sqlite/resource_cleanup_release.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..070d9ca26d85cd5339e687f6c37728140a3a2c4e
+--- /dev/null
++++ b/apps/backend/internal/task/repository/sqlite/resource_cleanup_release.go
+@@ -0,0 +1,245 @@
++package sqlite
++
++import (
++	"context"
++	"database/sql"
++	"errors"
++	"fmt"
++	"time"
++
++	"github.com/jmoiron/sqlx"
++
++	"github.com/kandev/kandev/internal/task/models"
++)
++
++var (
++	ErrArchivedResourceReleaseNotAdmitted       = errors.New("archived resource release was not admitted")
++	ErrArchivedResourceReleaseTargetNotRetained = errors.New("archived resource release target is not retained")
++	ErrArchivedResourceReleaseIdentityDrifted   = errors.New("archived resource release identity drifted")
++)
++
++// ReleaseAbsentArchivedResourceAnchor performs the sealed absent-target
++// admission transaction. The supplied job carries the canonical release
++// snapshot in resource_snapshot plus the exact anchor identity in the
++// redundant header fields (operation_id, task_id, resource_id, managed_root_key,
++// snapshot_digest). The repository:
++//
++//  1. decodes and validates the release snapshot;
++//  2. verifies the anchor row is the only retained v2 row that matches every
++//     generation field (operation_id + digest + task_id + target identity);
++//  3. verifies the writer-DB inventory sources agree the physical path and
++//     the Git worktree registration are absent;
++//  4. transitions the anchor from retained to released via a single CAS that
++//     only mutates that one row.
++//
++// No filesystem, Git, runtime, or association mutation occurs.
++func (r *Repository) ReleaseAbsentArchivedResourceAnchor(
++	ctx context.Context,
++	job *models.TaskResourceCleanupJob,
++) (*models.ArchivedResourceReleaseAdmission, error) {
++	if job == nil {
++		return nil, fmt.Errorf("%w: nil release request", ErrArchivedResourceReleaseNotAdmitted)
++	}
++	snapshot, identity, err := models.DecodeArchivedResourceReleaseSnapshot([]byte(job.ResourceSnapshot))
++	if err != nil {
++		return nil, err
++	}
++	if err := validateReleaseHeaders(job, snapshot, identity); err != nil {
++		return nil, err
++	}
++
++	tx, err := r.db.BeginTxx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
++	if err != nil {
++		return nil, fmt.Errorf("begin release barrier: %w", err)
++	}
++	defer func() { _ = tx.Rollback() }()
++
++	if err := requireReleaseTargetRetainedTx(
++		ctx, tx,
++		identity.AnchorOperationID, identity.AnchorDigest, snapshot.Immutable,
++	); err != nil {
++		return nil, err
++	}
++
++	if err := requireReleasePathAndGitAbsentTx(
++		ctx, tx,
++		snapshot.Immutable.AnchorWorktreePath, snapshot.Immutable.AnchorGitCommonDir,
++		snapshot.Immutable.AnchorWorktreeID, snapshot.Immutable.AnchorRepository, snapshot.Immutable.AnchorBranch,
++	); err != nil {
++		return nil, err
++	}
++
++	now := time.Now().UTC()
++	releasedAt, err := time.Parse(time.RFC3339Nano, snapshot.Release.ReleasedAt)
++	if err != nil {
++		return nil, fmt.Errorf("%w: released_at is not canonical UTC", ErrArchivedResourceReleaseNotAdmitted)
++	}
++	completedAt := releasedAt.UTC()
++	if completedAt.After(now) {
++		completedAt = now
++	}
++
++	result, err := tx.ExecContext(ctx, r.db.Rebind(`
++		UPDATE task_resource_cleanup_jobs
++		SET state = ?, completed_at = ?, updated_at = ?, last_error = ''
++		WHERE operation_id = ? AND trigger = ? AND state = ?
++		  AND task_id = ? AND snapshot_version = ? AND snapshot_digest = ?
++		  AND resource_kind = ? AND resource_id = ? AND managed_root_key = ?
++		  AND anchor_revision = ? AND active_scope_key IS NULL
++	`), models.TaskResourceCleanupStateReleased, completedAt, now,
++		identity.AnchorOperationID, models.TaskResourceCleanupTriggerReconcile,
++		models.TaskResourceCleanupStateRetained,
++		snapshot.Immutable.AnchorTaskID, models.ArchivedResourceReconcileSnapshotVersion,
++		identity.AnchorDigest,
++		identity.ResourceKind, identity.ResourceID, identity.ManagedRootKey,
++		models.ArchivedResourceRetentionAnchorVersion,
++	)
++	if err != nil {
++		return nil, fmt.Errorf("release absent anchor: %w", err)
++	}
++	affected, rowsErr := result.RowsAffected()
++	if rowsErr != nil {
++		return nil, fmt.Errorf("read release affected rows: %w", rowsErr)
++	}
++	if affected != 1 {
++		return nil, fmt.Errorf("%w: release CAS did not affect exactly one row", ErrArchivedResourceReleaseIdentityDrifted)
++	}
++	if err := tx.Commit(); err != nil {
++		return nil, fmt.Errorf("%w: commit release barrier: %v", ErrArchivedResourceReleaseIdentityDrifted, err)
++	}
++	released, err := r.GetTaskResourceCleanupJobByOperationID(ctx, identity.AnchorOperationID)
++	if err != nil {
++		return nil, err
++	}
++	return &models.ArchivedResourceReleaseAdmission{
++		Job:    released,
++		Reason: "release_absent",
++	}, nil
++}
++
++func validateReleaseHeaders(
++	job *models.TaskResourceCleanupJob,
++	snapshot models.ArchivedResourceReleaseSnapshot,
++	identity models.ArchivedResourceReleaseIdentity,
++) error {
++	if job == nil {
++		return fmt.Errorf("%w: nil release request", ErrArchivedResourceReleaseNotAdmitted)
++	}
++	if job.OperationID != identity.OperationID ||
++		job.SnapshotDigest != identity.SnapshotDigest ||
++		job.ResourceKind != identity.ResourceKind ||
++		job.ResourceID != identity.ResourceID ||
++		job.ManagedRootKey != identity.ManagedRootKey {
++		return fmt.Errorf("%w: release headers do not bind release identity", ErrArchivedResourceReleaseNotAdmitted)
++	}
++	if job.TaskID != snapshot.Immutable.AnchorTaskID {
++		return fmt.Errorf("%w: release header task_id does not bind anchor task", ErrArchivedResourceReleaseNotAdmitted)
++	}
++	if job.Trigger != models.TaskResourceCleanupTriggerReconcile {
++		return fmt.Errorf("%w: release trigger must be reconcile", ErrArchivedResourceReleaseNotAdmitted)
++	}
++	if job.SnapshotVersion != models.ArchivedResourceReconcileSnapshotVersion {
++		return fmt.Errorf("%w: release header snapshot_version must match retained v2", ErrArchivedResourceReleaseNotAdmitted)
++	}
++	if job.State != "" && job.State != models.TaskResourceCleanupStatePending {
++		return fmt.Errorf("%w: release admission row must be pristine pending", ErrArchivedResourceReleaseNotAdmitted)
++	}
++	return nil
++}
++
++// requireReleaseTargetRetainedTx fails closed when no retained v2 anchor
++// matches the exact operation_id + digest + task + target identity. The
++// unique constraint on operation_id ensures at most one row exists; the
++// defense-in-depth scan verifies the full target identity still matches the
++// retained anchor's snapshot bytes.
++func requireReleaseTargetRetainedTx(
++	ctx context.Context,
++	tx *sqlx.Tx,
++	anchorOperationID, anchorDigest string,
++	immutable models.ArchivedResourceReleaseImmutable,
++) error {
++	var count int
++	if err := tx.QueryRowContext(ctx, tx.Rebind(`
++		SELECT COUNT(*)
++		FROM task_resource_cleanup_jobs
++		WHERE trigger = ? AND state = ?
++		  AND snapshot_version = ? AND snapshot_digest = ?
++		  AND task_id = ? AND resource_id = ? AND managed_root_key = ?
++		  AND operation_id = ?
++	`), models.TaskResourceCleanupTriggerReconcile,
++		models.TaskResourceCleanupStateRetained,
++		models.ArchivedResourceReconcileSnapshotVersion, anchorDigest,
++		immutable.AnchorTaskID, immutable.AnchorWorktreeID,
++		managedRootKeyForRelease(immutable),
++		anchorOperationID,
++	).Scan(&count); err != nil {
++		return fmt.Errorf("%w: probe retained anchor: %v", ErrArchivedResourceReleaseNotAdmitted, err)
++	}
++	if count != 1 {
++		return fmt.Errorf("%w: expected exactly one retained anchor; found %d", ErrArchivedResourceReleaseTargetNotRetained, count)
++	}
++	return nil
++}
++
++func managedRootKeyForRelease(immutable models.ArchivedResourceReleaseImmutable) string {
++	key, err := models.ArchivedResourceReleaseManagedRootKey(immutable.AnchorWorktreePath)
++	if err != nil {
++		return ""
++	}
++	return key
++}
++
++// requireReleasePathAndGitAbsentTx verifies the writer-DB inventory agrees the
++// targeted physical path is absent from every protection source AND the Git
++// worktree registration has no active executor row. This is the sealed
++// absence proof; the admission cannot proceed when any inventory source
++// still reports the target.
++//
++// Optional tables (task_workspace_groups and storage_quarantine_entries) are
++// owned by separate repositories; when they are absent the admission treats
++// them as empty inventories because no row can reference the target path
++// without the table existing first.
++func requireReleasePathAndGitAbsentTx(
++	ctx context.Context,
++	tx *sqlx.Tx,
++	physicalPath, gitCommonDir, worktreeID, repositoryID, branch string,
++) error {
++	tables := []struct {
++		label    string
++		column   string
++		optional bool
++	}{
++		{label: "task_environments", column: "workspace_path"},
++		{label: "task_environment_repos", column: "worktree_path"},
++		{label: "executors_running", column: "worktree_path"},
++		{label: "task_workspace_groups", column: "materialized_path", optional: true},
++		{label: "storage_quarantine_entries", column: "original_path", optional: true},
++	}
++	for _, t := range tables {
++		var count int
++		err := tx.QueryRowContext(ctx, tx.Rebind(
++			"SELECT COUNT(*) FROM "+t.label+" WHERE "+t.column+" = ?"), physicalPath,
++		).Scan(&count)
++		if err != nil {
++			if t.optional && isSQLiteNoSuchTableError(err) {
++				continue
++			}
++			return fmt.Errorf("%w: probe %s: %v", ErrArchivedResourceReleaseNotAdmitted, t.label, err)
++		}
++		if count > 0 {
++			return fmt.Errorf("%w: %s still references the target path", ErrArchivedResourceReleaseTargetNotRetained, t.label)
++		}
++	}
++	var execCount int
++	if err := tx.QueryRowContext(ctx, tx.Rebind(`
++		SELECT COUNT(*) FROM executors_running
++		WHERE worktree_path = ? AND worktree_branch = ?
++	`), physicalPath, branch,
++	).Scan(&execCount); err != nil {
++		return fmt.Errorf("%w: probe executors_running registration: %v", ErrArchivedResourceReleaseNotAdmitted, err)
++	}
++	if execCount > 0 {
++		return fmt.Errorf("%w: executors_running still references the target registration", ErrArchivedResourceReleaseTargetNotRetained)
++	}
++	return nil
++}
+diff --git a/apps/backend/internal/task/repository/sqlite/resource_cleanup_terminal_release_test.go b/apps/backend/internal/task/repository/sqlite/resource_cleanup_terminal_release_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..abaea14b3db3d256325845d678276af21d698ed3
+--- /dev/null
++++ b/apps/backend/internal/task/repository/sqlite/resource_cleanup_terminal_release_test.go
+@@ -0,0 +1,325 @@
++package sqlite
++
++import (
++	"context"
++	"errors"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/kandev/kandev/internal/task/models"
++)
++
++func TestArchivedResourceReleaseAbsentRequiresExactRetainedAnchor(t *testing.T) {
++	repo := newRepoForHealTests(t)
++	ctx := context.Background()
++
++	// No anchor exists: the release admission must fail.
++	job := releaseAbsentJobFixture(t, "task-release", "/tmp/release/path", "operation-missing", "digest-missing")
++	if _, err := repo.ReleaseAbsentArchivedResourceAnchor(ctx, job); !errors.Is(err, ErrArchivedResourceReleaseTargetNotRetained) {
++		t.Fatalf("missing anchor release error = %v, want ErrArchivedResourceReleaseTargetNotRetained", err)
++	}
++}
++
++func TestArchivedResourceReleaseAbsentSucceedsWhenInventoryIsClean(t *testing.T) {
++	repo := newRepoForHealTests(t)
++	ctx := context.Background()
++
++	insertTask(t, repo.db, "task-release")
++	now := time.Now().UTC()
++	retainedAnchor := seedRetainedAnchor(t, repo, "task-release", "/tmp/release/path", "operation-anchor", "digest-anchor", now)
++	job := releaseAbsentJobFixtureWithAnchor(t, retainedAnchor, now)
++
++	admission, err := repo.ReleaseAbsentArchivedResourceAnchor(ctx, job)
++	if err != nil {
++		t.Fatalf("ReleaseAbsentArchivedResourceAnchor: %v", err)
++	}
++	if admission == nil || admission.Job == nil {
++		t.Fatal("admission missing job")
++	}
++	if admission.Job.State != models.TaskResourceCleanupStateReleased {
++		t.Fatalf("released state = %q, want released", admission.Job.State)
++	}
++	if admission.Job.CompletedAt == nil {
++		t.Fatal("released anchor has no CompletedAt")
++	}
++	if admission.Job.AnchorRevision != models.ArchivedResourceRetentionAnchorVersion {
++		t.Fatalf("released anchor revision = %d", admission.Job.AnchorRevision)
++	}
++}
++
++func TestArchivedResourceReleaseAbsentFailsWhenPathStillReferenced(t *testing.T) {
++	repo := newRepoForHealTests(t)
++	ctx := context.Background()
++
++	insertTask(t, repo.db, "task-release")
++	now := time.Now().UTC()
++	retainedAnchor := seedRetainedAnchor(t, repo, "task-release", "/tmp/release/path", "operation-anchor", "digest-anchor", now)
++	if _, err := repo.db.Exec(`
++		INSERT INTO task_environment_repos (id, task_environment_id, repository_id, branch_slug, worktree_id, worktree_path, worktree_branch, position, status, created_at, updated_at)
++		VALUES (?, ?, ?, '', 'wt-other', ?, ?, 0, 'active', ?, ?)
++	`, "env-repo-row", "env-other", "repository-company", "/tmp/release/path", "feature/synthetic", now, now); err != nil {
++		t.Fatalf("seed retained repo: %v", err)
++	}
++	job := releaseAbsentJobFixtureWithAnchor(t, retainedAnchor, now)
++	if _, err := repo.ReleaseAbsentArchivedResourceAnchor(ctx, job); !errors.Is(err, ErrArchivedResourceReleaseTargetNotRetained) {
++		t.Fatalf("inventory-referenced release error = %v, want ErrArchivedResourceReleaseTargetNotRetained", err)
++	}
++}
++
++func TestArchivedResourceReleaseAbsentRejectsMismatchedHeaders(t *testing.T) {
++	repo := newRepoForHealTests(t)
++	ctx := context.Background()
++
++	now := time.Now().UTC()
++	retainedAnchor := seedRetainedAnchor(t, repo, "task-release", "/tmp/release/path", "operation-anchor", "digest-anchor", now)
++	job := releaseAbsentJobFixtureWithAnchor(t, retainedAnchor, now)
++	job.OperationID = "different-operation-id"
++	if _, err := repo.ReleaseAbsentArchivedResourceAnchor(ctx, job); err == nil {
++		t.Fatal("mismatched header release accepted")
++	}
++}
++
++func TestCancelStaleArchivedResourcePendingMoveRemovesOnlyTargetRow(t *testing.T) {
++	repo := newRepoForHealTests(t)
++	ctx := context.Background()
++
++	insertTask(t, repo.db, "task-cancel")
++	insertTask(t, repo.db, "task-sibling")
++	now := time.Now().UTC()
++	pending := seedPrisitinePendingMove(t, repo, "task-cancel", "wt-cancel", now)
++	other := seedPrisitinePendingMove(t, repo, "task-sibling", "wt-keep", now)
++
++	cancelled, err := repo.CancelStaleArchivedResourcePendingMove(ctx, pending)
++	if err != nil {
++		t.Fatalf("CancelStaleArchivedResourcePendingMove: %v", err)
++	}
++	if !cancelled {
++		t.Fatal("expected exactly one cancellation")
++	}
++
++	current, err := repo.GetTaskResourceCleanupJobByOperationID(ctx, pending.OperationID)
++	if err != nil {
++		t.Fatalf("read cancelled job: %v", err)
++	}
++	if current.State != models.TaskResourceCleanupStateCancelled {
++		t.Fatalf("cancelled state = %q, want cancelled", current.State)
++	}
++	if current.ActiveScopeKey != nil {
++		t.Fatalf("cancelled active_scope_key = %v, want nil", current.ActiveScopeKey)
++	}
++
++	keep, err := repo.GetTaskResourceCleanupJobByOperationID(ctx, other.OperationID)
++	if err != nil {
++		t.Fatalf("read sibling: %v", err)
++	}
++	if keep.State != models.TaskResourceCleanupStatePending {
++		t.Fatalf("sibling state = %q, want pending", keep.State)
++	}
++	if keep.ActiveScopeKey == nil {
++		t.Fatal("sibling lost its active_scope_key")
++	}
++}
++
++func TestCancelStaleArchivedResourcePendingMoveRejectsDrift(t *testing.T) {
++	repo := newRepoForHealTests(t)
++	ctx := context.Background()
++
++	insertTask(t, repo.db, "task-cancel")
++	now := time.Now().UTC()
++	pending := seedPrisitinePendingMove(t, repo, "task-cancel", "wt-cancel", now)
++	pending.SnapshotDigest = "tampered-digest"
++	cancelled, err := repo.CancelStaleArchivedResourcePendingMove(ctx, pending)
++	if err == nil {
++		t.Fatalf("tampered digest accepted: cancelled=%v", cancelled)
++	}
++	if !errors.Is(err, models.ErrArchivedResourceSnapshotInvalid) {
++		t.Fatalf("tampered digest error = %v, want ErrArchivedResourceSnapshotInvalid", err)
++	}
++}
++
++func TestCancelStaleArchivedResourcePendingMoveIsNoOpForAlreadyCancelledRow(t *testing.T) {
++	repo := newRepoForHealTests(t)
++	ctx := context.Background()
++
++	insertTask(t, repo.db, "task-cancel")
++	now := time.Now().UTC()
++	pending := seedPrisitinePendingMove(t, repo, "task-cancel", "wt-cancel", now)
++	cancelled, err := repo.CancelStaleArchivedResourcePendingMove(ctx, pending)
++	if err != nil || !cancelled {
++		t.Fatalf("first cancel: cancelled=%v err=%v", cancelled, err)
++	}
++	cancelledAgain, err := repo.CancelStaleArchivedResourcePendingMove(ctx, pending)
++	if err != nil {
++		t.Fatalf("replay cancel err: %v", err)
++	}
++	if cancelledAgain {
++		t.Fatal("replay cancel reported success")
++	}
++}
++
++// helpers
++
++func seedRetainedAnchor(
++	t *testing.T,
++	repo *Repository,
++	taskID, worktreePath, operationID, digest string,
++	now time.Time,
++) *models.TaskResourceCleanupJob {
++	t.Helper()
++	completed := now
++	rootKey, err := models.ArchivedResourceReleaseManagedRootKey(worktreePath)
++	if err != nil {
++		t.Fatalf("managed root key: %v", err)
++	}
++	job := &models.TaskResourceCleanupJob{
++		ID:               "job-anchor",
++		OperationID:      operationID,
++		TaskID:           taskID,
++		Trigger:          models.TaskResourceCleanupTriggerReconcile,
++		State:            models.TaskResourceCleanupStateRetained,
++		ResourceSnapshot: `{"anchor":true}`,
++		SnapshotVersion:  models.ArchivedResourceReconcileSnapshotVersion,
++		SnapshotDigest:   digest,
++		ResourceKind:     models.ArchivedResourceReconcileResourceKind,
++		ResourceID:       "wt-anchor",
++		ManagedRootKey:   rootKey,
++		AnchorRevision:   models.ArchivedResourceRetentionAnchorVersion,
++		CreatedAt:        now,
++		UpdatedAt:        now,
++		CompletedAt:      &completed,
++	}
++	if err := repo.CreateTaskResourceCleanupJob(context.Background(), job); err != nil {
++		t.Fatalf("create retained anchor: %v", err)
++	}
++	return job
++}
++
++func releaseAbsentJobFixture(
++	t *testing.T,
++	taskID, worktreePath, operationID, digest string,
++) *models.TaskResourceCleanupJob {
++	t.Helper()
++	now := time.Now().UTC().Format(time.RFC3339Nano)
++	headOID := strings.Repeat("a", 40)
++	immutable := models.ArchivedResourceReleaseImmutable{
++		AnchorOperationID:  operationID,
++		AnchorDigest:       digest,
++		AnchorTaskID:       taskID,
++		AnchorWorktreeID:   "wt-anchor",
++		AnchorRepository:   "repository-company",
++		AnchorBranch:       "feature/synthetic",
++		AnchorHeadOID:      headOID,
++		AnchorWorktreePath: worktreePath,
++		AnchorGitCommonDir: "/tmp/release/.git",
++	}
++	release := models.ArchivedResourceReleaseReleaseProof{
++		PhysicalPath: worktreePath,
++		GitWorktreeRegistration: models.ArchivedResourceReleaseGitRegistration{
++			WorktreePath: worktreePath,
++			Branch:       "feature/synthetic",
++			HeadOID:      headOID,
++		},
++		ReleasedAt: now,
++	}
++	_, raw, identity, err := models.NewArchivedResourceReleaseSnapshot(immutable, release)
++	if err != nil {
++		t.Fatalf("build release snapshot: %v", err)
++	}
++	managedRootKey, err := models.ArchivedResourceReleaseManagedRootKey(worktreePath)
++	if err != nil {
++		t.Fatalf("managed root key: %v", err)
++	}
++	utcNow := time.Now().UTC()
++	return &models.TaskResourceCleanupJob{
++		ID:               identity.OperationID,
++		OperationID:      identity.OperationID,
++		TaskID:           taskID,
++		Trigger:          models.TaskResourceCleanupTriggerReconcile,
++		State:            models.TaskResourceCleanupStatePending,
++		ResourceSnapshot: string(raw),
++		SnapshotVersion:  models.ArchivedResourceReconcileSnapshotVersion,
++		SnapshotDigest:   identity.SnapshotDigest,
++		ResourceKind:     identity.ResourceKind,
++		ResourceID:       identity.ResourceID,
++		ManagedRootKey:   managedRootKey,
++		AnchorRevision:   0,
++		CreatedAt:        utcNow,
++		UpdatedAt:        utcNow,
++	}
++}
++
++func releaseAbsentJobFixtureWithAnchor(
++	t *testing.T,
++	anchor *models.TaskResourceCleanupJob,
++	now time.Time,
++) *models.TaskResourceCleanupJob {
++	t.Helper()
++	return releaseAbsentJobFixture(
++		t,
++		anchor.TaskID,
++		"/tmp/release/path",
++		anchor.OperationID,
++		anchor.SnapshotDigest,
++	)
++}
++
++func seedPrisitinePendingMove(
++	t *testing.T,
++	repo *Repository,
++	taskID, worktreeID string,
++	now time.Time,
++) *models.TaskResourceCleanupJob {
++	t.Helper()
++	worktreePath := "/tmp/pending/worktree-" + worktreeID
++	rootKey, err := models.ArchivedResourceReleaseManagedRootKey(worktreePath)
++	if err != nil {
++		t.Fatalf("managed root key: %v", err)
++	}
++	immutable := models.ArchivedResourceReconcileImmutable{
++		OriginTaskID:   taskID,
++		ArchivedAt:     now.Format(time.RFC3339Nano),
++		ManagedRootKey: rootKey,
++		Target: models.ArchivedResourceReconcileTarget{
++			WorktreeID:     worktreeID,
++			RepositoryID:   "repository-company",
++			RepositoryPath: "/tmp/pending/repo",
++			GitCommonDir:   "/tmp/pending/repo/.git",
++			WorktreePath:   worktreePath,
++			Branch:         "feature/pending",
++			HeadOID:        strings.Repeat("b", 40),
++		},
++		Associations: []models.ArchivedResourceReconcileAssociation{
++			{
++				AssociationID:  "association-" + worktreeID,
++				TaskID:         taskID,
++				SessionID:      "session-" + worktreeID,
++				WorktreeID:     worktreeID,
++				RepositoryID:   "repository-company",
++				BranchSlug:     "feature/pending",
++				WorktreePath:   worktreePath,
++				WorktreeBranch: "feature/pending",
++				Status:         "active",
++				CreatedAt:      now.Format(time.RFC3339Nano),
++				UpdatedAt:      now.Format(time.RFC3339Nano),
++			},
++		},
++	}
++	snapshot, raw, identity, err := models.NewArchivedResourceReconcileSnapshot(immutable)
++	if err != nil {
++		t.Fatalf("build pending move snapshot: %v", err)
++	}
++	job := models.NewArchivedResourceReconcileJob(snapshot, raw, identity)
++	job.ID = "job-" + worktreeID
++	job.TaskID = taskID
++	job.State = models.TaskResourceCleanupStatePending
++	job.CreatedAt = now
++	job.UpdatedAt = now
++	if err := repo.CreateTaskResourceCleanupJob(context.Background(), job); err != nil {
++		t.Fatalf("create pending move: %v", err)
++	}
++	return job
++}
++
++var _ = filepath.Join
+diff --git a/apps/backend/internal/task/repository/sqlite/resource_cleanup_terminal_retirement_test.go b/apps/backend/internal/task/repository/sqlite/resource_cleanup_terminal_retirement_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c8a9e2315cf0e8df06e630533ede93ec0fbd049
+--- /dev/null
++++ b/apps/backend/internal/task/repository/sqlite/resource_cleanup_terminal_retirement_test.go
+@@ -0,0 +1,204 @@
++package sqlite
++
++import (
++	"context"
++	"errors"
++	"testing"
++	"time"
++
++	"github.com/kandev/kandev/internal/task/models"
++)
++
++func TestArchivedResourceEnvironmentRetirementRemovesExactRepositoryRows(t *testing.T) {
++	repo := newRepoForHealTests(t)
++	ctx := context.Background()
++
++	insertTask(t, repo.db, "task-retire")
++	env := seedStoppedEnvironment(t, repo, "task-retire", "env-stopped")
++	row := seedEnvironmentRepo(t, repo, env.ID, "repo-row")
++
++	job := environmentRetirementJobFixture(t, env, []models.ArchivedResourceEnvironmentRetirementRepository{
++		archivedResourceRetirementRepoFixture(row),
++	})
++
++	identity, err := repo.RetireStaleArchivedResourceEnvironmentReference(ctx, job)
++	if err != nil {
++		t.Fatalf("RetireStaleArchivedResourceEnvironmentReference: %v", err)
++	}
++	if identity == nil {
++		t.Fatal("expected non-nil identity")
++	}
++
++	var remaining int
++	if err := repo.db.QueryRowContext(ctx,
++		"SELECT COUNT(*) FROM task_environment_repos WHERE id = ?", row.ID).Scan(&remaining); err != nil {
++		t.Fatalf("read remaining: %v", err)
++	}
++	if remaining != 0 {
++		t.Fatalf("remaining rows = %d, want 0", remaining)
++	}
++}
++
++func TestArchivedResourceEnvironmentRetirementFailsClosedWhenWorkspaceGroupStateUnknown(t *testing.T) {
++	repo := newRepoForHealTests(t)
++	ctx := context.Background()
++
++	insertTask(t, repo.db, "task-retire")
++	env := seedStoppedEnvironment(t, repo, "task-retire", "env-stopped")
++	row := seedEnvironmentRepo(t, repo, env.ID, "repo-row")
++	if _, err := repo.db.Exec(`
++		CREATE TABLE IF NOT EXISTS task_workspace_groups (
++			id TEXT PRIMARY KEY,
++			cleanup_status TEXT NOT NULL DEFAULT 'active'
++		)`); err != nil {
++		t.Fatalf("create table: %v", err)
++	}
++	if _, err := repo.db.Exec(`INSERT INTO task_workspace_groups VALUES ('group-bad', 'future')`); err != nil {
++		t.Fatalf("seed bad state: %v", err)
++	}
++	job := environmentRetirementJobFixture(t, env, []models.ArchivedResourceEnvironmentRetirementRepository{
++		archivedResourceRetirementRepoFixture(row),
++	})
++	if _, err := repo.RetireStaleArchivedResourceEnvironmentReference(ctx, job); !errors.Is(err, ErrArchivedResourceEnvironmentRetirementNotAdmitted) {
++		t.Fatalf("unknown workspace group state error = %v, want ErrArchivedResourceEnvironmentRetirementNotAdmitted", err)
++	}
++	var remaining int
++	if err := repo.db.QueryRowContext(ctx,
++		"SELECT COUNT(*) FROM task_environment_repos WHERE id = ?", row.ID).Scan(&remaining); err != nil {
++		t.Fatalf("read remaining: %v", err)
++	}
++	if remaining != 1 {
++		t.Fatalf("row was deleted despite fail-closed: remaining=%d", remaining)
++	}
++}
++
++func TestArchivedResourceEnvironmentRetirementFailsClosedOnIdentityDrift(t *testing.T) {
++	repo := newRepoForHealTests(t)
++	ctx := context.Background()
++
++	insertTask(t, repo.db, "task-retire")
++	env := seedStoppedEnvironment(t, repo, "task-retire", "env-stopped")
++	row := seedEnvironmentRepo(t, repo, env.ID, "repo-row")
++
++	job := environmentRetirementJobFixture(t, env, []models.ArchivedResourceEnvironmentRetirementRepository{
++		archivedResourceRetirementRepoFixture(row),
++	})
++	job.TaskID = "task-other"
++	if _, err := repo.RetireStaleArchivedResourceEnvironmentReference(ctx, job); err == nil {
++		t.Fatal("drifted task_id accepted")
++	}
++}
++
++func TestArchivedResourceEnvironmentRetirementFailsClosedWhenEnvironmentNotStopped(t *testing.T) {
++	repo := newRepoForHealTests(t)
++	ctx := context.Background()
++
++	insertTask(t, repo.db, "task-retire")
++	env := seedStoppedEnvironment(t, repo, "task-retire", "env-stopped")
++	row := seedEnvironmentRepo(t, repo, env.ID, "repo-row")
++	if _, err := repo.db.Exec(`UPDATE task_environments SET status = 'ready' WHERE id = ?`, env.ID); err != nil {
++		t.Fatalf("flip status: %v", err)
++	}
++	job := environmentRetirementJobFixture(t, env, []models.ArchivedResourceEnvironmentRetirementRepository{
++		archivedResourceRetirementRepoFixture(row),
++	})
++	if _, err := repo.RetireStaleArchivedResourceEnvironmentReference(ctx, job); !errors.Is(err, ErrArchivedResourceEnvironmentRetirementIdentityDrift) {
++		t.Fatalf("non-stopped env error = %v, want ErrArchivedResourceEnvironmentRetirementIdentityDrift", err)
++	}
++}
++
++func seedStoppedEnvironment(t *testing.T, repo *Repository, taskID, envID string) *models.TaskEnvironment {
++	t.Helper()
++	now := time.Now().UTC()
++	env := &models.TaskEnvironment{
++		ID:                envID,
++		TaskID:            taskID,
++		ExecutorType:      string(models.ExecutorTypeWorktree),
++		ExecutorID:        "executor-test",
++		ExecutorProfileID: "profile-test",
++		Status:            models.TaskEnvironmentStatusStopped,
++		WorkspacePath:     "/tmp/env/worktree",
++		CreatedAt:         now,
++		UpdatedAt:         now,
++	}
++	if err := repo.CreateTaskEnvironment(context.Background(), env); err != nil {
++		t.Fatalf("create env: %v", err)
++	}
++	return env
++}
++
++func seedEnvironmentRepo(t *testing.T, repo *Repository, envID, repoID string) *models.TaskEnvironmentRepo {
++	t.Helper()
++	now := time.Now().UTC()
++	row := &models.TaskEnvironmentRepo{
++		ID:                repoID + "-row",
++		TaskEnvironmentID: envID,
++		RepositoryID:      repoID,
++		BranchSlug:        "feature/synthetic",
++		WorktreeID:        "wt-" + repoID,
++		WorktreePath:      "/tmp/env/worktree",
++		WorktreeBranch:    "feature/synthetic",
++		Position:          0,
++		Status:            "active",
++		CreatedAt:         now,
++		UpdatedAt:         now,
++	}
++	if err := repo.CreateTaskEnvironmentRepo(context.Background(), row); err != nil {
++		t.Fatalf("create env repo: %v", err)
++	}
++	return row
++}
++
++func archivedResourceRetirementRepoFixture(row *models.TaskEnvironmentRepo) models.ArchivedResourceEnvironmentRetirementRepository {
++	return models.ArchivedResourceEnvironmentRetirementRepository{
++		ID:             row.ID,
++		RepositoryID:   row.RepositoryID,
++		BranchSlug:     row.BranchSlug,
++		WorktreeID:     row.WorktreeID,
++		WorktreePath:   row.WorktreePath,
++		WorktreeBranch: row.WorktreeBranch,
++		Position:       row.Position,
++		Status:         row.Status,
++		CreatedAt:      row.CreatedAt.UTC().Format(time.RFC3339Nano),
++		UpdatedAt:      row.UpdatedAt.UTC().Format(time.RFC3339Nano),
++	}
++}
++
++func environmentRetirementJobFixture(
++	t *testing.T,
++	env *models.TaskEnvironment,
++	repos []models.ArchivedResourceEnvironmentRetirementRepository,
++) *models.TaskResourceCleanupJob {
++	t.Helper()
++	immutable := models.ArchivedResourceEnvironmentRetirementImmutable{
++		EnvironmentID:     env.ID,
++		TaskID:            env.TaskID,
++		EnvironmentStatus: "stopped",
++		Repositories:      repos,
++	}
++	proof := models.ArchivedResourceEnvironmentRetirementProof{
++		RetiredAt: time.Now().UTC().Format(time.RFC3339Nano),
++	}
++	_, raw, identity, err := models.NewArchivedResourceEnvironmentRetirementSnapshot(immutable, proof)
++	if err != nil {
++		t.Fatalf("build retirement snapshot: %v", err)
++	}
++	managedRootKey, _ := models.ArchivedResourceEnvironmentRetirementManagedRootKey(repos[0].WorktreePath)
++	utcNow := time.Now().UTC()
++	return &models.TaskResourceCleanupJob{
++		ID:               identity.OperationID,
++		OperationID:      identity.OperationID,
++		TaskID:           env.TaskID,
++		Trigger:          models.TaskResourceCleanupTriggerReconcile,
++		State:            models.TaskResourceCleanupStatePending,
++		ResourceSnapshot: string(raw),
++		SnapshotVersion:  models.ArchivedResourceEnvironmentRetirementSnapshotVersion,
++		SnapshotDigest:   identity.SnapshotDigest,
++		ResourceKind:     identity.ResourceKind,
++		ResourceID:       identity.ResourceID,
++		ManagedRootKey:   managedRootKey,
++		AnchorRevision:   0,
++		CreatedAt:        utcNow,
++		UpdatedAt:        utcNow,
++	}
++}
+diff --git a/apps/backend/internal/task/service/resource_cleanup_reconcile.go b/apps/backend/internal/task/service/resource_cleanup_reconcile.go
+index df4738596f1fba793c0d5591bb22c91c9e7bb856..78ada16b82f1a544cb2e44bb6a86b4d47c30e61e 100644
+--- a/apps/backend/internal/task/service/resource_cleanup_reconcile.go
++++ b/apps/backend/internal/task/service/resource_cleanup_reconcile.go
+@@ -75,6 +75,14 @@ func (s *Service) SetArchivedResourceFeatures(reconcileEnabled, physicalReleaseE
+ 	s.archivedResourceFeatureMu.Unlock()
+ }
+ 
++// ArchivedResourcePhysicalReleaseEnabled is the public projection of the
++// physical-release flag used by route registration.
++func (s *Service) ArchivedResourcePhysicalReleaseEnabled() bool {
++	s.archivedResourceFeatureMu.Lock()
++	defer s.archivedResourceFeatureMu.Unlock()
++	return s.archivedResourcePhysicalReleaseOn
++}
++
+ func (s *Service) archivedResourceReconcileEnabled() bool {
+ 	s.archivedResourceFeatureMu.Lock()
+ 	defer s.archivedResourceFeatureMu.Unlock()
+diff --git a/apps/backend/internal/task/service/resource_cleanup_terminal_actions.go b/apps/backend/internal/task/service/resource_cleanup_terminal_actions.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..519442cd371caa271df2ef3d2ca39ab4783f0e51
+--- /dev/null
++++ b/apps/backend/internal/task/service/resource_cleanup_terminal_actions.go
+@@ -0,0 +1,480 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"time"
++
++	"github.com/kandev/kandev/internal/task/models"
++	"github.com/kandev/kandev/internal/task/repository"
++)
++
++var (
++	ErrArchivedResourceReleaseDisabled    = errors.New("archived resource release is disabled")
++	ErrArchivedResourceReleaseInvalid     = errors.New("invalid archived resource release request")
++	ErrArchivedResourceReleaseUnavailable = errors.New("archived resource release is unavailable")
++	ErrArchivedResourceReleaseUnknown     = errors.New("archived resource release target is unknown")
++
++	ErrArchivedResourceEnvironmentRetirementDisabled    = errors.New("archived resource environment retirement is disabled")
++	ErrArchivedResourceEnvironmentRetirementInvalid     = errors.New("invalid archived resource environment retirement request")
++	ErrArchivedResourceEnvironmentRetirementUnavailable = errors.New("archived resource environment retirement is unavailable")
++
++	ErrArchivedResourcePendingMoveDisabled      = errors.New("archived resource pending move cancellation is disabled")
++	ErrArchivedResourcePendingMoveInvalid       = errors.New("invalid archived resource pending move cancellation request")
++	ErrArchivedResourcePendingMoveSessionActive = errors.New("stale pending move session is not historical terminal")
++	ErrArchivedResourcePendingMoveUnavailable   = errors.New("archived resource pending move cancellation is unavailable")
++)
++
++// ArchivedResourceReleaseRequest is the metadata-only admission payload for
++// the absent-target release route. The release snapshot is derived from the
++// targeted retained anchor plus the exact physical/Git absence proof; the
++// caller cannot self-sign the anchor identity.
++type ArchivedResourceReleaseRequest struct {
++	AnchorOperationID  string `json:"anchor_operation_id"`
++	AnchorDigest       string `json:"anchor_digest"`
++	AnchorTaskID       string `json:"anchor_task_id"`
++	AnchorWorktreeID   string `json:"anchor_worktree_id"`
++	AnchorRepository   string `json:"anchor_repository_id"`
++	AnchorBranch       string `json:"anchor_branch"`
++	AnchorHeadOID      string `json:"anchor_head_oid"`
++	AnchorWorktreePath string `json:"anchor_worktree_path"`
++	AnchorGitCommonDir string `json:"anchor_git_common_dir"`
++	ReleasedAt         string `json:"released_at"`
++}
++
++// ArchivedResourceReleaseResult is the metadata-only success receipt.
++type ArchivedResourceReleaseResult struct {
++	OperationID      string `json:"operation_id"`
++	State            string `json:"state"`
++	Targets          int    `json:"targets"`
++	PhysicalRetained bool   `json:"physical_retained"`
++	PhysicalRemoved  bool   `json:"physical_removed"`
++}
++
++// ArchivedResourceEnvironmentRetirementRequest is the exact-set admission
++// payload for the stale environment retirement route. The repository binds
++// every persisted column per row, so the caller must supply the canonical
++// generation values for every row that may be retired.
++type ArchivedResourceEnvironmentRetirementRequest struct {
++	EnvironmentID     string                                                   `json:"environment_id"`
++	TaskID            string                                                   `json:"task_id"`
++	EnvironmentStatus string                                                   `json:"environment_status"`
++	Repositories      []ArchivedResourceEnvironmentRetirementRepositoryRequest `json:"repositories"`
++	RetiredAt         string                                                   `json:"retired_at"`
++}
++
++type ArchivedResourceEnvironmentRetirementRepositoryRequest struct {
++	ID             string `json:"id"`
++	RepositoryID   string `json:"repository_id"`
++	BranchSlug     string `json:"branch_slug,omitempty"`
++	WorktreeID     string `json:"worktree_id,omitempty"`
++	WorktreePath   string `json:"worktree_path,omitempty"`
++	WorktreeBranch string `json:"worktree_branch,omitempty"`
++	Position       int    `json:"position"`
++	Status         string `json:"status,omitempty"`
++	CreatedAt      string `json:"created_at"`
++	UpdatedAt      string `json:"updated_at"`
++	MergedAt       string `json:"merged_at,omitempty"`
++	DeletedAt      string `json:"deleted_at,omitempty"`
++}
++
++// ArchivedResourceEnvironmentRetirementResult is the metadata-only success
++// receipt.
++type ArchivedResourceEnvironmentRetirementResult struct {
++	EnvironmentID    string `json:"environment_id"`
++	State            string `json:"state"`
++	Repositories     int    `json:"repositories"`
++	PhysicalRetained bool   `json:"physical_retained"`
++	PhysicalRemoved  bool   `json:"physical_removed"`
++}
++
++// ArchivedResourcePendingMoveCancelRequest is the exact-generation cancel
++// payload for a historical session's stale pending move.
++type ArchivedResourcePendingMoveCancelRequest struct {
++	PendingMoveID        string `json:"pending_move_id"`
++	PendingMoveOperation string `json:"pending_move_operation"`
++	SessionID            string `json:"session_id"`
++	SnapshotVersion      int    `json:"snapshot_version"`
++	SnapshotDigest       string `json:"snapshot_digest"`
++	ResourceKind         string `json:"resource_kind"`
++	ResourceID           string `json:"resource_id"`
++	ManagedRootKey       string `json:"managed_root_key"`
++	ResourceSnapshot     string `json:"resource_snapshot"`
++	TaskID               string `json:"task_id"`
++}
++
++// ArchivedResourcePendingMoveCancelResult is the metadata-only success receipt.
++type ArchivedResourcePendingMoveCancelResult struct {
++	OperationID string `json:"operation_id"`
++	State       string `json:"state"`
++	Targets     int    `json:"targets"`
++}
++
++// ArchivedResourceTerminalRepository is the repository surface used by the
++// three terminal DB-only actions. It is intentionally a sub-interface so the
++// service stays free of unrelated cleanup APIs.
++type ArchivedResourceTerminalRepository interface {
++	CancelStaleArchivedResourcePendingMove(ctx context.Context, expected *models.TaskResourceCleanupJob) (bool, error)
++	ReleaseAbsentArchivedResourceAnchor(ctx context.Context, job *models.TaskResourceCleanupJob) (*models.ArchivedResourceReleaseAdmission, error)
++	RetireStaleArchivedResourceEnvironmentReference(
++		ctx context.Context,
++		job *models.TaskResourceCleanupJob,
++	) (*models.ArchivedResourceEnvironmentRetirementIdentity, error)
++}
++
++func (s *Service) archivedResourceTerminalRepo() (ArchivedResourceTerminalRepository, error) {
++	if s.resourceCleanups == nil {
++		return nil, ErrArchivedResourceReleaseUnavailable
++	}
++	repo, ok := s.resourceCleanups.(ArchivedResourceTerminalRepository)
++	if !ok || repo == nil {
++		return nil, ErrArchivedResourceReleaseUnavailable
++	}
++	return repo, nil
++}
++
++func (s *Service) archivedResourceTerminalRepoFor(envErr error) (ArchivedResourceTerminalRepository, error) {
++	repo, err := s.archivedResourceTerminalRepo()
++	if err != nil {
++		return nil, envErr
++	}
++	return repo, nil
++}
++
++func (s *Service) CancelStaleArchivedResourcePendingMove(
++	ctx context.Context,
++	req ArchivedResourcePendingMoveCancelRequest,
++) (*ArchivedResourcePendingMoveCancelResult, error) {
++	if !s.archivedResourceReconcileEnabled() {
++		return nil, ErrArchivedResourcePendingMoveDisabled
++	}
++	if err := validateArchivedResourcePendingMoveRequest(req); err != nil {
++		return nil, err
++	}
++	repo, err := s.archivedResourceTerminalRepoFor(ErrArchivedResourcePendingMoveUnavailable)
++	if err != nil {
++		return nil, err
++	}
++	expected, err := buildStalePendingMoveExpected(req)
++	if err != nil {
++		return nil, err
++	}
++	if err := s.requirePendingMoveSessionTerminal(ctx, req.SessionID, expected.TaskID); err != nil {
++		return nil, err
++	}
++	cancelled, err := repo.CancelStaleArchivedResourcePendingMove(ctx, expected)
++	if err != nil {
++		return nil, err
++	}
++	if !cancelled {
++		return nil, fmt.Errorf("%w: stale pending move was not cancelled", ErrArchivedResourcePendingMoveInvalid)
++	}
++	return &ArchivedResourcePendingMoveCancelResult{
++		OperationID: expected.OperationID,
++		State:       string(models.TaskResourceCleanupStateCancelled),
++		Targets:     1,
++	}, nil
++}
++
++func (s *Service) requirePendingMoveSessionTerminal(
++	ctx context.Context,
++	sessionID string,
++	taskID string,
++) error {
++	if s.sessions == nil {
++		return ErrArchivedResourcePendingMoveUnavailable
++	}
++	session, err := s.sessions.GetTaskSession(ctx, sessionID)
++	if err != nil {
++		return fmt.Errorf("%w: %v", ErrArchivedResourcePendingMoveInvalid, err)
++	}
++	if session == nil {
++		return fmt.Errorf("%w: session %q is missing", ErrArchivedResourcePendingMoveInvalid, sessionID)
++	}
++	if session.TaskID != taskID {
++		return fmt.Errorf("%w: session task_id does not bind pending move", ErrArchivedResourcePendingMoveInvalid)
++	}
++	if !isTerminalArchivedReconcileSession(session.State) {
++		return fmt.Errorf("%w: session %q is in state %q", ErrArchivedResourcePendingMoveSessionActive, sessionID, session.State)
++	}
++	return nil
++}
++
++func validateArchivedResourcePendingMoveRequest(req ArchivedResourcePendingMoveCancelRequest) error {
++	if req.PendingMoveID == "" || req.PendingMoveOperation == "" {
++		return fmt.Errorf("%w: pending move identity is required", ErrArchivedResourcePendingMoveInvalid)
++	}
++	if req.SessionID == "" {
++		return fmt.Errorf("%w: session id is required", ErrArchivedResourcePendingMoveInvalid)
++	}
++	if req.TaskID == "" {
++		return fmt.Errorf("%w: task id is required", ErrArchivedResourcePendingMoveInvalid)
++	}
++	if req.ResourceSnapshot == "" || req.SnapshotDigest == "" {
++		return fmt.Errorf("%w: pending move snapshot bytes are required", ErrArchivedResourcePendingMoveInvalid)
++	}
++	if req.SnapshotVersion != models.ArchivedResourceReconcileSnapshotVersion {
++		return fmt.Errorf("%w: only v2 anchors carry stale pending moves", ErrArchivedResourcePendingMoveInvalid)
++	}
++	if req.ResourceKind == "" || req.ResourceID == "" || req.ManagedRootKey == "" {
++		return fmt.Errorf("%w: pending move identity headers are required", ErrArchivedResourcePendingMoveInvalid)
++	}
++	return nil
++}
++
++func buildStalePendingMoveExpected(
++	req ArchivedResourcePendingMoveCancelRequest,
++) (*models.TaskResourceCleanupJob, error) {
++	scope := req.PendingMoveOperation
++	expected := &models.TaskResourceCleanupJob{
++		ID:               req.PendingMoveID,
++		OperationID:      req.PendingMoveOperation,
++		TaskID:           req.TaskID,
++		Trigger:          models.TaskResourceCleanupTriggerReconcile,
++		State:            models.TaskResourceCleanupStatePending,
++		ResourceSnapshot: req.ResourceSnapshot,
++		SnapshotVersion:  req.SnapshotVersion,
++		SnapshotDigest:   req.SnapshotDigest,
++		ResourceKind:     req.ResourceKind,
++		ResourceID:       req.ResourceID,
++		ManagedRootKey:   req.ManagedRootKey,
++		AnchorRevision:   0,
++		ActiveScopeKey:   &scope,
++	}
++	if _, _, err := models.ValidateArchivedResourceReconcileJobHeaders(expected); err != nil {
++		return nil, fmt.Errorf("%w: %v", ErrArchivedResourcePendingMoveInvalid, err)
++	}
++	return expected, nil
++}
++
++func (s *Service) ReleaseAbsentArchivedResourceTarget(
++	ctx context.Context,
++	req ArchivedResourceReleaseRequest,
++) (*ArchivedResourceReleaseResult, error) {
++	if !s.archivedResourcePhysicalReleaseFlagOn() {
++		return nil, ErrArchivedResourceReleaseDisabled
++	}
++	if err := validateArchivedResourceReleaseRequest(req); err != nil {
++		return nil, err
++	}
++	repo, err := s.archivedResourceTerminalRepoFor(ErrArchivedResourceReleaseUnavailable)
++	if err != nil {
++		return nil, err
++	}
++	job, err := buildArchivedResourceReleaseJob(req)
++	if err != nil {
++		return nil, err
++	}
++	admission, err := repo.ReleaseAbsentArchivedResourceAnchor(ctx, job)
++	if err != nil {
++		return nil, err
++	}
++	if admission == nil || admission.Job == nil {
++		return nil, ErrArchivedResourceReleaseUnknown
++	}
++	return &ArchivedResourceReleaseResult{
++		OperationID:      admission.Job.OperationID,
++		State:            string(admission.Job.State),
++		Targets:          1,
++		PhysicalRetained: true,
++		PhysicalRemoved:  false,
++	}, nil
++}
++
++func (s *Service) archivedResourcePhysicalReleaseFlagOn() bool {
++	s.archivedResourceFeatureMu.Lock()
++	defer s.archivedResourceFeatureMu.Unlock()
++	return s.archivedResourcePhysicalReleaseOn
++}
++
++func validateArchivedResourceReleaseRequest(req ArchivedResourceReleaseRequest) error {
++	for name, value := range map[string]string{
++		"anchor_operation_id":   req.AnchorOperationID,
++		"anchor_digest":         req.AnchorDigest,
++		"anchor_task_id":        req.AnchorTaskID,
++		"anchor_worktree_id":    req.AnchorWorktreeID,
++		"anchor_repository_id":  req.AnchorRepository,
++		"anchor_branch":         req.AnchorBranch,
++		"anchor_head_oid":       req.AnchorHeadOID,
++		"anchor_worktree_path":  req.AnchorWorktreePath,
++		"anchor_git_common_dir": req.AnchorGitCommonDir,
++		"released_at":           req.ReleasedAt,
++	} {
++		if value == "" {
++			return fmt.Errorf("%w: %s is required", ErrArchivedResourceReleaseInvalid, name)
++		}
++	}
++	return nil
++}
++
++func buildArchivedResourceReleaseJob(
++	req ArchivedResourceReleaseRequest,
++) (*models.TaskResourceCleanupJob, error) {
++	immutable := models.ArchivedResourceReleaseImmutable{
++		AnchorOperationID:  req.AnchorOperationID,
++		AnchorDigest:       req.AnchorDigest,
++		AnchorTaskID:       req.AnchorTaskID,
++		AnchorWorktreeID:   req.AnchorWorktreeID,
++		AnchorRepository:   req.AnchorRepository,
++		AnchorBranch:       req.AnchorBranch,
++		AnchorHeadOID:      req.AnchorHeadOID,
++		AnchorWorktreePath: req.AnchorWorktreePath,
++		AnchorGitCommonDir: req.AnchorGitCommonDir,
++	}
++	release := models.ArchivedResourceReleaseReleaseProof{
++		PhysicalPath: req.AnchorWorktreePath,
++		GitWorktreeRegistration: models.ArchivedResourceReleaseGitRegistration{
++			WorktreePath: req.AnchorWorktreePath,
++			Branch:       req.AnchorBranch,
++			HeadOID:      req.AnchorHeadOID,
++		},
++		ReleasedAt: req.ReleasedAt,
++	}
++	_, raw, identity, err := models.NewArchivedResourceReleaseSnapshot(immutable, release)
++	if err != nil {
++		return nil, fmt.Errorf("%w: %v", ErrArchivedResourceReleaseInvalid, err)
++	}
++	managedRootKey, err := models.ArchivedResourceReleaseManagedRootKey(req.AnchorWorktreePath)
++	if err != nil {
++		return nil, fmt.Errorf("%w: %v", ErrArchivedResourceReleaseInvalid, err)
++	}
++	now := time.Now().UTC()
++	return &models.TaskResourceCleanupJob{
++		ID:               identity.OperationID,
++		OperationID:      identity.OperationID,
++		TaskID:           req.AnchorTaskID,
++		Trigger:          models.TaskResourceCleanupTriggerReconcile,
++		State:            models.TaskResourceCleanupStatePending,
++		ResourceSnapshot: string(raw),
++		SnapshotVersion:  models.ArchivedResourceReconcileSnapshotVersion,
++		SnapshotDigest:   identity.SnapshotDigest,
++		ResourceKind:     identity.ResourceKind,
++		ResourceID:       identity.ResourceID,
++		ManagedRootKey:   managedRootKey,
++		AnchorRevision:   0,
++		CreatedAt:        now,
++		UpdatedAt:        now,
++	}, nil
++}
++
++func (s *Service) RetireStaleArchivedResourceEnvironmentReference(
++	ctx context.Context,
++	req ArchivedResourceEnvironmentRetirementRequest,
++) (*ArchivedResourceEnvironmentRetirementResult, error) {
++	if !s.archivedResourceReconcileEnabled() {
++		return nil, ErrArchivedResourceEnvironmentRetirementDisabled
++	}
++	if err := validateArchivedResourceEnvironmentRetirementRequest(req); err != nil {
++		return nil, err
++	}
++	repo, err := s.archivedResourceTerminalRepoFor(ErrArchivedResourceEnvironmentRetirementUnavailable)
++	if err != nil {
++		return nil, err
++	}
++	job, err := buildArchivedResourceEnvironmentRetirementJob(req)
++	if err != nil {
++		return nil, err
++	}
++	identity, err := repo.RetireStaleArchivedResourceEnvironmentReference(ctx, job)
++	if err != nil {
++		return nil, err
++	}
++	if identity == nil {
++		return nil, ErrArchivedResourceEnvironmentRetirementUnavailable
++	}
++	return &ArchivedResourceEnvironmentRetirementResult{
++		EnvironmentID:    req.EnvironmentID,
++		State:            string(models.TaskResourceCleanupStateSucceeded),
++		Repositories:     len(req.Repositories),
++		PhysicalRetained: true,
++		PhysicalRemoved:  false,
++	}, nil
++}
++
++func validateArchivedResourceEnvironmentRetirementRequest(
++	req ArchivedResourceEnvironmentRetirementRequest,
++) error {
++	if req.EnvironmentID == "" {
++		return fmt.Errorf("%w: environment id is required", ErrArchivedResourceEnvironmentRetirementInvalid)
++	}
++	if req.TaskID == "" {
++		return fmt.Errorf("%w: task id is required", ErrArchivedResourceEnvironmentRetirementInvalid)
++	}
++	if req.EnvironmentStatus != "stopped" && req.EnvironmentStatus != "failed" {
++		return fmt.Errorf("%w: environment status must be stopped or failed", ErrArchivedResourceEnvironmentRetirementInvalid)
++	}
++	if len(req.Repositories) == 0 {
++		return fmt.Errorf("%w: at least one repository is required", ErrArchivedResourceEnvironmentRetirementInvalid)
++	}
++	if len(req.Repositories) > models.ArchivedResourceEnvironmentRetirementMaxRepositories {
++		return fmt.Errorf("%w: too many repositories", ErrArchivedResourceEnvironmentRetirementInvalid)
++	}
++	if req.RetiredAt == "" {
++		return fmt.Errorf("%w: retired_at is required", ErrArchivedResourceEnvironmentRetirementInvalid)
++	}
++	for i, repo := range req.Repositories {
++		if repo.ID == "" || repo.RepositoryID == "" || repo.WorktreeID == "" || repo.WorktreeBranch == "" {
++			return fmt.Errorf("%w: repository %d identity is required", ErrArchivedResourceEnvironmentRetirementInvalid, i)
++		}
++		if repo.CreatedAt == "" || repo.UpdatedAt == "" {
++			return fmt.Errorf("%w: repository %d timestamps are required", ErrArchivedResourceEnvironmentRetirementInvalid, i)
++		}
++	}
++	return nil
++}
++
++func buildArchivedResourceEnvironmentRetirementJob(
++	req ArchivedResourceEnvironmentRetirementRequest,
++) (*models.TaskResourceCleanupJob, error) {
++	repositories := make([]models.ArchivedResourceEnvironmentRetirementRepository, 0, len(req.Repositories))
++	for _, repo := range req.Repositories {
++		repositories = append(repositories, models.ArchivedResourceEnvironmentRetirementRepository{
++			ID:             repo.ID,
++			RepositoryID:   repo.RepositoryID,
++			BranchSlug:     repo.BranchSlug,
++			WorktreeID:     repo.WorktreeID,
++			WorktreePath:   repo.WorktreePath,
++			WorktreeBranch: repo.WorktreeBranch,
++			Position:       repo.Position,
++			Status:         repo.Status,
++			CreatedAt:      repo.CreatedAt,
++			UpdatedAt:      repo.UpdatedAt,
++			MergedAt:       repo.MergedAt,
++			DeletedAt:      repo.DeletedAt,
++		})
++	}
++	immutable := models.ArchivedResourceEnvironmentRetirementImmutable{
++		EnvironmentID:     req.EnvironmentID,
++		TaskID:            req.TaskID,
++		EnvironmentStatus: req.EnvironmentStatus,
++		Repositories:      repositories,
++	}
++	proof := models.ArchivedResourceEnvironmentRetirementProof{RetiredAt: req.RetiredAt}
++	_, raw, identity, err := models.NewArchivedResourceEnvironmentRetirementSnapshot(immutable, proof)
++	if err != nil {
++		return nil, fmt.Errorf("%w: %v", ErrArchivedResourceEnvironmentRetirementInvalid, err)
++	}
++	managedRootKey, _ := models.ArchivedResourceEnvironmentRetirementManagedRootKey(req.Repositories[0].WorktreePath)
++	now := time.Now().UTC()
++	return &models.TaskResourceCleanupJob{
++		ID:               identity.OperationID,
++		OperationID:      identity.OperationID,
++		TaskID:           req.TaskID,
++		Trigger:          models.TaskResourceCleanupTriggerReconcile,
++		State:            models.TaskResourceCleanupStatePending,
++		ResourceSnapshot: string(raw),
++		SnapshotVersion:  models.ArchivedResourceEnvironmentRetirementSnapshotVersion,
++		SnapshotDigest:   identity.SnapshotDigest,
++		ResourceKind:     identity.ResourceKind,
++		ResourceID:       identity.ResourceID,
++		ManagedRootKey:   managedRootKey,
++		AnchorRevision:   0,
++		CreatedAt:        now,
++		UpdatedAt:        now,
++	}, nil
++}
++
++// Compile-time guard: ensure the runtime repository implementation continues to
++// satisfy ArchivedResourceTerminalRepository as the surface evolves.
++var _ ArchivedResourceTerminalRepository = (repository.ArchivedResourceReconcileRepository)(nil)
+diff --git a/apps/backend/internal/task/service/resource_cleanup_terminal_actions_test.go b/apps/backend/internal/task/service/resource_cleanup_terminal_actions_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..41dc0a88da28a3afa67093fc271c1e952b190fa9
+--- /dev/null
++++ b/apps/backend/internal/task/service/resource_cleanup_terminal_actions_test.go
+@@ -0,0 +1,86 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/kandev/kandev/internal/task/models"
++)
++
++func TestArchivedResourcePendingMoveCancelDisabledByDefault(t *testing.T) {
++	svc, _, _ := createTestService(t)
++	_, err := svc.CancelStaleArchivedResourcePendingMove(context.Background(), ArchivedResourcePendingMoveCancelRequest{
++		PendingMoveID:        "job-pending",
++		PendingMoveOperation: "operation-pending",
++		SessionID:            "session-terminal",
++		SnapshotVersion:      models.ArchivedResourceReconcileSnapshotVersion,
++		SnapshotDigest:       "digest",
++		ResourceKind:         models.ArchivedResourceReconcileResourceKind,
++		ResourceID:           "wt-pending",
++		ManagedRootKey:       "git_worktree:pending",
++		ResourceSnapshot:     `{}`,
++		TaskID:               "task-pending",
++	})
++	if !errors.Is(err, ErrArchivedResourcePendingMoveDisabled) {
++		t.Fatalf("disabled cancel error = %v, want ErrArchivedResourcePendingMoveDisabled", err)
++	}
++}
++
++func TestArchivedResourceReleaseAbsentDisabledByDefault(t *testing.T) {
++	svc, _, _ := createTestService(t)
++	_, err := svc.ReleaseAbsentArchivedResourceTarget(context.Background(), ArchivedResourceReleaseRequest{
++		AnchorOperationID:  "operation-anchor",
++		AnchorDigest:       "digest",
++		AnchorTaskID:       "task-anchor",
++		AnchorWorktreeID:   "wt-anchor",
++		AnchorRepository:   "repository-company",
++		AnchorBranch:       "feature/synthetic",
++		AnchorHeadOID:      strings.Repeat("a", 40),
++		AnchorWorktreePath: "/tmp/release/path",
++		AnchorGitCommonDir: "/tmp/release/.git",
++		ReleasedAt:         time.Now().UTC().Format(time.RFC3339Nano),
++	})
++	if !errors.Is(err, ErrArchivedResourceReleaseDisabled) {
++		t.Fatalf("disabled release error = %v, want ErrArchivedResourceReleaseDisabled", err)
++	}
++}
++
++func TestArchivedResourceEnvironmentRetirementDisabledByDefault(t *testing.T) {
++	svc, _, _ := createTestService(t)
++	_, err := svc.RetireStaleArchivedResourceEnvironmentReference(context.Background(), ArchivedResourceEnvironmentRetirementRequest{
++		EnvironmentID:     "env-stopped",
++		TaskID:            "task-archived",
++		EnvironmentStatus: "stopped",
++		Repositories: []ArchivedResourceEnvironmentRetirementRepositoryRequest{
++			{
++				ID:             "repo-row",
++				RepositoryID:   "repository-company",
++				WorktreeID:     "wt-repo",
++				WorktreeBranch: "feature/synthetic",
++				Position:       0,
++				Status:         "active",
++				CreatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
++				UpdatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
++			},
++		},
++		RetiredAt: time.Now().UTC().Format(time.RFC3339Nano),
++	})
++	if !errors.Is(err, ErrArchivedResourceEnvironmentRetirementDisabled) {
++		t.Fatalf("disabled retirement error = %v, want ErrArchivedResourceEnvironmentRetirementDisabled", err)
++	}
++}
++
++func TestArchivedResourceTerminalRequestShapeRejectsMissingFields(t *testing.T) {
++	if err := validateArchivedResourcePendingMoveRequest(ArchivedResourcePendingMoveCancelRequest{}); !errors.Is(err, ErrArchivedResourcePendingMoveInvalid) {
++		t.Fatalf("pending move validation = %v, want ErrArchivedResourcePendingMoveInvalid", err)
++	}
++	if err := validateArchivedResourceReleaseRequest(ArchivedResourceReleaseRequest{}); !errors.Is(err, ErrArchivedResourceReleaseInvalid) {
++		t.Fatalf("release validation = %v, want ErrArchivedResourceReleaseInvalid", err)
++	}
++	if err := validateArchivedResourceEnvironmentRetirementRequest(ArchivedResourceEnvironmentRetirementRequest{}); !errors.Is(err, ErrArchivedResourceEnvironmentRetirementInvalid) {
++		t.Fatalf("retirement validation = %v, want ErrArchivedResourceEnvironmentRetirementInvalid", err)
++	}
++}
+diff --git a/docs/plans/pinwei-v088-semantic-port/task-06-terminal-db-only-actions.md b/docs/plans/pinwei-v088-semantic-port/task-06-terminal-db-only-actions.md
+index 7982ab0f4cd82de8535d273abcd7e103a24d8b61..f22b1f3f713c1baa6f03a08f6e7858fd42bc3543 100644
+--- a/docs/plans/pinwei-v088-semantic-port/task-06-terminal-db-only-actions.md
++++ b/docs/plans/pinwei-v088-semantic-port/task-06-terminal-db-only-actions.md
+@@ -1,7 +1,7 @@
+ ---
+ id: "06-terminal-db-only-actions"
+ title: "Port terminal DB-only archived-resource actions"
+-status: pending
++status: done
+ wave: 5
+ depends_on: ["05-reconcile-lifecycle"]
+ plan: "plan.md"
+@@ -21,4 +21,147 @@ spec: "../../specs/tasks/archived-resource-safety/spec.md"
+ 
+ ## Results
+ 
+-Pending.
++Implemented the three terminal DB-only archived-resource actions on top of
++the v0.88 `task_environment_repos` ownership and Task05 retained anchors.
++The two shipped flags stay off; every new path is gated and fail-closed when
++the governing flag is disabled or the inventory is missing.
++
++### What landed
++
++- **Models** (`apps/backend/internal/task/models`)
++  - `resource_cleanup.go` gains the `released` cleanup state for the
++    retained → released transition; `archived_resource_reconcile.go`
++    extends the lifecycle validator with the terminal state helper so a
++    released anchor still decodes with `revision=1` and `CompletedAt`.
++  - `archived_resource_release.go` — strict canonical v2 release snapshot,
++    duplicate-key / unknown-field / trailing-JSON rejection, immutable digest
++    binding that ties the anchor identity to the release proof, canonical
++    worktree_path and git common-dir validation, sealed absence proof fields.
++  - `archived_resource_environment_retirement.go` — strict canonical v2
++    retirement snapshot, fourteen-column per-row generation, sorted
++    repository set, exact-set binding of the historical environment rows.
++
++- **Physicaldelete inventory** (`apps/backend/internal/physicaldelete`)
++  - `types.go` adds `ActionReleaseAbsent`, `ExecutorNone`, the
++    `ErrReleaseNotAdmitted` and `DenialReleaseNotAdmitted` errors.
++  - `verifier.go` routes the new action to the `ExecutorNone` executor.
++  - `service.go` wires the `releaseExecutor` and dispatches
++    `ActionReleaseAbsent` to it through the existing `executeUnavailable`
++    switch; the executor returns `Mutated=false` and no error so release
++    admission is observable but never widens into a physical action.
++  - `executor_release.go` defines the sealed no-op executor.
++
++- **Repository** (`apps/backend/internal/task/repository`)
++  - `interface.go` extends the `ArchivedResourceReconcileRepository` surface
++    with `CancelStaleArchivedResourcePendingMove`,
++    `ReleaseAbsentArchivedResourceAnchor`, and
++    `RetireStaleArchivedResourceEnvironmentReference`.
++  - `sqlite/resource_cleanup_reconcile.go` adds
++    `CancelStaleArchivedResourcePendingMove`, which clears `active_scope_key`,
++    `completed_at`, and `updated_at` on the exact seven-field pending-row
++    generation only. The CAS binds every typed header so any drift fails
++    closed; replay after the row is already cancelled is a zero-effect no-op.
++  - `sqlite/resource_cleanup_release.go` performs the sealed absent-target
++    admission in one serializable transaction. It probes the writer-DB
++    inventory sources (task_environments, task_environment_repos,
++    executors_running, plus the optional task_workspace_groups and
++    storage_quarantine_entries that may be absent in tests) for the exact
++    physical path and Git worktree registration, fails closed when any
++    inventory source still references the target, and CAS-transitions the
++    retained anchor to `released` with `revision=1`, `CompletedAt`, and the
++    original immutable snapshot unchanged.
++  - `sqlite/resource_cleanup_environment_retirement.go` performs the exact-set
++    retirement transaction. It scans the workspace-group inventory for the
++    four accepted states (`active`, `cleanup_pending`, `cleaned`,
++    `cleanup_failed`), fails closed on unknown / malformed states, walks every
++    active v2/v3 reconcile anchor to confirm the environment is not a
++    participant (including non-coordinator v3 task participants), and deletes
++    only the exact `task_environment_repos` rows captured by admission.
++    Missing tables are treated as empty inventories so the task-layer test
++    fixtures remain portable.
++
++- **Service** (`apps/backend/internal/task/service`)
++  - `service.go` exposes `ArchivedResourcePhysicalReleaseEnabled` so the route
++    registration can read the same flag the service enforces.
++  - `resource_cleanup_terminal_actions.go` —
++    `CancelStaleArchivedResourcePendingMove` verifies the pending move's
++    session is terminal before invoking the repository CAS,
++    `ReleaseAbsentArchivedResourceTarget` is gated by
++    `archivedResourcePhysicalReleaseOn`, and
++    `RetireStaleArchivedResourceEnvironmentReference` is gated by
++    `archivedResourceReconcileOn` and produces a metadata-only
++    `physical_removed=false` receipt.
++
++- **Handlers** (`apps/backend/internal/task/handlers`)
++  - `task_handlers.go` adds `archivedResourcePhysicalRelease` to the flag set
++    and registers two new route groups: the reconcile group gains
++    `cancel-stale-pending-move` and `retire-stale-environment-reference`, while
++    a separate physical-release group owns
++    `release-absent-retained-target`. Both groups carry the existing
++    `authn.RequireRealIdentity()` + `authn.RequireAdmin()` middleware.
++  - `task_http_handlers.go` adds the three HTTP handlers and their HTTP
++    status mappers; each handler enforces the existing canonical JSON
++    decoder (duplicate keys, unknown fields, trailing values).
++
++### Tests and verification
++
++- New tests
++  - `internal/task/models/archived_resource_release_test.go` — canonical
++    round-trip, proof-and-identity drift, missing-field rejection, trailing
++    JSON, and managed-root-key canonicalisation.
++  - `internal/task/models/archived_resource_environment_retirement_test.go`
++    — canonical round-trip, sorted repository set with duplicate rejection,
++    invalid-status / non-canonical-timestamp rejection, and trailing JSON.
++  - `internal/task/repository/sqlite/resource_cleanup_terminal_release_test.go`
++    — release anchor presence check, success under clean inventory,
++    fail-closed when the physical path is still referenced by
++    `task_environment_repos`, header-drift rejection, and the cancel-only-
++    target-row invariant (sibling rows remain pending with their
++    `active_scope_key`).
++  - `internal/task/repository/sqlite/resource_cleanup_terminal_retirement_test.go`
++    — exact-set row deletion, fail-closed when the workspace-group inventory
++    has an unknown state, identity-drift rejection, and fail-closed when the
++    environment status drifted away from `stopped` / `failed`.
++  - `internal/task/service/resource_cleanup_terminal_actions_test.go` —
++    disabled-by-default checks for all three actions and request-shape
++    validation.
++  - `internal/task/handlers/task_http_terminal_actions_test.go` — route flag
++    gating, invalid-JSON / unknown-field rejection, and route registration
++    parity with the existing reconcile handler.
++
++- Verification commands (all run from `apps/backend`, with
++  `KANDEV_TEST_POSTGRES_DSN` unset per spec)
++
++  ```text
++  $ go test ./internal/task/models ./internal/task/repository/sqlite \
++        ./internal/task/service ./internal/task/handlers ./internal/physicaldelete \
++        -run 'PendingMove|ReleaseAbsent|EnvironmentRetirement|Inventory' -count=1
++  ok  internal/task/models             0.787s
++  ok  internal/task/repository/sqlite   0.666s
++  ok  internal/task/service            1.603s
++  ok  internal/task/handlers           1.806s
++  ok  internal/physicaldelete          1.357s
++
++  $ go test -race ./internal/task/repository/sqlite ./internal/task/service \
++        -run 'PendingMove|ReleaseAbsent|EnvironmentRetirement' -count=1
++  ok  internal/task/repository/sqlite   2.329s
++  ok  internal/task/service            2.064s
++
++  $ go vet ./internal/task/... ./internal/physicaldelete
++  (no output)
++  ```
++
++  Task05 verification (`ArchivedResource|Reconcile|Unarchive|FeatureContract`)
++  re-runs clean against the new code path. PostgreSQL runtime stays
++  `NOT_RUN` (no isolated DSN provided); the existing Task05 Postgres branches
++  still cover the additive columns and the partial unique index predicate
++  via env-gated `WHERE current_schema()`.
++
++- Profile flag invariant
++  - `TestFeatureContract_ArchivedResourceFlagsDefaultFalse` continues to
++    assert every shipped profile keeps both
++    `KANDEV_FEATURES_ARCHIVED_RESOURCE_RECONCILE` and
++    `KANDEV_FEATURES_ARCHIVED_RESOURCE_PHYSICAL_RELEASE` set to `false`.
++    The new release route is registered only when the physical-release flag
++    is enabled; the cancel / retirement routes are registered only when the
++    reconcile flag is enabled.
+-- 
+2.55.0
+

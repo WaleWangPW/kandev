@@ -1,0 +1,633 @@
+From 9606cc115cdb0eaddbd0c0a5d83668e536d196e8 Mon Sep 17 00:00:00 2001
+From: WaleWangPW <396218656@qq.com>
+Date: Mon, 17 Aug 2026 18:37:13 +0800
+Subject: [PATCH 18/22] fix(task): add safe archive cleanup cancellation
+
+---
+ .../internal/task/handlers/task_handlers.go   |   1 +
+ .../task/handlers/task_http_handlers.go       |  28 +++++
+ .../task_http_terminal_actions_test.go        |   1 +
+ .../models/archive_cleanup_cancellation.go    |  12 ++
+ .../internal/task/repository/interface.go     |  11 ++
+ .../repository/sqlite/resource_cleanup.go     | 114 ++++++++++++++++++
+ ...urce_cleanup_cancellation_postgres_test.go |  48 ++++++++
+ .../resource_cleanup_cancellation_test.go     | 100 +++++++++++++++
+ .../internal/task/service/handoff_cascade.go  |  65 ++++++++++
+ ...ndoff_cascade_cleanup_cancellation_test.go |  58 +++++++++
+ .../internal/task/service/handoff_service.go  |  17 +++
+ .../task/service/resource_cleanup_jobs.go     |  18 +++
+ 12 files changed, 473 insertions(+)
+ create mode 100644 apps/backend/internal/task/models/archive_cleanup_cancellation.go
+ create mode 100644 apps/backend/internal/task/repository/sqlite/resource_cleanup_cancellation_postgres_test.go
+ create mode 100644 apps/backend/internal/task/repository/sqlite/resource_cleanup_cancellation_test.go
+ create mode 100644 apps/backend/internal/task/service/handoff_cascade_cleanup_cancellation_test.go
+
+diff --git a/apps/backend/internal/task/handlers/task_handlers.go b/apps/backend/internal/task/handlers/task_handlers.go
+index eb53d1c0637f7b6191a7d0fe1a3ad0bb85c546fd..e47a612978bb681b376ca0e70fa408246ba573ca 100644
+--- a/apps/backend/internal/task/handlers/task_handlers.go
++++ b/apps/backend/internal/task/handlers/task_handlers.go
+@@ -171,6 +171,7 @@ func (h *TaskHandlers) registerHTTP(router *gin.Engine) {
+ 	api.POST("/tasks/:id/unarchive", h.httpUnarchiveTask)
+ 	if h.archivedResourceReconcile {
+ 		reconcile := api.Group("", authn.RequireRealIdentity(), authn.RequireAdmin())
++		reconcile.POST("/tasks/:id/resource-cleanup/cancel-archive", h.httpCancelArchivedCascadeCleanup)
+ 		reconcile.POST("/tasks/:id/resource-cleanup/reconcile", h.httpReconcileArchivedResource)
+ 		reconcile.POST("/system/resource-cleanup/reconcile-group", h.httpReconcileArchivedResourceGroup)
+ 		reconcile.POST("/system/resource-cleanup/cancel-stale-pending-move", h.httpCancelStaleArchivedResourcePendingMove)
+diff --git a/apps/backend/internal/task/handlers/task_http_handlers.go b/apps/backend/internal/task/handlers/task_http_handlers.go
+index e43ed9cdc62a68a2de5e4e37b47889f037cf2e2c..3b5ff7c91b7103c02a85d1e30c362ab11826b4ff 100644
+--- a/apps/backend/internal/task/handlers/task_http_handlers.go
++++ b/apps/backend/internal/task/handlers/task_http_handlers.go
+@@ -21,6 +21,7 @@ import (
+ 	"github.com/kandev/kandev/internal/task/dto"
+ 	"github.com/kandev/kandev/internal/task/models"
+ 	taskrepository "github.com/kandev/kandev/internal/task/repository"
++	"github.com/kandev/kandev/internal/task/repository/repoerrors"
+ 	taskrepo "github.com/kandev/kandev/internal/task/repository/sqlite"
+ 	"github.com/kandev/kandev/internal/task/service"
+ 	"github.com/kandev/kandev/internal/task/statussummary"
+@@ -1803,6 +1804,33 @@ func (h *TaskHandlers) httpUnarchiveTask(c *gin.Context) {
+ 	})
+ }
+ 
++// httpCancelArchivedCascadeCleanup is an administrator-only, feature-gated
++// lifecycle operation. It intentionally has no fallback to the ordinary task
++// service: cancellation without the cascade generation binding is unsafe.
++func (h *TaskHandlers) httpCancelArchivedCascadeCleanup(c *gin.Context) {
++	if h.handoffSvc == nil {
++		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "archive cleanup cancellation is unavailable"})
++		return
++	}
++	outcome, err := h.handoffSvc.CancelArchivedCascadeCleanup(c.Request.Context(), c.Param("id"))
++	if err != nil {
++		switch {
++		case errors.Is(err, service.ErrArchiveCleanupCancellationUnavailable):
++			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "archive cleanup cancellation is unavailable"})
++		case errors.Is(err, repoerrors.ErrTaskCleanupInProgress), errors.Is(err, service.ErrArchiveCleanupCancellationConflict):
++			c.JSON(http.StatusConflict, gin.H{"error": "archive cleanup is running"})
++		default:
++			handleNotFound(c, h.logger, err, "archive cleanup not cancelled")
++		}
++		return
++	}
++	c.JSON(http.StatusOK, gin.H{
++		"success": true, "cascade_id": outcome.CascadeID,
++		"tasks": len(outcome.TaskIDs), "cancelled_jobs": outcome.CancelledJobs,
++		"physical_retained": true,
++	})
++}
++
+ // httpStartQuickChatRequest is the request body for starting a quick chat session.
+ type httpStartQuickChatRequest struct {
+ 	Title             string                         `json:"title,omitempty"`
+diff --git a/apps/backend/internal/task/handlers/task_http_terminal_actions_test.go b/apps/backend/internal/task/handlers/task_http_terminal_actions_test.go
+index 9effb12d55398c5d94e9c1f6b71bbd98dd04b555..497b49cfa2740da88ad783286c33db92f064e3a0 100644
+--- a/apps/backend/internal/task/handlers/task_http_terminal_actions_test.go
++++ b/apps/backend/internal/task/handlers/task_http_terminal_actions_test.go
+@@ -19,6 +19,7 @@ func TestHTTPTerminalActionRoutesRespectFlags(t *testing.T) {
+ 	registerTerminalActionRoutes(router, handler, false, false)
+ 
+ 	for _, path := range []string{
++		"/api/v1/tasks/task/resource-cleanup/cancel-archive",
+ 		"/api/v1/system/resource-cleanup/cancel-stale-pending-move",
+ 		"/api/v1/system/resource-cleanup/release-absent-retained-target",
+ 		"/api/v1/system/resource-cleanup/retire-stale-environment-reference",
+diff --git a/apps/backend/internal/task/models/archive_cleanup_cancellation.go b/apps/backend/internal/task/models/archive_cleanup_cancellation.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..aa6a0507c85b8ff89a77be795fa1dca5a2e74d6c
+--- /dev/null
++++ b/apps/backend/internal/task/models/archive_cleanup_cancellation.go
+@@ -0,0 +1,12 @@
++package models
++
++import "time"
++
++// ArchiveTaskCleanupCancellationExpectation binds an operator cancellation to
++// the exact archive generation that created a cascade cleanup intent. It keeps
++// a later unarchive/rearchive from being mistaken for the original operation.
++type ArchiveTaskCleanupCancellationExpectation struct {
++	TaskID     string
++	ArchivedAt time.Time
++	CascadeID  string
++}
+diff --git a/apps/backend/internal/task/repository/interface.go b/apps/backend/internal/task/repository/interface.go
+index e64b8c7f8bc0a4ef0b5246cea5dc806d0f2213fd..638a6ae15e872ec074a23da6d5c1a90b360ab2a6 100644
+--- a/apps/backend/internal/task/repository/interface.go
++++ b/apps/backend/internal/task/repository/interface.go
+@@ -304,6 +304,17 @@ type TaskResourceCleanupRepository interface {
+ 	ResetRunningTaskResourceCleanupJobs(ctx context.Context) error
+ }
+ 
++// ArchiveTaskCleanupCancellationRepository exposes the narrowly-scoped,
++// DB-only cancellation used by the operator archive-cleanup endpoint. The
++// implementation must reject a running job or any archive-generation drift
++// before it transitions a single retryable job.
++type ArchiveTaskCleanupCancellationRepository interface {
++	CancelRetryableArchiveTaskResourceCleanupJobs(
++		ctx context.Context,
++		expected []models.ArchiveTaskCleanupCancellationExpectation,
++	) (int, error)
++}
++
+ // ArchivedResourceReconcileRepository exposes only the strict DB-only
+ // reconcile transitions. Keeping it separate prevents generic cleanup workers
+ // and their test doubles from gaining retention-anchor mutation authority.
+diff --git a/apps/backend/internal/task/repository/sqlite/resource_cleanup.go b/apps/backend/internal/task/repository/sqlite/resource_cleanup.go
+index 622d72065a8d1d2381680cb52df98b150ef895a8..3aa0e4594c799adb9078c1105ce52e1769c43e1e 100644
+--- a/apps/backend/internal/task/repository/sqlite/resource_cleanup.go
++++ b/apps/backend/internal/task/repository/sqlite/resource_cleanup.go
+@@ -5,6 +5,7 @@ import (
+ 	"database/sql"
+ 	"errors"
+ 	"fmt"
++	"sort"
+ 	"time"
+ 
+ 	"github.com/google/uuid"
+@@ -365,6 +366,119 @@ func (r *Repository) CancelArchiveTaskResourceCleanupJobs(ctx context.Context, t
+ 	return err
+ }
+ 
++// CancelRetryableArchiveTaskResourceCleanupJobs atomically cancels exactly
++// the archive generations in expected. A running cleanup is deliberately a
++// conflict: an operator must never relabel a cleanup while its worker may
++// still own filesystem or runtime side effects.
++func (r *Repository) CancelRetryableArchiveTaskResourceCleanupJobs(
++	ctx context.Context,
++	expected []models.ArchiveTaskCleanupCancellationExpectation,
++) (int, error) {
++	if len(expected) == 0 {
++		return 0, fmt.Errorf("archive cleanup cancellation requires at least one task")
++	}
++	ordered := append([]models.ArchiveTaskCleanupCancellationExpectation(nil), expected...)
++	sort.Slice(ordered, func(i, j int) bool { return ordered[i].TaskID < ordered[j].TaskID })
++	tx, err := r.db.BeginTxx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
++	if err != nil {
++		return 0, fmt.Errorf("begin archive cleanup cancellation: %w", err)
++	}
++	defer func() { _ = tx.Rollback() }()
++	for _, item := range ordered {
++		if err := r.verifyArchiveCleanupCancellationTaskLocked(ctx, tx, item); err != nil {
++			return 0, err
++		}
++	}
++	count, err := r.cancelRetryableArchiveCleanupLocked(ctx, tx, ordered)
++	if err != nil {
++		return 0, err
++	}
++	if err := tx.Commit(); err != nil {
++		return 0, fmt.Errorf("%w: commit archive cleanup cancellation: %v", repoerrors.ErrTransactionOutcomeUnknown, err)
++	}
++	return count, nil
++}
++
++func (r *Repository) verifyArchiveCleanupCancellationTaskLocked(
++	ctx context.Context,
++	tx *sqlx.Tx,
++	expected models.ArchiveTaskCleanupCancellationExpectation,
++) error {
++	if expected.TaskID == "" || expected.CascadeID == "" || expected.ArchivedAt.IsZero() {
++		return fmt.Errorf("archive cleanup cancellation expectation is incomplete")
++	}
++	if err := r.lockTaskCleanupDomainLocked(ctx, tx, expected.TaskID); err != nil {
++		return err
++	}
++	query := `SELECT archived_at, archived_by_cascade_id FROM tasks WHERE id = ?` + reconcileForUpdate(r.db.DriverName())
++	var archivedAt *time.Time
++	var cascadeID string
++	if err := tx.QueryRowContext(ctx, r.db.Rebind(query), expected.TaskID).Scan(&archivedAt, &cascadeID); err != nil {
++		return fmt.Errorf("read archive cleanup generation: %w", err)
++	}
++	if archivedAt == nil || !archivedAt.Equal(expected.ArchivedAt) || cascadeID != expected.CascadeID {
++		return fmt.Errorf("archive cleanup generation drifted for task %s", expected.TaskID)
++	}
++	rows, err := tx.QueryContext(ctx, r.db.Rebind(`
++		SELECT state FROM task_resource_cleanup_jobs
++		WHERE task_id = ? AND trigger IN (?, ?) AND state IN (?, ?, ?, ?)`+reconcileForUpdate(r.db.DriverName())), expected.TaskID,
++		models.TaskResourceCleanupTriggerArchive,
++		models.TaskResourceCleanupTriggerCascadeArchive,
++		models.TaskResourceCleanupStatePrepared,
++		models.TaskResourceCleanupStatePending,
++		models.TaskResourceCleanupStateRunning,
++		models.TaskResourceCleanupStateRetryWait,
++	)
++	if err != nil {
++		return fmt.Errorf("lock archive cleanup jobs: %w", err)
++	}
++	defer func() { _ = rows.Close() }()
++	for rows.Next() {
++		var state models.TaskResourceCleanupState
++		if err := rows.Scan(&state); err != nil {
++			return fmt.Errorf("scan archive cleanup state: %w", err)
++		}
++		if state == models.TaskResourceCleanupStateRunning {
++			return fmt.Errorf("%w: archive cleanup is running for task %s", repoerrors.ErrTaskCleanupInProgress, expected.TaskID)
++		}
++	}
++	if err := rows.Err(); err != nil {
++		return fmt.Errorf("iterate archive cleanup states: %w", err)
++	}
++	return nil
++}
++
++func (r *Repository) cancelRetryableArchiveCleanupLocked(
++	ctx context.Context,
++	tx *sqlx.Tx,
++	expected []models.ArchiveTaskCleanupCancellationExpectation,
++) (int, error) {
++	now := time.Now().UTC()
++	cancelled := 0
++	for _, item := range expected {
++		result, err := tx.ExecContext(ctx, r.db.Rebind(`
++			UPDATE task_resource_cleanup_jobs
++			SET state = ?, completed_at = ?, updated_at = ?
++			WHERE task_id = ? AND trigger IN (?, ?) AND state IN (?, ?, ?)
++		`), models.TaskResourceCleanupStateCancelled, now, now, item.TaskID,
++			models.TaskResourceCleanupTriggerArchive,
++			models.TaskResourceCleanupTriggerCascadeArchive,
++			models.TaskResourceCleanupStatePrepared,
++			models.TaskResourceCleanupStatePending,
++			models.TaskResourceCleanupStateRetryWait,
++		)
++		if err != nil {
++			return 0, fmt.Errorf("cancel retryable archive cleanup: %w", err)
++		}
++		rows, err := result.RowsAffected()
++		if err != nil {
++			return 0, fmt.Errorf("read archive cleanup cancellation result: %w", err)
++		}
++		cancelled += int(rows)
++	}
++	return cancelled, nil
++}
++
+ func (r *Repository) ResetRunningTaskResourceCleanupJobs(ctx context.Context) error {
+ 	now := time.Now().UTC()
+ 	_, err := r.db.ExecContext(ctx, r.db.Rebind(`
+diff --git a/apps/backend/internal/task/repository/sqlite/resource_cleanup_cancellation_postgres_test.go b/apps/backend/internal/task/repository/sqlite/resource_cleanup_cancellation_postgres_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..229417d0273c411278a8a2b5361432b8a4b1f778
+--- /dev/null
++++ b/apps/backend/internal/task/repository/sqlite/resource_cleanup_cancellation_postgres_test.go
+@@ -0,0 +1,48 @@
++package sqlite
++
++import (
++	"context"
++	"testing"
++
++	"github.com/kandev/kandev/internal/task/models"
++	"github.com/kandev/kandev/internal/testutil"
++)
++
++func TestPostgresCancelRetryableArchiveCleanupLocksAndPreservesArchive(t *testing.T) {
++	db := testutil.OpenIsolatedPostgres(t, testutil.PostgresDSNFromEnv(t))
++	repo, err := NewWithDB(db, db, nil)
++	if err != nil {
++		t.Fatalf("init postgres schema: %v", err)
++	}
++	ctx := context.Background()
++	seedPostgresTask(t, repo, "cancel-archive-pg")
++	if archived, err := repo.ArchiveTaskIfActive(ctx, "cancel-archive-pg", "cascade-pg"); err != nil || !archived {
++		t.Fatalf("archive = %v, %v", archived, err)
++	}
++	task, err := repo.GetTask(ctx, "cancel-archive-pg")
++	if err != nil || task.ArchivedAt == nil {
++		t.Fatalf("load archived task: %#v, %v", task, err)
++	}
++	job := &models.TaskResourceCleanupJob{
++		ID: "cleanup-pg", OperationID: "cascade_archive:cancel-archive-pg",
++		TaskID: task.ID, Trigger: models.TaskResourceCleanupTriggerCascadeArchive,
++		State: models.TaskResourceCleanupStateRetryWait, ResourceSnapshot: `{}`,
++	}
++	if err := repo.CreateTaskResourceCleanupJob(ctx, job); err != nil {
++		t.Fatal(err)
++	}
++	cancelled, err := repo.CancelRetryableArchiveTaskResourceCleanupJobs(ctx, []models.ArchiveTaskCleanupCancellationExpectation{{
++		TaskID: task.ID, ArchivedAt: *task.ArchivedAt, CascadeID: task.ArchivedByCascadeID,
++	}})
++	if err != nil || cancelled != 1 {
++		t.Fatalf("cancel = %d, %v", cancelled, err)
++	}
++	stored, err := repo.GetTaskResourceCleanupJob(ctx, job.ID)
++	if err != nil || stored.State != models.TaskResourceCleanupStateCancelled || stored.CompletedAt == nil {
++		t.Fatalf("stored job = %#v, %v", stored, err)
++	}
++	current, err := repo.GetTask(ctx, task.ID)
++	if err != nil || current.ArchivedAt == nil || !current.ArchivedAt.Equal(*task.ArchivedAt) || current.ArchivedByCascadeID != task.ArchivedByCascadeID {
++		t.Fatalf("archive generation changed: %#v, %v", current, err)
++	}
++}
+diff --git a/apps/backend/internal/task/repository/sqlite/resource_cleanup_cancellation_test.go b/apps/backend/internal/task/repository/sqlite/resource_cleanup_cancellation_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6ad3a1f0255dc69661ccb642a06d9074321dd783
+--- /dev/null
++++ b/apps/backend/internal/task/repository/sqlite/resource_cleanup_cancellation_test.go
+@@ -0,0 +1,100 @@
++package sqlite
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	"github.com/kandev/kandev/internal/task/models"
++	"github.com/kandev/kandev/internal/task/repository/repoerrors"
++)
++
++func TestCancelRetryableArchiveCleanupBindsArchiveGeneration(t *testing.T) {
++	ctx := context.Background()
++	repo := newRepoForHealTests(t)
++	expected := seedRetryableArchivedCleanup(t, repo, "cancel-exact", "cascade-exact")
++
++	cancelled, err := repo.CancelRetryableArchiveTaskResourceCleanupJobs(ctx, []models.ArchiveTaskCleanupCancellationExpectation{expected})
++	if err != nil || cancelled != 1 {
++		t.Fatalf("cancel = %d, %v; want 1, nil", cancelled, err)
++	}
++	job, err := repo.GetTaskResourceCleanupJobByOperationID(ctx, "cascade_archive:cancel-exact")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if job.State != models.TaskResourceCleanupStateCancelled || job.CompletedAt == nil {
++		t.Fatalf("job after cancel = %#v", job)
++	}
++	task, err := repo.GetTask(ctx, expected.TaskID)
++	if err != nil || task.ArchivedAt == nil || !task.ArchivedAt.Equal(expected.ArchivedAt) || task.ArchivedByCascadeID != expected.CascadeID {
++		t.Fatalf("archive generation changed: %#v, %v", task, err)
++	}
++}
++
++func TestCancelRetryableArchiveCleanupRejectsRunningWithoutPartialMutation(t *testing.T) {
++	ctx := context.Background()
++	repo := newRepoForHealTests(t)
++	first := seedRetryableArchivedCleanup(t, repo, "cancel-first", "cascade-pair")
++	second := seedRetryableArchivedCleanup(t, repo, "cancel-running", "cascade-pair")
++	job, err := repo.GetTaskResourceCleanupJobByOperationID(ctx, "cascade_archive:cancel-running")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if claimed, err := repo.MarkTaskResourceCleanupJobRunning(ctx, job.ID); err != nil || !claimed {
++		t.Fatalf("claim = %v, %v", claimed, err)
++	}
++
++	_, err = repo.CancelRetryableArchiveTaskResourceCleanupJobs(ctx, []models.ArchiveTaskCleanupCancellationExpectation{first, second})
++	if !errors.Is(err, repoerrors.ErrTaskCleanupInProgress) {
++		t.Fatalf("cancel error = %v, want ErrTaskCleanupInProgress", err)
++	}
++	firstJob, err := repo.GetTaskResourceCleanupJobByOperationID(ctx, "cascade_archive:cancel-first")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if firstJob.State != models.TaskResourceCleanupStateRetryWait || firstJob.CompletedAt != nil {
++		t.Fatalf("first job was partially cancelled: %#v", firstJob)
++	}
++}
++
++func TestCancelRetryableArchiveCleanupRejectsArchiveGenerationDrift(t *testing.T) {
++	ctx := context.Background()
++	repo := newRepoForHealTests(t)
++	expected := seedRetryableArchivedCleanup(t, repo, "cancel-drift", "cascade-drift")
++	expected.CascadeID = "other-cascade"
++	if _, err := repo.CancelRetryableArchiveTaskResourceCleanupJobs(ctx, []models.ArchiveTaskCleanupCancellationExpectation{expected}); err == nil {
++		t.Fatal("cancellation accepted a cascade generation drift")
++	}
++	job, err := repo.GetTaskResourceCleanupJobByOperationID(ctx, "cascade_archive:cancel-drift")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if job.State != models.TaskResourceCleanupStateRetryWait {
++		t.Fatalf("generation drift mutated job: %#v", job)
++	}
++}
++
++func seedRetryableArchivedCleanup(t *testing.T, repo *Repository, taskID, cascadeID string) models.ArchiveTaskCleanupCancellationExpectation {
++	t.Helper()
++	ctx := context.Background()
++	seedBarrierTask(t, repo, taskID)
++	archived, err := repo.ArchiveTaskIfActive(ctx, taskID, cascadeID)
++	if err != nil || !archived {
++		t.Fatalf("archive %s = %v, %v", taskID, archived, err)
++	}
++	task, err := repo.GetTask(ctx, taskID)
++	if err != nil || task.ArchivedAt == nil {
++		t.Fatalf("load archived task %s: %#v, %v", taskID, task, err)
++	}
++	job := &models.TaskResourceCleanupJob{
++		ID: "cleanup-" + taskID, OperationID: "cascade_archive:" + taskID,
++		TaskID: taskID, Trigger: models.TaskResourceCleanupTriggerCascadeArchive,
++		State: models.TaskResourceCleanupStateRetryWait, ResourceSnapshot: `{}`,
++	}
++	if err := repo.CreateTaskResourceCleanupJob(ctx, job); err != nil {
++		t.Fatalf("create cleanup %s: %v", taskID, err)
++	}
++	return models.ArchiveTaskCleanupCancellationExpectation{
++		TaskID: taskID, ArchivedAt: *task.ArchivedAt, CascadeID: cascadeID,
++	}
++}
+diff --git a/apps/backend/internal/task/service/handoff_cascade.go b/apps/backend/internal/task/service/handoff_cascade.go
+index 77964cf34bebd62cf07f90a5e86ea4cce825d202..e1792b1f0bdaaa8dbf54db061f9aed05ba0a5916 100644
+--- a/apps/backend/internal/task/service/handoff_cascade.go
++++ b/apps/backend/internal/task/service/handoff_cascade.go
+@@ -709,6 +709,71 @@ func (s *HandoffService) UnarchiveTaskTree(ctx context.Context, rootID string) (
+ 	return out, nil
+ }
+ 
++// CancelArchivedCascadeCleanup stops only retryable cleanup jobs belonging to
++// the exact archive cascade rooted at rootID. It leaves every task archived
++// and never invokes a filesystem, Git, runtime, or workspace-group action.
++func (s *HandoffService) CancelArchivedCascadeCleanup(ctx context.Context, rootID string) (*CascadeCleanupCancellationOutcome, error) {
++	if err := s.authorizeTask(ctx, rootID); err != nil {
++		return nil, err
++	}
++	if rootID == "" || s.tasks == nil {
++		return nil, ErrArchiveCleanupCancellationUnavailable
++	}
++	root, err := s.tasks.GetTask(ctx, rootID)
++	if err != nil {
++		return nil, err
++	}
++	if root == nil {
++		return nil, fmt.Errorf("%w: task %s not found", ErrArchiveCleanupCancellationConflict, rootID)
++	}
++	if root.ArchivedAt == nil || root.ArchivedByCascadeID == "" {
++		return nil, fmt.Errorf("%w: root is not cascade-archived", ErrArchiveCleanupCancellationConflict)
++	}
++	ids, err := s.collectArchivedTreeByCascade(ctx, rootID, root.ArchivedByCascadeID)
++	if err != nil {
++		return nil, err
++	}
++	expected, err := s.archiveCleanupCancellationExpectations(ctx, ids, root.ArchivedByCascadeID)
++	if err != nil {
++		return nil, err
++	}
++	canceller, ok := s.resourceCleaner.(retryableArchivedCascadeCleanupCanceller)
++	if !ok || canceller == nil {
++		return nil, ErrArchiveCleanupCancellationUnavailable
++	}
++	cancelled, err := canceller.CancelRetryableArchivedCascadeCleanup(ctx, expected)
++	if err != nil {
++		return nil, err
++	}
++	return &CascadeCleanupCancellationOutcome{CascadeID: root.ArchivedByCascadeID, TaskIDs: ids, CancelledJobs: cancelled}, nil
++}
++
++// CascadeCleanupCancellationOutcome reports only lifecycle metadata; it does
++// not imply that any physical resource was released or removed.
++type CascadeCleanupCancellationOutcome struct {
++	CascadeID     string
++	TaskIDs       []string
++	CancelledJobs int
++}
++
++func (s *HandoffService) archiveCleanupCancellationExpectations(
++	ctx context.Context,
++	ids []string,
++	cascadeID string,
++) ([]models.ArchiveTaskCleanupCancellationExpectation, error) {
++	expected := make([]models.ArchiveTaskCleanupCancellationExpectation, 0, len(ids))
++	for _, id := range ids {
++		task, err := s.tasks.GetTask(ctx, id)
++		if err != nil || task == nil || task.ArchivedAt == nil || task.ArchivedByCascadeID != cascadeID {
++			return nil, fmt.Errorf("%w: generation unavailable for task %s", ErrArchiveCleanupCancellationConflict, id)
++		}
++		expected = append(expected, models.ArchiveTaskCleanupCancellationExpectation{
++			TaskID: id, ArchivedAt: *task.ArchivedAt, CascadeID: cascadeID,
++		})
++	}
++	return expected, nil
++}
++
+ // unarchiveManualRoot restores a single task that was archived without a
+ // cascade stamp (legacy Service.ArchiveTask path or rows predating the
+ // cascade infrastructure). Only the root is restored — its descendants
+diff --git a/apps/backend/internal/task/service/handoff_cascade_cleanup_cancellation_test.go b/apps/backend/internal/task/service/handoff_cascade_cleanup_cancellation_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..fc81e4b8af0e7ea998b997d8ff28d36d99c06d2a
+--- /dev/null
++++ b/apps/backend/internal/task/service/handoff_cascade_cleanup_cancellation_test.go
+@@ -0,0 +1,58 @@
++package service
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"github.com/kandev/kandev/internal/task/models"
++)
++
++type recordingArchivedCascadeCanceller struct {
++	expected []models.ArchiveTaskCleanupCancellationExpectation
++}
++
++func (*recordingArchivedCascadeCanceller) CleanupTaskResources(context.Context, string, bool) {}
++
++func (c *recordingArchivedCascadeCanceller) CancelRetryableArchivedCascadeCleanup(
++	_ context.Context,
++	expected []models.ArchiveTaskCleanupCancellationExpectation,
++) (int, error) {
++	c.expected = append([]models.ArchiveTaskCleanupCancellationExpectation(nil), expected...)
++	return len(expected), nil
++}
++
++func TestCancelArchivedCascadeCleanupLeavesTasksArchived(t *testing.T) {
++	tasks := newFakeTaskRepo()
++	tasks.addTask("root", "", "ws-1")
++	tasks.addTask("child", "root", "ws-1")
++	archivedAt := time.Date(2026, 8, 17, 1, 2, 3, 0, time.UTC)
++	tasks.mu.Lock()
++	for _, id := range []string{"root", "child"} {
++		tasks.tasks[id].ArchivedAt = &archivedAt
++		tasks.tasks[id].ArchivedByCascadeID = "cascade-cancel"
++	}
++	tasks.mu.Unlock()
++
++	canceller := &recordingArchivedCascadeCanceller{}
++	svc := NewHandoffService(newCascadeRepo(tasks), nil, nil, nil, nil, nil)
++	svc.SetTaskResourceCleaner(canceller)
++	outcome, err := svc.CancelArchivedCascadeCleanup(context.Background(), "root")
++	if err != nil {
++		t.Fatalf("CancelArchivedCascadeCleanup: %v", err)
++	}
++	if outcome.CancelledJobs != 2 || len(outcome.TaskIDs) != 2 || len(canceller.expected) != 2 {
++		t.Fatalf("outcome=%#v expectations=%#v", outcome, canceller.expected)
++	}
++	for _, expected := range canceller.expected {
++		if !expected.ArchivedAt.Equal(archivedAt) || expected.CascadeID != "cascade-cancel" {
++			t.Fatalf("cancellation expectation not generation-bound: %#v", expected)
++		}
++	}
++	for _, id := range []string{"root", "child"} {
++		task, err := svc.tasks.GetTask(context.Background(), id)
++		if err != nil || task.ArchivedAt == nil || task.ArchivedByCascadeID != "cascade-cancel" {
++			t.Fatalf("task %s was changed: %#v, %v", id, task, err)
++		}
++	}
++}
+diff --git a/apps/backend/internal/task/service/handoff_service.go b/apps/backend/internal/task/service/handoff_service.go
+index 572221ae9824b37d22cdc94bd1918fc40b1b399f..352aeede8fbfab4d315476b3aa9d29a9f36471b3 100644
+--- a/apps/backend/internal/task/service/handoff_service.go
++++ b/apps/backend/internal/task/service/handoff_service.go
+@@ -206,6 +206,16 @@ type HandoffService struct {
+ 	workspaceGroupLock parentMutex
+ }
+ 
++var (
++	// ErrArchiveCleanupCancellationUnavailable means the runtime lacks the
++	// generation-bound cancellation coordinator. Callers must not fall back to
++	// an unbound generic job update.
++	ErrArchiveCleanupCancellationUnavailable = errors.New("archive cleanup cancellation is unavailable")
++	// ErrArchiveCleanupCancellationConflict means the requested root is not an
++	// exact archive cascade or one of its generations changed while binding.
++	ErrArchiveCleanupCancellationConflict = errors.New("archive cleanup cancellation conflict")
++)
++
+ // TaskEventPublisher abstracts the side-effect of broadcasting task
+ // lifecycle events. The cascade paths (ArchiveTaskTree, DeleteTaskTree)
+ // bypass Service.ArchiveTask / Service.DeleteTask — which means they
+@@ -266,6 +276,13 @@ type archiveTaskResourceCleanupCanceller interface {
+ 	CancelArchiveTaskResourceCleanup(ctx context.Context, taskID string) error
+ }
+ 
++type retryableArchivedCascadeCleanupCanceller interface {
++	CancelRetryableArchivedCascadeCleanup(
++		ctx context.Context,
++		expected []models.ArchiveTaskCleanupCancellationExpectation,
++	) (int, error)
++}
++
+ type taskResourceCleanupCoordinator interface {
+ 	PrepareTaskResourceCleanup(ctx context.Context, taskID string, trigger models.TaskResourceCleanupTrigger, operationID string, deleteEnvironmentRow bool) error
+ 	StartPreparedTaskResourceCleanup(ctx context.Context, operationID string) error
+diff --git a/apps/backend/internal/task/service/resource_cleanup_jobs.go b/apps/backend/internal/task/service/resource_cleanup_jobs.go
+index 0840ef0c8a8ff1048ec323806b8b33190a829a49..72b66f04bed470ea01eabbfbc1b4114e4467d636 100644
+--- a/apps/backend/internal/task/service/resource_cleanup_jobs.go
++++ b/apps/backend/internal/task/service/resource_cleanup_jobs.go
+@@ -552,6 +552,24 @@ func (s *Service) CancelArchiveTaskResourceCleanup(ctx context.Context, taskID s
+ 	return errors.Join(cancelErr, joinErr)
+ }
+ 
++// CancelRetryableArchivedCascadeCleanup cancels an exact archived cascade
++// without unarchiving its tasks. It accepts only non-running jobs, so a
++// concurrent cleanup worker remains a fail-closed conflict rather than being
++// relabelled while it may still own side effects.
++func (s *Service) CancelRetryableArchivedCascadeCleanup(
++	ctx context.Context,
++	expected []models.ArchiveTaskCleanupCancellationExpectation,
++) (int, error) {
++	if s.resourceCleanups == nil {
++		return 0, ErrArchiveCleanupCancellationUnavailable
++	}
++	repo, ok := s.resourceCleanups.(taskrepo.ArchiveTaskCleanupCancellationRepository)
++	if !ok || repo == nil {
++		return 0, ErrArchiveCleanupCancellationUnavailable
++	}
++	return repo.CancelRetryableArchiveTaskResourceCleanupJobs(ctx, expected)
++}
++
+ // PrepareTaskResourceCleanup captures cleanup handles before a cascade mutates
+ // task rows. StartPreparedTaskResourceCleanup is called only after the matching
+ // lifecycle mutation commits.
+-- 
+2.55.0
+

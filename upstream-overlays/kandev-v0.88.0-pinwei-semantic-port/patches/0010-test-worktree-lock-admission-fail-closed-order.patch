@@ -1,0 +1,71 @@
+From 341f927f2dcaf8ea0638a398dbbbf90c54e3b52a Mon Sep 17 00:00:00 2001
+From: WaleWangPW <396218656@qq.com>
+Date: Sun, 16 Aug 2026 05:13:27 +0800
+Subject: [PATCH 10/22] test(worktree): lock admission fail-closed order
+
+---
+ .../backend/internal/worktree/manager_test.go | 34 ++++++++++++++++++-
+ 1 file changed, 33 insertions(+), 1 deletion(-)
+
+diff --git a/apps/backend/internal/worktree/manager_test.go b/apps/backend/internal/worktree/manager_test.go
+index cf99d590c028881da9fd8e3e0f8be030d28b7e35..f30ae4ed06eeda4f7573c9be8e9fb3b42c782e23 100644
+--- a/apps/backend/internal/worktree/manager_test.go
++++ b/apps/backend/internal/worktree/manager_test.go
+@@ -32,7 +32,8 @@ func newTestConfig(t *testing.T) Config {
+ 
+ // mockStore implements Store for testing
+ type mockStore struct {
+-	worktrees map[string]*Worktree
++	worktrees                map[string]*Worktree
++	getBySessionAndRepoCalls int
+ }
+ 
+ func newMockStore() *mockStore {
+@@ -177,6 +178,7 @@ func (s *mockStore) GetWorktreesBySessionID(_ context.Context, sessionID string)
+ 
+ // GetWorktreeBySessionAndRepository — MultiRepoStore.
+ func (s *mockStore) GetWorktreeBySessionAndRepository(_ context.Context, sessionID, repoID, branchSlug string) (*Worktree, error) {
++	s.getBySessionAndRepoCalls++
+ 	for _, wt := range s.worktrees {
+ 		if wt.SessionID == sessionID && wt.RepositoryID == repoID && wt.BranchSlug == branchSlug && wt.Status == StatusActive {
+ 			return wt, nil
+@@ -185,6 +187,36 @@ func (s *mockStore) GetWorktreeBySessionAndRepository(_ context.Context, session
+ 	return nil, nil
+ }
+ 
++func TestManagerCreateWithoutAdmissionFailsBeforeStoreOrGitAccess(t *testing.T) {
++	store := newMockStore()
++	mgr, err := NewManager(newTestConfig(t), store, newTestLogger())
++	if err != nil {
++		t.Fatalf("NewManager: %v", err)
++	}
++	// Production composition must set this explicitly. Clear the test factory
++	// admission to prove the public Create boundary remains fail-closed.
++	mgr.admission = nil
++	nonexistentRepo := filepath.Join(t.TempDir(), "must-not-be-inspected")
++	_, err = mgr.Create(context.Background(), CreateRequest{
++		TaskID:         "task-no-admission",
++		SessionID:      "session-no-admission",
++		RepositoryID:   "repository-no-admission",
++		RepositoryPath: nonexistentRepo,
++		BaseBranch:     "main",
++		TaskDirName:    "task-no-admission",
++		RepoName:       "repository-no-admission",
++	})
++	if err == nil || !strings.Contains(err.Error(), "admission is not configured") {
++		t.Fatalf("Create error = %v, want missing-admission failure", err)
++	}
++	if store.getBySessionAndRepoCalls != 0 {
++		t.Fatalf("store reuse lookups = %d, want zero before admission", store.getBySessionAndRepoCalls)
++	}
++	if _, statErr := os.Stat(nonexistentRepo); !errors.Is(statErr, os.ErrNotExist) {
++		t.Fatalf("repository path changed or inspected through creation: stat error = %v", statErr)
++	}
++}
++
+ func TestNewManager(t *testing.T) {
+ 	cfg := newTestConfig(t)
+ 	log := newTestLogger()
+-- 
+2.55.0
+

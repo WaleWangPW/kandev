@@ -1,0 +1,2468 @@
+From 9b958fc87028d571b3d38a83b4abbfe103d52dbb Mon Sep 17 00:00:00 2001
+From: WaleWangPW <396218656@qq.com>
+Date: Sat, 15 Aug 2026 17:35:25 +0800
+Subject: [PATCH 04/22] fix(agent): bind prepared profile launches
+
+---
+ .../lifecycle/environment_resolution.go       |   5 +
+ .../runtime/lifecycle/executor_backend.go     |  29 +--
+ .../runtime/lifecycle/executor_profile_env.go |  16 +-
+ .../runtime/lifecycle/manager_execution.go    |  42 ++++-
+ .../lifecycle/manager_execution_test.go       |  47 +++++
+ .../runtime/lifecycle/manager_interaction.go  |  16 ++
+ .../lifecycle/manager_interaction_test.go     |  19 ++
+ .../agent/runtime/lifecycle/manager_launch.go |  34 +++-
+ .../runtime/lifecycle/manager_launch_test.go  |  47 +++++
+ .../runtime/lifecycle/manager_passthrough.go  |  87 ++++++++-
+ .../manager_passthrough_runtime_test.go       |   3 +-
+ .../lifecycle/manager_passthrough_test.go     |  68 ++++++-
+ .../runtime/lifecycle/manager_startup.go      |  11 +-
+ .../runtime/lifecycle/manager_startup_test.go | 107 +++++++++++
+ .../lifecycle/manager_workspace_rebind.go     |  10 +
+ .../agent/runtime/lifecycle/profile_env.go    |  98 +++++++---
+ .../runtime/lifecycle/profile_env_test.go     |  36 +++-
+ .../runtime/lifecycle/profile_fingerprint.go  | 172 ++++++++++++++++++
+ .../lifecycle/profile_fingerprint_test.go     | 121 ++++++++++++
+ .../runtime/lifecycle/profile_resolver.go     |  10 +-
+ .../internal/agent/runtime/lifecycle/types.go |  15 +-
+ .../agent/settings/controller/reconciler.go   |   7 +-
+ .../settings/controller/reconciler_test.go    |  49 +++++
+ apps/backend/internal/backendapp/adapters.go  |   2 +
+ .../orchestrator/event_handlers_test.go       |   6 +-
+ .../orchestrator/executor/executor.go         |   4 +
+ .../orchestrator/executor/executor_execute.go |  53 +++++-
+ .../executor/executor_interaction.go          |  43 +++--
+ .../executor/executor_interaction_test.go     |  54 +++++-
+ .../executor/executor_mocks_test.go           |   1 +
+ .../orchestrator/executor/executor_office.go  |  10 +-
+ .../orchestrator/executor/executor_resume.go  |  36 ++--
+ .../executor/executor_resume_test.go          |  49 +++++
+ .../orchestrator/executor/executor_test.go    |  75 +++++++-
+ .../internal/orchestrator/task_operations.go  |  41 +++--
+ .../orchestrator/task_operations_test.go      |  60 +++++-
+ .../internal/task/service/service_turns.go    |  12 ++
+ .../task/service/service_turns_test.go        |  11 +-
+ 38 files changed, 1355 insertions(+), 151 deletions(-)
+ create mode 100644 apps/backend/internal/agent/runtime/lifecycle/profile_fingerprint.go
+ create mode 100644 apps/backend/internal/agent/runtime/lifecycle/profile_fingerprint_test.go
+
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/environment_resolution.go b/apps/backend/internal/agent/runtime/lifecycle/environment_resolution.go
+index b617a743b822a176c508f13333ffa3d12fa71b52..b4fdef3953259e6855dfc3f5f75074d6406533ae 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/environment_resolution.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/environment_resolution.go
+@@ -50,6 +50,11 @@ func (m *Manager) resolveStrictEnvironment(
+ 
+ 	resolved, err := runtimeenv.Resolve(ctx, definitions, m.resolveEnvironmentDefinition)
+ 	if err != nil {
++		var secretErr *runtimeenv.SecretError
++		if errors.As(err, &secretErr) &&
++			(secretErr.Origin == agentProfileOrigin || secretErr.Origin == executorProfileOrigin) {
++			return nil, ErrProfileSecret
++		}
+ 		return nil, fmt.Errorf("resolve task environment: %w", err)
+ 	}
+ 	return resolved, nil
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/executor_backend.go b/apps/backend/internal/agent/runtime/lifecycle/executor_backend.go
+index 4818cc34e5252b03f26fad2be6d1d19872ddc24f..9cf1c29e044c1a21423cc5746af832556aa7688e 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/executor_backend.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/executor_backend.go
+@@ -190,20 +190,21 @@ var persistentMetadataKeys = map[string]bool{
+ 	MetadataKeyIsRemote: true,
+ 
+ 	// Executor profile / auth config
+-	MetadataKeyCleanupScript:       true,
+-	MetadataKeyRepoSetupScript:     true,
+-	MetadataKeyRemoteAuthHome:      true,
+-	MetadataKeyGitUserName:         true,
+-	MetadataKeyGitUserEmail:        true,
+-	"remote_credentials":           true,
+-	"remote_auth_secrets":          true,
+-	"executor_mcp_policy":          true,
+-	"sprites_network_policy_rules": true,
+-	"executor_profile_id":          true,
+-	MetadataKeyImageTagOverride:    true,
+-	MetadataKeyContainerID:         true,
+-	MetadataKeyWorktreeBranch:      true,
+-	MetadataKeyRemoteContributions: true,
++	MetadataKeyCleanupScript:              true,
++	MetadataKeyRepoSetupScript:            true,
++	MetadataKeyRemoteAuthHome:             true,
++	MetadataKeyGitUserName:                true,
++	MetadataKeyGitUserEmail:               true,
++	"remote_credentials":                  true,
++	"remote_auth_secrets":                 true,
++	"executor_mcp_policy":                 true,
++	"sprites_network_policy_rules":        true,
++	"executor_profile_id":                 true,
++	MetadataKeyImageTagOverride:           true,
++	MetadataKeyContainerID:                true,
++	MetadataKeyWorktreeBranch:             true,
++	MetadataKeyRemoteContributions:        true,
++	metadataKeyExpectedProfileFingerprint: true,
+ }
+ 
+ // persistentMetadataPrefixes lists key prefixes that should persist.
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/executor_profile_env.go b/apps/backend/internal/agent/runtime/lifecycle/executor_profile_env.go
+index 20e676c9d2d0f76cd3627c763180361dfecff149..d4ad27abfe18e4bcaf81ce78f2647d71b64a8ce5 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/executor_profile_env.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/executor_profile_env.go
+@@ -32,9 +32,9 @@ func (m *Manager) SetExecutorProfileReader(reader ExecutorProfileReader) {
+ // launch request), so a user shell terminal opened on the workspace sees the
+ // same tokens the agent and the repository setup script do.
+ //
+-// Resolution is best-effort: a missing reader, session, environment, profile, or
+-// secret yields the entries that could be resolved rather than failing the
+-// terminal.
++// Metadata lookup remains best-effort. Profile secret resolution is atomic: a
++// missing/unreadable secret returns no profile environment rather than a
++// partial set.
+ func (m *Manager) ExecutorProfileEnvForSession(ctx context.Context, sessionID, taskEnvironmentID string) map[string]string {
+ 	if m.executorProfileReader == nil {
+ 		return nil
+@@ -57,7 +57,15 @@ func (m *Manager) ExecutorProfileEnvForSession(ctx context.Context, sessionID, t
+ 	}
+ 	// ExecutorProfile.EnvVars and agent-profile env vars are the same type, so
+ 	// the secret-revealing resolver is shared.
+-	return m.resolveAgentProfileEnvVars(ctx, profile.EnvVars)
++	resolved, err := m.resolveAgentProfileEnvVars(ctx, profile.EnvVars)
++	if err != nil {
++		m.logger.Warn("executor profile environment unavailable",
++			zap.String("session_id", sessionID),
++			zap.String("task_environment_id", taskEnvironmentID),
++			zap.Error(ErrProfileSecret))
++		return nil
++	}
++	return resolved
+ }
+ 
+ // terminalExecutorProfileID picks the executor profile the terminal should
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/manager_execution.go b/apps/backend/internal/agent/runtime/lifecycle/manager_execution.go
+index 5ec47825bee9c78fb6cf07ec9ca51fe8f574e660..b283e01c8a42327f1273be91b17b9dd57e021751 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/manager_execution.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/manager_execution.go
+@@ -666,7 +666,10 @@ func (m *Manager) prepareExecutionCreateRequest(
+ 	}
+ 
+ 	executionProfileID := workspaceExecutionProfileID(info)
+-	profileInfo := m.resolveWorkspaceExecutionProfile(ctx, executionProfileID)
++	profileInfo, err := m.resolveWorkspaceExecutionProfile(ctx, info, executionProfileID)
++	if err != nil {
++		return nil, err
++	}
+ 	envPreparation, err := m.prepareExecutionEnvironment(
+ 		ctx, taskID, info, executionID, executionProfileID, agentConfig, profileInfo,
+ 	)
+@@ -718,18 +721,38 @@ func (m *Manager) prepareExecutionCreateRequest(
+ 	}, nil
+ }
+ 
+-func (m *Manager) resolveWorkspaceExecutionProfile(ctx context.Context, profileID string) *AgentProfileInfo {
++func (m *Manager) resolveWorkspaceExecutionProfile(
++	ctx context.Context, info *WorkspaceInfo, profileID string,
++) (*AgentProfileInfo, error) {
++	expected, err := expectedProfileFingerprintFromMetadata(info.Metadata)
++	if err != nil {
++		return nil, err
++	}
+ 	if profileID == "" || m.profileResolver == nil {
+-		return nil
++		if expected != "" {
++			return nil, ErrProfileDrift
++		}
++		return nil, nil
+ 	}
+ 	profileInfo, err := m.profileResolver.ResolveProfile(ctx, profileID)
+ 	if err != nil {
+-		m.logger.Warn("failed to resolve profile for workspace execution",
+-			zap.String("execution_profile_id", profileID),
+-			zap.Error(err))
+-		return nil
++		if expected == "" {
++			m.logger.Warn("failed to resolve legacy profile for workspace execution",
++				zap.String("execution_profile_id", profileID), zap.Error(err))
++			return nil, nil
++		}
++		return nil, ErrProfileDrift
++	}
++	if profileInfo == nil {
++		if expected == "" {
++			return nil, nil
++		}
++		return nil, ErrProfileDrift
++	}
++	if err := validateProfileFingerprint(expected, profileInfo); err != nil {
++		return nil, err
+ 	}
+-	return profileInfo
++	return profileInfo, nil
+ }
+ 
+ func (m *Manager) prepareExecutionEnvironment(
+@@ -799,7 +822,8 @@ func (m *Manager) initializeCreatedExecution(
+ 	// The effective runtime snapshot (including repository secrets) is already
+ 	// captured by ToAgentExecution and must not be mislabeled as profile data.
+ 	if preparation.profileInfo != nil && len(preparation.profileInfo.EnvVars) > 0 {
+-		m.cacheResolvedProfileEnv(execution, m.resolveAgentProfileEnvVars(ctx, preparation.profileInfo.EnvVars))
++		m.cacheResolvedProfileEnv(execution,
++			resolvedProfileEnvFromFinal(preparation.profileInfo.EnvVars, preparation.request.Env))
+ 	}
+ 
+ 	if info.ACPSessionID != "" {
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/manager_execution_test.go b/apps/backend/internal/agent/runtime/lifecycle/manager_execution_test.go
+index cbd7ffd86610c0d36820153e000c23e98b7c711e..ccd0cccca989d1f51632464c5cb262ecfc038b54 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/manager_execution_test.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/manager_execution_test.go
+@@ -1013,6 +1013,53 @@ func TestCreateExecutionResolvesProfileOnceForEnvAndAutoApprove(t *testing.T) {
+ 	}
+ }
+ 
++func TestCreateExecutionProfileSecretFailureStartsNoRuntime(t *testing.T) {
++	profileResolver := &countingProfileResolver{info: &AgentProfileInfo{
++		ProfileID: "profile-1", AgentID: "auggie",
++		EnvVars: []settingsmodels.ProfileEnvVar{
++			{Key: "PLAIN", Value: "must-not-be-used"},
++			{Key: "SECRET", SecretID: "missing-secret-reference"},
++		},
++	}}
++	mgr, backend := newEnvironmentExecutionTestManagerWithProfileResolver(t, &mockWorkspaceInfoProvider{}, profileResolver)
++
++	_, err := mgr.createExecution(context.Background(), "task-1", &WorkspaceInfo{
++		SessionID: "session-1", AgentID: "auggie", AgentProfileID: "profile-1",
++		WorkspacePath: "/workspace/task-1",
++	})
++	if !errors.Is(err, ErrProfileSecret) {
++		t.Fatalf("createExecution error = %v, want %v", err, ErrProfileSecret)
++	}
++	if strings.Contains(err.Error(), "missing-secret-reference") || strings.Contains(err.Error(), "must-not-be-used") {
++		t.Fatalf("secret failure error leaked profile data: %v", err)
++	}
++	if got := backend.createCount.Load(); got != 0 {
++		t.Fatalf("CreateInstance calls = %d, want 0", got)
++	}
++}
++
++func TestCreateExecutionRecoveryBlocksProfileDriftBeforeRuntime(t *testing.T) {
++	profileResolver := &countingProfileResolver{info: &AgentProfileInfo{
++		ProfileID: "profile-1", AgentID: "auggie",
++		Fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
++	}}
++	mgr, backend := newEnvironmentExecutionTestManagerWithProfileResolver(t, &mockWorkspaceInfoProvider{}, profileResolver)
++
++	_, err := mgr.createExecution(context.Background(), "task-1", &WorkspaceInfo{
++		SessionID: "session-1", AgentID: "auggie", AgentProfileID: "profile-1",
++		WorkspacePath: "/workspace/task-1",
++		Metadata: map[string]interface{}{
++			metadataKeyExpectedProfileFingerprint: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++		},
++	})
++	if !errors.Is(err, ErrProfileDrift) || err.Error() != "BLOCKED_PROFILE_DRIFT" {
++		t.Fatalf("createExecution error = %v, want sanitized %v", err, ErrProfileDrift)
++	}
++	if got := backend.createCount.Load(); got != 0 {
++		t.Fatalf("CreateInstance calls = %d, want 0", got)
++	}
++}
++
+ func TestCreateExecutionRecoversRepositoryEnvironmentAndSSHApprovals(t *testing.T) {
+ 	profileResolver := &countingProfileResolver{info: &AgentProfileInfo{
+ 		ProfileID: "agent-profile", AgentID: "auggie", EnvVars: []settingsmodels.ProfileEnvVar{{Key: "PROFILE_ONLY", Value: "profile-value"}},
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/manager_interaction.go b/apps/backend/internal/agent/runtime/lifecycle/manager_interaction.go
+index 0d4712ec28585c0eed9c7fea40c5ae78a3770543..3a855b87e3291dc18baae6a0793e2b84c2d51bfd 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/manager_interaction.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/manager_interaction.go
+@@ -503,6 +503,9 @@ func (m *Manager) ResetAgentContext(ctx context.Context, executionID string) err
+ 	if !exists {
+ 		return fmt.Errorf("execution %q not found: %w", executionID, ErrExecutionNotFound)
+ 	}
++	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
++		return err
++	}
+ 
+ 	// Passthrough agents always need full restart
+ 	if execution.PassthroughProcessID != "" {
+@@ -728,6 +731,9 @@ func (m *Manager) RestartAgentProcess(ctx context.Context, executionID string) e
+ 	if !exists {
+ 		return fmt.Errorf("execution %q not found: %w", executionID, ErrExecutionNotFound)
+ 	}
++	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
++		return err
++	}
+ 
+ 	// Passthrough agents: kill PTY and relaunch fresh (no --resume).
+ 	if execution.PassthroughProcessID != "" {
+@@ -1706,6 +1712,9 @@ func (m *Manager) stopPassthroughProcess(ctx context.Context, executionID string
+ // command_prefix cannot be tokenised, it returns an error so a context reset
+ // never relaunches a configured agent without its wrapper.
+ func (m *Manager) buildFreshAgentCommand(ctx context.Context, execution *AgentExecution, agentConfig agents.Agent) (agentCommands, error) {
++	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
++		return agentCommands{}, err
++	}
+ 	var profileInfo *AgentProfileInfo
+ 	if execution.AgentProfileID != "" && m.profileResolver != nil {
+ 		pi, resolveErr := m.profileResolver.ResolveProfile(ctx, execution.AgentProfileID)
+@@ -1716,6 +1725,13 @@ func (m *Manager) buildFreshAgentCommand(ctx context.Context, execution *AgentEx
+ 			return agentCommands{}, fmt.Errorf("resolve profile %s for restart: %w", execution.AgentProfileID, resolveErr)
+ 		}
+ 		profileInfo = pi
++		expected, bindingErr := expectedProfileFingerprintFromMetadata(execution.MetadataSnapshot())
++		if bindingErr != nil {
++			return agentCommands{}, bindingErr
++		}
++		if err := validateProfileFingerprint(expected, profileInfo); err != nil {
++			return agentCommands{}, err
++		}
+ 	}
+ 
+ 	model := ""
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/manager_interaction_test.go b/apps/backend/internal/agent/runtime/lifecycle/manager_interaction_test.go
+index 732f2947121fa8ccf1e2375281491220688c2cc7..43f5e24d4be027d262b9baaa238887bd1fc76417 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/manager_interaction_test.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/manager_interaction_test.go
+@@ -484,6 +484,25 @@ func TestManager_RestartAgentProcess_InvalidBuiltReplacementLeavesCurrentProcess
+ 
+ }
+ 
++func TestRestartAgentProcessBlocksProfileDriftBeforeStop(t *testing.T) {
++	mgr := newTestManager(t)
++	mgr.profileResolver = &restartProfileResolver{profile: &AgentProfileInfo{
++		ProfileID:   "profile-1",
++		Fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
++	}}
++	execution := &AgentExecution{
++		ID: "exec-drift-restart", AgentProfileID: "profile-1", Status: v1.AgentStatusRunning,
++		metadata: map[string]interface{}{
++			metadataKeyExpectedProfileFingerprint: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++		},
++	}
++	require.NoError(t, mgr.executionStore.Add(execution))
++	err := mgr.RestartAgentProcess(context.Background(), execution.ID)
++	require.ErrorIs(t, err, ErrProfileDrift)
++	require.Equal(t, "BLOCKED_PROFILE_DRIFT", err.Error())
++	require.Equal(t, v1.AgentStatusRunning, execution.Status)
++}
++
+ func TestPromptAgentWithDispatchCallbackTracksExecutionActivityUntilCompletion(t *testing.T) {
+ 	mgr := newTestManager(t)
+ 	coordinator := activity.NewCoordinator(activity.Options{})
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/manager_launch.go b/apps/backend/internal/agent/runtime/lifecycle/manager_launch.go
+index daa28e86bab5676736672203cc962bcdd471257b..c904f754eeeaa7f71f0ae778aa1fb14d2c058511 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/manager_launch.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/manager_launch.go
+@@ -44,6 +44,9 @@ var errTaskCleanupActive = errors.New("task cleanup is active")
+ func (m *Manager) resolveAgentProfile(ctx context.Context, req *LaunchRequest) (string, *AgentProfileInfo, error) {
+ 	profileID := executionProfileID(req)
+ 	if m.profileResolver == nil {
++		if req != nil && req.ExpectedProfileFingerprint != "" {
++			return "", nil, ErrProfileDrift
++		}
+ 		// Fallback: treat AgentProfileID as agent type directly (for backward compat)
+ 		m.logger.Warn("no profile resolver configured, using profile ID as agent type",
+ 			zap.String("agent_type", profileID))
+@@ -51,8 +54,17 @@ func (m *Manager) resolveAgentProfile(ctx context.Context, req *LaunchRequest) (
+ 	}
+ 	profileInfo, err := m.profileResolver.ResolveProfile(ctx, profileID)
+ 	if err != nil {
++		if req != nil && req.ExpectedProfileFingerprint != "" {
++			return "", nil, ErrProfileDrift
++		}
+ 		return "", nil, fmt.Errorf("failed to resolve agent profile: %w", err)
+ 	}
++	if profileInfo == nil {
++		return "", nil, ErrProfileDrift
++	}
++	if err := validateProfileFingerprint(req.ExpectedProfileFingerprint, profileInfo); err != nil {
++		return "", nil, err
++	}
+ 	// Legacy model-only routes still use overlays until their persisted config
+ 	// is migrated. A concrete execution profile is authoritative and must not
+ 	// be mixed with fields from another provider.
+@@ -571,6 +583,9 @@ func (m *Manager) launchPrepareRequest(req *LaunchRequest, profileInfo *AgentPro
+ 	if req.SessionID != "" {
+ 		reqWithWorktree.Metadata["session_id"] = req.SessionID
+ 	}
++	if req.ExpectedProfileFingerprint != "" {
++		reqWithWorktree.Metadata[metadataKeyExpectedProfileFingerprint] = req.ExpectedProfileFingerprint
++	}
+ 
+ 	if err := mergeRouteOverrideEnv(&reqWithWorktree); err != nil {
+ 		return LaunchRequest{}, "", err
+@@ -1281,7 +1296,7 @@ func (m *Manager) launchInternal(ctx context.Context, req *LaunchRequest) (*Agen
+ 		return nil, err
+ 	}
+ 	if profileInfo != nil && len(profileInfo.EnvVars) > 0 {
+-		m.cacheResolvedProfileEnv(execution, m.resolveAgentProfileEnvVars(ctx, profileInfo.EnvVars))
++		m.cacheResolvedProfileEnv(execution, resolvedProfileEnvFromFinal(profileInfo.EnvVars, execReq.Env))
+ 	}
+ 	if !reqWithWorktree.IsPassthrough {
+ 		if err := m.materializeRuntimeProjectMCP(ctx, execution, agentConfig); err != nil {
+@@ -1745,7 +1760,14 @@ func getAttachmentsFromMetadata(execution *AgentExecution) []MessageAttachment {
+ // Returns the effective boot command (full command with adapter args, or base command).
+ func (m *Manager) configureAndStartAgent(ctx context.Context, execution *AgentExecution, approvalPolicy string) (string, error) {
+ 	env := runtimeEnvFromMetadata(execution.MetadataSnapshot())
+-	m.mergeAgentProfileEnvForExecution(ctx, execution, env)
++	if err := m.mergeAgentProfileEnvForExecution(ctx, execution, env); err != nil {
++		if errors.Is(err, ErrProfileDrift) {
++			m.updateExecutionError(execution.ID, ErrProfileDrift.Error())
++		} else {
++			m.updateExecutionError(execution.ID, ErrProfileSecret.Error())
++		}
++		return "", err
++	}
+ 	if err := spillLargeWakePayloadEnv(env, execution.WorkspacePath, m.logger.Zap()); err != nil {
+ 		m.updateExecutionError(execution.ID, "failed to prepare agent env: "+err.Error())
+ 		return "", fmt.Errorf("failed to prepare agent env: %w", err)
+@@ -1754,6 +1776,14 @@ func (m *Manager) configureAndStartAgent(ctx context.Context, execution *AgentEx
+ 	if err := execution.agentctl.ConfigureAgent(ctx, execution.AgentCommand, execution.AgentArgs, env, approvalPolicy, execution.ContinueCommand, execution.ContinueArgs); err != nil {
+ 		return "", fmt.Errorf("failed to configure agent: %w", err)
+ 	}
++	// ConfigureAgent may block on a remote agentctl after the earlier launch
++	// checks. Re-resolve at the last possible point so profile drift during
++	// readiness, remote preflight, environment resolution, or configuration
++	// cannot cross the actual subprocess start boundary.
++	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
++		m.updateExecutionError(execution.ID, ErrProfileDrift.Error())
++		return "", err
++	}
+ 
+ 	fullCommand, err := execution.agentctl.Start(ctx)
+ 	if err != nil {
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/manager_launch_test.go b/apps/backend/internal/agent/runtime/lifecycle/manager_launch_test.go
+index 492de496bb7a3c37eeb4c8f15ade82d5169c538a..4cbf1fca786b096d0eaa7d1788094bf32aec099d 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/manager_launch_test.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/manager_launch_test.go
+@@ -463,6 +463,53 @@ func TestBuildEnvForExecution_ResolvesSecretBackedProfileEnv(t *testing.T) {
+ 	}
+ }
+ 
++func TestConfigureAndStartAgentPersistsSanitizedProfileFailureClass(t *testing.T) {
++	const expected = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
++	tests := []struct {
++		name       string
++		resolver   *mockAgentProfileResolver
++		want       error
++		wantStored string
++	}{
++		{
++			name: "drift",
++			resolver: &mockAgentProfileResolver{
++				fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
++			},
++			want: ErrProfileDrift, wantStored: "BLOCKED_PROFILE_DRIFT",
++		},
++		{
++			name: "secret",
++			resolver: &mockAgentProfileResolver{
++				fingerprint: expected,
++				envVars:     []settingsmodels.ProfileEnvVar{{Key: "TOKEN", SecretID: "secret-ref"}},
++			},
++			want: ErrProfileSecret, wantStored: "BLOCKED_PROFILE_SECRET",
++		},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			mgr := newTestManager(t)
++			mgr.profileResolver = tc.resolver
++			execution := &AgentExecution{
++				ID: "exec-" + tc.name, AgentProfileID: "profile-1",
++				metadata: map[string]interface{}{metadataKeyExpectedProfileFingerprint: expected},
++			}
++			if err := mgr.executionStore.Add(execution); err != nil {
++				t.Fatalf("seed execution: %v", err)
++			}
++			_, err := mgr.configureAndStartAgent(context.Background(), execution, "never")
++			if !errors.Is(err, tc.want) || err.Error() != tc.wantStored {
++				t.Fatalf("configureAndStartAgent error = %v, want %s", err, tc.wantStored)
++			}
++			current, ok := mgr.executionStore.Get(execution.ID)
++			if !ok || current.ErrorMessage != tc.wantStored {
++				t.Fatalf("stored error = %#v, want %q", current, tc.wantStored)
++			}
++		})
++	}
++}
++
+ func TestBuildEnvForExecution_SeparatesOfficeAndExecutionProfiles(t *testing.T) {
+ 	mgr := newTestManager(t)
+ 	profileInfo := &AgentProfileInfo{
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/manager_passthrough.go b/apps/backend/internal/agent/runtime/lifecycle/manager_passthrough.go
+index a0cfd28097dd286fe661ad1e4aec6a94ab44dd53..f011a184251f03b829108f64149d313d326136b9 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/manager_passthrough.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/manager_passthrough.go
+@@ -138,7 +138,7 @@ func (m *Manager) GetPassthroughBuffer(ctx context.Context, sessionID string) (s
+ 
+ // buildPassthroughEnv builds the environment map for a passthrough session,
+ // including Kandev metadata and required credentials from the agent runtime config.
+-func (m *Manager) buildPassthroughEnv(ctx context.Context, execution *AgentExecution, requiredEnv []string) map[string]string {
++func (m *Manager) buildPassthroughEnv(ctx context.Context, execution *AgentExecution, requiredEnv []string) (map[string]string, error) {
+ 	env := execution.RuntimeEnvironment()
+ 	if env == nil {
+ 		env = make(map[string]string)
+@@ -147,7 +147,13 @@ func (m *Manager) buildPassthroughEnv(ctx context.Context, execution *AgentExecu
+ 	env["KANDEV_SESSION_ID"] = execution.SessionID
+ 	env["KANDEV_AGENT_PROFILE_ID"] = execution.officeProfileID()
+ 	env["KANDEV_EXECUTION_PROFILE_ID"] = execution.AgentProfileID
+-	m.mergeAgentProfileEnv(ctx, execution.AgentProfileID, env)
++	expected, err := expectedProfileFingerprintFromMetadata(execution.MetadataSnapshot())
++	if err != nil {
++		return nil, err
++	}
++	if err := m.mergeExpectedAgentProfileEnv(ctx, execution.AgentProfileID, env, expected); err != nil {
++		return nil, err
++	}
+ 	if m.credsMgr != nil {
+ 		for _, credKey := range requiredEnv {
+ 			if value, err := m.credsMgr.GetCredentialValue(ctx, credKey); err == nil && value != "" {
+@@ -160,7 +166,7 @@ func (m *Manager) buildPassthroughEnv(ctx context.Context, execution *AgentExecu
+ 	for key, value := range getPassthroughMCPEnv(execution) {
+ 		env[key] = value
+ 	}
+-	return env
++	return env, nil
+ }
+ 
+ // startPassthroughShell starts the shell session for a passthrough execution.
+@@ -205,7 +211,23 @@ func (m *Manager) resolvePassthroughAgent(ctx context.Context, execution *AgentE
+ 
+ 	var profileInfo *AgentProfileInfo
+ 	if m.profileResolver != nil && execution.AgentProfileID != "" {
+-		profileInfo, _ = m.profileResolver.ResolveProfile(ctx, execution.AgentProfileID)
++		profileInfo, err = m.profileResolver.ResolveProfile(ctx, execution.AgentProfileID)
++		if err != nil || profileInfo == nil {
++			expected, bindingErr := expectedProfileFingerprintFromMetadata(execution.MetadataSnapshot())
++			if bindingErr != nil || expected != "" {
++				return nil, ErrProfileDrift
++			}
++			profileInfo = nil
++		}
++		if profileInfo != nil {
++			expected, bindingErr := expectedProfileFingerprintFromMetadata(execution.MetadataSnapshot())
++			if bindingErr != nil {
++				return nil, bindingErr
++			}
++			if err := validateProfileFingerprint(expected, profileInfo); err != nil {
++				return nil, err
++			}
++		}
+ 	}
+ 
+ 	return &resolvedPassthrough{
+@@ -716,6 +738,10 @@ func (m *Manager) startInteractiveProcess(ctx context.Context, execution *AgentE
+ 	// This matches ResumePassthroughSession and restartPassthroughProcess.
+ 	startReq := buildInteractiveStartRequest(execution.SessionID, execution, pt, env, cmd, stripEnv, true)
+ 
++	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
++		m.updateExecutionError(execution.ID, ErrProfileDrift.Error())
++		return nil, err
++	}
+ 	processInfo, err := interactiveRunner.Start(ctx, startReq)
+ 	if err != nil {
+ 		m.updateExecutionError(execution.ID, "failed to start passthrough session: "+err.Error())
+@@ -727,6 +753,16 @@ func (m *Manager) startInteractiveProcess(ctx context.Context, execution *AgentE
+ // startPassthroughSession starts an agent in passthrough mode (direct terminal interaction).
+ // Instead of using ACP protocol, the agent's stdin/stdout is passed through directly.
+ func (m *Manager) startPassthroughSession(ctx context.Context, execution *AgentExecution, profileInfo *AgentProfileInfo) error {
++	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
++		return err
++	}
++	expected, err := expectedProfileFingerprintFromMetadata(execution.MetadataSnapshot())
++	if err != nil {
++		return err
++	}
++	if err := validateProfileFingerprint(expected, profileInfo); err != nil {
++		return err
++	}
+ 	_, pt, rt, cmd, err := m.passthroughAgentCommand(ctx, execution, profileInfo)
+ 	if err != nil {
+ 		return err
+@@ -736,7 +772,10 @@ func (m *Manager) startPassthroughSession(ctx context.Context, execution *AgentE
+ 		zap.String("session_id", execution.SessionID),
+ 		zap.Strings("full_command", redactPassthroughArgs(cmd.Args())))
+ 
+-	env := m.buildPassthroughEnv(ctx, execution, rt.RequiredEnv)
++	env, err := m.buildPassthroughEnv(ctx, execution, rt.RequiredEnv)
++	if err != nil {
++		return err
++	}
+ 
+ 	processInfo, err := m.startInteractiveProcess(ctx, execution, pt, env, cmd, rt.StripEnv)
+ 	if err != nil {
+@@ -856,6 +895,9 @@ func (m *Manager) restartPassthroughProcess(ctx context.Context, execution *Agen
+ 		zap.String("execution_id", execution.ID),
+ 		zap.String("session_id", execution.SessionID),
+ 		zap.String("old_process_id", execution.PassthroughProcessID))
++	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
++		return err
++	}
+ 
+ 	// 1. Stop the current PTY process.
+ 	// Clear PassthroughProcessID before stopping so that handlePassthroughStatus
+@@ -883,9 +925,16 @@ func (m *Manager) restartPassthroughProcess(ctx context.Context, execution *Agen
+ 	}
+ 
+ 	// 3. Start new PTY process with ImmediateStart (terminal is already connected)
+-	env := m.buildPassthroughEnv(ctx, execution, rt.RequiredEnv)
++	env, err := m.buildPassthroughEnv(ctx, execution, rt.RequiredEnv)
++	if err != nil {
++		return err
++	}
+ 	startReq := buildInteractiveStartRequest(execution.SessionID, execution, pt, env, cmd, rt.StripEnv, true)
+ 
++	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
++		m.updateExecutionError(execution.ID, ErrProfileDrift.Error())
++		return err
++	}
+ 	processInfo, err := interactiveRunner.Start(ctx, startReq)
+ 	if err != nil {
+ 		m.updateExecutionError(execution.ID, "failed to restart passthrough session: "+err.Error())
+@@ -924,6 +973,9 @@ func (m *Manager) ResumePassthroughSession(ctx context.Context, sessionID string
+ 	if !exists {
+ 		return fmt.Errorf("%w: %s", ErrNoExecutionForSession, sessionID)
+ 	}
++	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
++		return err
++	}
+ 
+ 	resolved, err := m.resolvePassthroughAgent(ctx, execution)
+ 	if err != nil {
+@@ -952,7 +1004,10 @@ func (m *Manager) ResumePassthroughSession(ctx context.Context, sessionID string
+ 		zap.Bool("use_resume", useResume),
+ 		zap.Strings("command", redactPassthroughArgs(cmd.Args())))
+ 
+-	env := m.buildPassthroughEnv(ctx, execution, resolved.rt.RequiredEnv)
++	env, err := m.buildPassthroughEnv(ctx, execution, resolved.rt.RequiredEnv)
++	if err != nil {
++		return err
++	}
+ 
+ 	// Always use immediate start on resume — the terminal WebSocket is already connected,
+ 	// so we don't need to wait for a resize to get exact dimensions. The first resize
+@@ -961,6 +1016,10 @@ func (m *Manager) ResumePassthroughSession(ctx context.Context, sessionID string
+ 	// to a process it doesn't know about yet.
+ 	startReq := buildInteractiveStartRequest(sessionID, execution, resolved.pt, env, cmd, resolved.rt.StripEnv, true)
+ 
++	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
++		m.updateExecutionError(execution.ID, ErrProfileDrift.Error())
++		return err
++	}
+ 	processInfo, err := interactiveRunner.Start(ctx, startReq)
+ 	if err != nil {
+ 		return fmt.Errorf("failed to start passthrough session: %w", err)
+@@ -1240,15 +1299,27 @@ func (m *Manager) attemptResumeFallback(execution *AgentExecution, runner *proce
+ 	}
+ 
+ 	ctx := context.Background()
++	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
++		m.notifyFallbackInfrastructureFailure(runner, sessionID, "validate profile binding", err)
++		return
++	}
+ 	pt, rt, cmd, err := m.freshPassthroughCommand(ctx, execution)
+ 	if err != nil {
+ 		m.notifyFallbackInfrastructureFailure(runner, sessionID, "build fresh command", err)
+ 		return
+ 	}
+ 
+-	env := m.buildPassthroughEnv(ctx, execution, rt.RequiredEnv)
++	env, err := m.buildPassthroughEnv(ctx, execution, rt.RequiredEnv)
++	if err != nil {
++		m.notifyFallbackInfrastructureFailure(runner, sessionID, "resolve profile environment", err)
++		return
++	}
+ 	startReq := buildInteractiveStartRequest(sessionID, execution, pt, env, cmd, rt.StripEnv, true)
+ 
++	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
++		m.notifyFallbackInfrastructureFailure(runner, sessionID, "validate final profile binding", err)
++		return
++	}
+ 	processInfo, err := runner.Start(ctx, startReq)
+ 	if err != nil {
+ 		m.notifyFallbackInfrastructureFailure(runner, sessionID, "start fresh process", err)
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/manager_passthrough_runtime_test.go b/apps/backend/internal/agent/runtime/lifecycle/manager_passthrough_runtime_test.go
+index 3711635feec65e5c4320d80544e4c0d0d8899ee0..30b38bf5363bc218a677908f80c7acc6ba1f31d4 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/manager_passthrough_runtime_test.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/manager_passthrough_runtime_test.go
+@@ -67,7 +67,8 @@ func TestBuildPassthroughEnvInjectsRequiredCredentialsAndMCPEnv(t *testing.T) {
+ 	})
+ 	setPassthroughMCPEnv(execution, map[string]string{"OPENCODE_CONFIG": "/tmp/opencode.json"})
+ 
+-	env := mgr.buildPassthroughEnv(context.Background(), execution, []string{"ANTHROPIC_API_KEY", "MISSING_KEY"})
++	env, err := mgr.buildPassthroughEnv(context.Background(), execution, []string{"ANTHROPIC_API_KEY", "MISSING_KEY"})
++	require.NoError(t, err)
+ 
+ 	require.Equal(t, "https://proxy.internal", env["ANTHROPIC_BASE_URL"],
+ 		"Agent.Runtime().Env must reach the passthrough subprocess")
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/manager_passthrough_test.go b/apps/backend/internal/agent/runtime/lifecycle/manager_passthrough_test.go
+index ce72d48b25355835fa1c58c94980bd6e761ec1e9..b80dbe3e5ee094307cad21a1989933dbb01da11e 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/manager_passthrough_test.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/manager_passthrough_test.go
+@@ -3,6 +3,7 @@ package lifecycle
+ import (
+ 	"context"
+ 	"encoding/json"
++	"errors"
+ 	"os"
+ 	"path/filepath"
+ 	"slices"
+@@ -462,7 +463,10 @@ func TestPassthroughOpenCodeInjectsConfigEnv(t *testing.T) {
+ 		t.Fatalf("opencode config not written: %v", err)
+ 	}
+ 	// OPENCODE_CONFIG must be merged into the passthrough environment.
+-	env := mgr.buildPassthroughEnv(context.Background(), execution, nil)
++	env, err := mgr.buildPassthroughEnv(context.Background(), execution, nil)
++	if err != nil {
++		t.Fatalf("buildPassthroughEnv returned error: %v", err)
++	}
+ 	if env["OPENCODE_CONFIG"] != files[0] {
+ 		t.Fatalf("OPENCODE_CONFIG = %q, want %q", env["OPENCODE_CONFIG"], files[0])
+ 	}
+@@ -1100,12 +1104,15 @@ func TestBuildPassthroughEnv_MergesProfileEnvVars(t *testing.T) {
+ 		},
+ 	}
+ 
+-	env := mgr.buildPassthroughEnv(context.Background(), &AgentExecution{
++	env, err := mgr.buildPassthroughEnv(context.Background(), &AgentExecution{
+ 		TaskID:               "task-1",
+ 		SessionID:            "session-1",
+ 		AgentProfileID:       "profile-1",
+ 		OfficeAgentProfileID: "office-cto",
+ 	}, nil)
++	if err != nil {
++		t.Fatalf("buildPassthroughEnv returned error: %v", err)
++	}
+ 
+ 	if env["PLAIN"] != "plain-value" {
+ 		t.Fatalf("profile env var missing: %+v", env)
+@@ -1121,6 +1128,58 @@ func TestBuildPassthroughEnv_MergesProfileEnvVars(t *testing.T) {
+ 	}
+ }
+ 
++func TestPassthroughStartAndRestartBlockProfileDriftBeforeMutation(t *testing.T) {
++	mgr := newTestManager(t)
++	mgr.profileResolver = &fixedFingerprintResolver{info: &AgentProfileInfo{
++		ProfileID: "profile-1", CLIPassthrough: true,
++		Fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
++	}}
++	newExecution := func() *AgentExecution {
++		return &AgentExecution{
++			ID: "exec-drift", SessionID: "session-drift", AgentProfileID: "profile-1",
++			PassthroughProcessID: "process-must-remain",
++			metadata: map[string]interface{}{
++				metadataKeyExpectedProfileFingerprint: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++			},
++		}
++	}
++
++	execution := newExecution()
++	if err := mgr.startPassthroughSession(context.Background(), execution, nil); !errors.Is(err, ErrProfileDrift) {
++		t.Fatalf("startPassthroughSession error = %v, want %v", err, ErrProfileDrift)
++	}
++	if execution.PassthroughProcessID != "process-must-remain" {
++		t.Fatalf("start drift mutated process id: %q", execution.PassthroughProcessID)
++	}
++
++	execution = newExecution()
++	if err := mgr.restartPassthroughProcess(context.Background(), execution); !errors.Is(err, ErrProfileDrift) {
++		t.Fatalf("restartPassthroughProcess error = %v, want %v", err, ErrProfileDrift)
++	}
++	if execution.PassthroughProcessID != "process-must-remain" {
++		t.Fatalf("restart drift stopped process: %q", execution.PassthroughProcessID)
++	}
++}
++
++func TestPassthroughStartRejectsStaleResolvedProfile(t *testing.T) {
++	expected := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
++	mgr := newTestManager(t)
++	mgr.profileResolver = &fixedFingerprintResolver{info: &AgentProfileInfo{
++		ProfileID: "profile-1", CLIPassthrough: true, Fingerprint: expected,
++	}}
++	execution := &AgentExecution{
++		ID: "exec-stale-profile", SessionID: "session-1", AgentProfileID: "profile-1",
++		metadata: map[string]interface{}{metadataKeyExpectedProfileFingerprint: expected},
++	}
++	stale := &AgentProfileInfo{
++		ProfileID: "profile-1", CLIPassthrough: true,
++		Fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
++	}
++	if err := mgr.startPassthroughSession(context.Background(), execution, stale); !errors.Is(err, ErrProfileDrift) {
++		t.Fatalf("startPassthroughSession error = %v, want %v", err, ErrProfileDrift)
++	}
++}
++
+ func TestBuildPassthroughEnvIncludesEffectiveRuntimeEnv(t *testing.T) {
+ 	mgr := newTestManager(t)
+ 	execution := &AgentExecution{
+@@ -1136,7 +1195,10 @@ func TestBuildPassthroughEnvIncludesEffectiveRuntimeEnv(t *testing.T) {
+ 		"PATH":                                "/tmp/kandev-shim:/usr/bin",
+ 	})
+ 
+-	env := mgr.buildPassthroughEnv(context.Background(), execution, nil)
++	env, err := mgr.buildPassthroughEnv(context.Background(), execution, nil)
++	if err != nil {
++		t.Fatalf("buildPassthroughEnv returned error: %v", err)
++	}
+ 	for key, want := range map[string]string{
+ 		"KANDEV_GITHUB_CREDENTIAL_BROKER_URL": "http://127.0.0.1:9876",
+ 		"GIT_CONFIG_COUNT":                    "1",
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/manager_startup.go b/apps/backend/internal/agent/runtime/lifecycle/manager_startup.go
+index ef2a3581647a00b08d5726e2c7dfedc740ec57ad..e93bf5df8499b079dcadb01e753c0c19e1dbd2e3 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/manager_startup.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/manager_startup.go
+@@ -101,6 +101,9 @@ func (m *Manager) StartAgentProcess(ctx context.Context, executionID string) (re
+ 		}
+ 		activityClaim.Commit()
+ 	}()
++	if err := m.validateExecutionProfileFingerprint(operationCtx, execution); err != nil {
++		return err
++	}
+ 
+ 	// Decide passthrough vs ACP. The session-creation snapshot
+ 	// (execution.IsPassthrough, sourced from TaskSession.IsPassthrough) is
+@@ -318,9 +321,13 @@ func (m *Manager) buildEnvForExecution(ctx context.Context, executionID string,
+ 	}
+ 
+ 	if profileInfo != nil {
+-		m.mergeAgentProfileEnvFromInfo(ctx, profileInfo, env)
++		if err := m.mergeAgentProfileEnvFromInfo(ctx, profileInfo, env); err != nil {
++			return nil, err
++		}
+ 	} else {
+-		m.mergeAgentProfileEnv(ctx, executionProfileID(req), env)
++		if err := m.mergeAgentProfileEnv(ctx, executionProfileID(req), env); err != nil {
++			return nil, err
++		}
+ 	}
+ 
+ 	// Add standard variables for recovery after backend restart
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/manager_startup_test.go b/apps/backend/internal/agent/runtime/lifecycle/manager_startup_test.go
+index ae7e7cc3bee7d465a17fb885b98f6f3409fffe60..10162c261b9f0f0c7bdad5d2998b095ee233b049 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/manager_startup_test.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/manager_startup_test.go
+@@ -9,11 +9,13 @@ import (
+ 	"net/http/httptest"
+ 	"strconv"
+ 	"strings"
++	"sync"
+ 	"testing"
+ 	"time"
+ 
+ 	"github.com/kandev/kandev/internal/agent/runtime/activity"
+ 	agentctl "github.com/kandev/kandev/internal/agent/runtime/agentctl"
++	settingsmodels "github.com/kandev/kandev/internal/agent/settings/models"
+ 	"github.com/kandev/kandev/internal/task/models"
+ )
+ 
+@@ -22,9 +24,32 @@ import (
+ // simulating transient DB hiccups, network failures, or deleted profiles.
+ type mockAgentProfileResolver struct {
+ 	cliPassthrough bool
++	fingerprint    string
++	envVars        []settingsmodels.ProfileEnvVar
+ 	err            error
+ }
+ 
++type mutableFingerprintResolver struct {
++	mu          sync.RWMutex
++	fingerprint string
++}
++
++func (r *mutableFingerprintResolver) setFingerprint(fingerprint string) {
++	r.mu.Lock()
++	r.fingerprint = fingerprint
++	r.mu.Unlock()
++}
++
++func (r *mutableFingerprintResolver) ResolveProfile(_ context.Context, profileID string) (*AgentProfileInfo, error) {
++	r.mu.RLock()
++	fingerprint := r.fingerprint
++	r.mu.RUnlock()
++	return &AgentProfileInfo{
++		ProfileID: profileID, AgentID: "mock-agent", AgentName: "mock-agent",
++		Fingerprint: fingerprint,
++	}, nil
++}
++
+ type blockingAgentProfileResolver struct {
+ 	entered chan chan struct{}
+ }
+@@ -73,10 +98,92 @@ func (m *mockAgentProfileResolver) ResolveProfile(_ context.Context, profileID s
+ 		AgentID:        "mock-agent",
+ 		AgentName:      "mock-agent",
+ 		Model:          "mock-fast",
++		Fingerprint:    m.fingerprint,
++		EnvVars:        m.envVars,
+ 		CLIPassthrough: m.cliPassthrough,
+ 	}, nil
+ }
+ 
++func TestStartAgentProcessBlocksProfileDriftBeforeProcessPath(t *testing.T) {
++	mgr := newTestManager(t)
++	mgr.profileResolver = &mockAgentProfileResolver{
++		fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
++	}
++	execution := &AgentExecution{
++		ID: "exec-drift", AgentProfileID: "profile-1",
++		metadata: map[string]interface{}{
++			metadataKeyExpectedProfileFingerprint: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++		},
++	}
++	if err := mgr.executionStore.Add(execution); err != nil {
++		t.Fatalf("seed execution: %v", err)
++	}
++	err := mgr.StartAgentProcess(context.Background(), execution.ID)
++	if !errors.Is(err, ErrProfileDrift) || err.Error() != "BLOCKED_PROFILE_DRIFT" {
++		t.Fatalf("StartAgentProcess error = %v, want sanitized %v", err, ErrProfileDrift)
++	}
++}
++
++func TestStartAgentProcessProfileDriftDuringAgentctlWaitStartsZeroProcesses(t *testing.T) {
++	const expected = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
++	healthEntered := make(chan struct{})
++	releaseHealth := make(chan struct{})
++	var healthOnce sync.Once
++	var configureCalls, startCalls int
++	var callsMu sync.Mutex
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		switch r.URL.Path {
++		case "/health":
++			healthOnce.Do(func() { close(healthEntered) })
++			<-releaseHealth
++			w.WriteHeader(http.StatusOK)
++		case "/api/v1/agent/configure":
++			callsMu.Lock()
++			configureCalls++
++			callsMu.Unlock()
++			_, _ = w.Write([]byte(`{"success":true}`))
++		case "/api/v1/start":
++			callsMu.Lock()
++			startCalls++
++			callsMu.Unlock()
++			_, _ = w.Write([]byte(`{"success":true,"command":"mock-agent"}`))
++		default:
++			http.NotFound(w, r)
++		}
++	}))
++	t.Cleanup(server.Close)
++
++	resolver := &mutableFingerprintResolver{fingerprint: expected}
++	mgr := newTestManager(t)
++	mgr.profileResolver = resolver
++	execution := &AgentExecution{
++		ID: "exec-wait-drift", SessionID: "session-wait-drift",
++		AgentProfileID: "profile-1", AgentCommand: "mock-agent",
++		metadata: map[string]interface{}{metadataKeyExpectedProfileFingerprint: expected},
++		agentctl: newTestAgentctlClient(t, server.URL, mgr.logger),
++	}
++	if err := mgr.executionStore.Add(execution); err != nil {
++		t.Fatalf("seed execution: %v", err)
++	}
++
++	result := make(chan error, 1)
++	go func() { result <- mgr.StartAgentProcess(context.Background(), execution.ID) }()
++	<-healthEntered
++	resolver.setFingerprint("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
++	close(releaseHealth)
++	if err := <-result; !errors.Is(err, ErrProfileDrift) || err.Error() != "BLOCKED_PROFILE_DRIFT" {
++		t.Fatalf("StartAgentProcess error = %v, want sanitized drift", err)
++	}
++	callsMu.Lock()
++	defer callsMu.Unlock()
++	if startCalls != 0 {
++		t.Fatalf("agentctl start calls = %d, want zero after wait-time drift", startCalls)
++	}
++	if configureCalls != 0 {
++		t.Fatalf("agentctl configure calls = %d, want zero after wait-time drift", configureCalls)
++	}
++}
++
+ func TestStartAgentProcess_NotFound(t *testing.T) {
+ 	mgr := newTestManager(t)
+ 	err := mgr.StartAgentProcess(context.Background(), "non-existent")
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/manager_workspace_rebind.go b/apps/backend/internal/agent/runtime/lifecycle/manager_workspace_rebind.go
+index 36b4e5d20ace47ac379b8a81767ce94bbe149813..4c27168a78f74fa4f81c2a6b15564176eb3451e2 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/manager_workspace_rebind.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/manager_workspace_rebind.go
+@@ -35,6 +35,9 @@ func (m *Manager) RebindWorkspaceForSession(ctx context.Context, sessionID, work
+ 	if execution.IsPassthrough || execution.agentctl == nil || execution.ACPSessionID == "" {
+ 		return fmt.Errorf("workspace rebind is unsupported for this session; start a new session after attaching sources")
+ 	}
++	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
++		return err
++	}
+ 	execution.promptLifecycleMu.Lock()
+ 	defer execution.promptLifecycleMu.Unlock()
+ 	if execution.Status != v1.AgentStatusReady {
+@@ -58,6 +61,9 @@ func (m *Manager) RebindWorkspaceForSession(ctx context.Context, sessionID, work
+ 		return m.rollbackWorkspaceRebind(ctx, execution, oldPath, oldRoots, acpID, fmt.Errorf("rebind agentctl workspace: %w", err))
+ 	}
+ 	execution.WorkspacePath = workspacePath
++	if err := m.validateExecutionProfileFingerprint(ctx, execution); err != nil {
++		return m.rollbackWorkspaceRebind(ctx, execution, oldPath, oldRoots, acpID, err)
++	}
+ 	if _, err := execution.agentctl.Start(ctx); err != nil {
+ 		return m.rollbackWorkspaceRebind(ctx, execution, oldPath, oldRoots, acpID, fmt.Errorf("restart agent after workspace rebind: %w", err))
+ 	}
+@@ -82,6 +88,10 @@ func (m *Manager) rollbackWorkspaceRebind(ctx context.Context, execution *AgentE
+ 		return fmt.Errorf("%w; rollback rebind failed: %v", cause, err)
+ 	}
+ 	execution.WorkspacePath = oldPath
++	if err := m.validateExecutionProfileFingerprint(rollbackCtx, execution); err != nil {
++		m.executionStore.UpdateError(execution.ID, err.Error())
++		return fmt.Errorf("%w; rollback profile binding failed: %v", cause, err)
++	}
+ 	if _, err := execution.agentctl.Start(rollbackCtx); err != nil {
+ 		m.executionStore.UpdateError(execution.ID, fmt.Sprintf("%v; rollback restart failed: %v", cause, err))
+ 		return fmt.Errorf("%w; rollback restart failed: %v", cause, err)
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/profile_env.go b/apps/backend/internal/agent/runtime/lifecycle/profile_env.go
+index 7e6faee02c079a0b4270efc32810b744fc9e4a6b..c14a6297a7b0bd38d543be2ab3117929c76e722f 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/profile_env.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/profile_env.go
+@@ -3,8 +3,6 @@ package lifecycle
+ import (
+ 	"context"
+ 
+-	"go.uber.org/zap"
+-
+ 	settingsmodels "github.com/kandev/kandev/internal/agent/settings/models"
+ 	"github.com/kandev/kandev/internal/gitconfigenv"
+ )
+@@ -16,23 +14,49 @@ const metadataKeyProfileEnvResolved = "profile_env_resolved"
+ // mergeAgentProfileEnv fills missing keys in env from the agent profile's
+ // env_vars. Existing keys in env (office tokens, executor profile env, etc.)
+ // are never overwritten.
+-func (m *Manager) mergeAgentProfileEnv(ctx context.Context, profileID string, env map[string]string) {
++func (m *Manager) mergeAgentProfileEnv(ctx context.Context, profileID string, env map[string]string) error {
+ 	if profileID == "" || env == nil || m.profileResolver == nil {
+-		return
++		return nil
+ 	}
+ 	info, err := m.profileResolver.ResolveProfile(ctx, profileID)
+ 	if err != nil || info == nil {
+-		return
++		return ErrProfileDrift
+ 	}
+-	m.mergeAgentProfileEnvFromInfo(ctx, info, env)
++	return m.mergeAgentProfileEnvFromInfo(ctx, info, env)
+ }
+ 
+-func (m *Manager) mergeAgentProfileEnvFromInfo(ctx context.Context, info *AgentProfileInfo, env map[string]string) {
++func (m *Manager) mergeExpectedAgentProfileEnv(
++	ctx context.Context, profileID string, env map[string]string, expected string,
++) error {
++	if profileID == "" || env == nil || m.profileResolver == nil {
++		if expected != "" {
++			return ErrProfileDrift
++		}
++		return nil
++	}
++	info, err := m.profileResolver.ResolveProfile(ctx, profileID)
++	if err != nil || info == nil {
++		if expected == "" {
++			return nil
++		}
++		return ErrProfileDrift
++	}
++	if err := validateProfileFingerprint(expected, info); err != nil {
++		return err
++	}
++	return m.mergeAgentProfileEnvFromInfo(ctx, info, env)
++}
++
++func (m *Manager) mergeAgentProfileEnvFromInfo(ctx context.Context, info *AgentProfileInfo, env map[string]string) error {
+ 	if info == nil || env == nil || len(info.EnvVars) == 0 {
+-		return
++		return nil
++	}
++	resolved, err := m.resolveAgentProfileEnvVars(ctx, info.EnvVars)
++	if err != nil {
++		return err
+ 	}
+-	resolved := m.resolveAgentProfileEnvVars(ctx, info.EnvVars)
+ 	mergeEnvFillMissing(env, resolved)
++	return nil
+ }
+ 
+ func (m *Manager) cacheResolvedProfileEnv(execution *AgentExecution, resolved map[string]string) {
+@@ -42,16 +66,42 @@ func (m *Manager) cacheResolvedProfileEnv(execution *AgentExecution, resolved ma
+ 	execution.setMetadataValue(metadataKeyProfileEnvResolved, cloneStringMap(resolved))
+ }
+ 
+-func (m *Manager) mergeAgentProfileEnvForExecution(ctx context.Context, execution *AgentExecution, env map[string]string) {
++func (m *Manager) mergeAgentProfileEnvForExecution(ctx context.Context, execution *AgentExecution, env map[string]string) error {
+ 	if execution == nil {
+-		return
++		return nil
+ 	}
+ 	value, _ := execution.metadataValue(metadataKeyProfileEnvResolved)
+ 	if cached, ok := value.(map[string]string); ok && len(cached) > 0 {
+ 		mergeEnvFillMissing(env, cached)
+-		return
++		return nil
++	}
++	expected, err := expectedProfileFingerprintFromMetadata(execution.MetadataSnapshot())
++	if err != nil {
++		return err
++	}
++	return m.mergeExpectedAgentProfileEnv(ctx, execution.AgentProfileID, env, expected)
++}
++
++// resolvedProfileEnvFromFinal extracts the already-resolved profile entries
++// from the final atomic runtime snapshot. This avoids a second secret reveal
++// after a runtime instance has been created.
++func resolvedProfileEnvFromFinal(envVars []settingsmodels.ProfileEnvVar, final map[string]string) map[string]string {
++	if len(envVars) == 0 || len(final) == 0 {
++		return nil
++	}
++	resolved := make(map[string]string, len(envVars))
++	for _, envVar := range envVars {
++		if envVar.Key == "" {
++			continue
++		}
++		if value, ok := final[envVar.Key]; ok && value != "" {
++			resolved[envVar.Key] = value
++		}
+ 	}
+-	m.mergeAgentProfileEnv(ctx, execution.AgentProfileID, env)
++	if len(resolved) == 0 {
++		return nil
++	}
++	return resolved
+ }
+ 
+ func mergeEnvFillMissing(dst, src map[string]string) {
+@@ -72,13 +122,12 @@ func mergeEnvFillMissing(dst, src map[string]string) {
+ 	}
+ }
+ 
+-// resolveAgentProfileEnvVars resolves profile env entries. SecretID wins over
+-// Value; if secret resolution fails, the entry is skipped rather than falling
+-// back. Literal Value is used only when SecretID is empty, and empty keys are
+-// ignored.
+-func (m *Manager) resolveAgentProfileEnvVars(ctx context.Context, envVars []settingsmodels.ProfileEnvVar) map[string]string {
++// resolveAgentProfileEnvVars resolves a profile environment atomically.
++// SecretID wins over Value. Any secret failure discards the entire result and
++// returns a stable sanitized error; callers must not launch with a partial env.
++func (m *Manager) resolveAgentProfileEnvVars(ctx context.Context, envVars []settingsmodels.ProfileEnvVar) (map[string]string, error) {
+ 	if len(envVars) == 0 {
+-		return nil
++		return nil, nil
+ 	}
+ 	resolved := make(map[string]string, len(envVars))
+ 	for _, ev := range envVars {
+@@ -88,16 +137,11 @@ func (m *Manager) resolveAgentProfileEnvVars(ctx context.Context, envVars []sett
+ 		}
+ 		if ev.SecretID != "" {
+ 			if m.secretStore == nil {
+-				m.logger.Warn("secret store not configured for profile env var",
+-					zap.String("key", key))
+-				continue
++				return nil, ErrProfileSecret
+ 			}
+ 			value, err := m.revealGlobalSecret(ctx, ev.SecretID)
+ 			if err != nil {
+-				m.logger.Warn("failed to resolve secret for profile env var",
+-					zap.String("key", key),
+-					zap.Error(err))
+-				continue
++				return nil, ErrProfileSecret
+ 			}
+ 			resolved[key] = value
+ 			continue
+@@ -106,7 +150,7 @@ func (m *Manager) resolveAgentProfileEnvVars(ctx context.Context, envVars []sett
+ 			resolved[key] = ev.Value
+ 		}
+ 	}
+-	return resolved
++	return resolved, nil
+ }
+ 
+ func (m *Manager) revealGlobalSecret(ctx context.Context, secretID string) (string, error) {
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/profile_env_test.go b/apps/backend/internal/agent/runtime/lifecycle/profile_env_test.go
+index 0808ed38ea6984544b58edc1264a440630b001ed..5fcbfeedb7bab5d722c5d722659bcedd5aa1e577 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/profile_env_test.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/profile_env_test.go
+@@ -2,6 +2,7 @@ package lifecycle
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"testing"
+ 
+ 	settingsmodels "github.com/kandev/kandev/internal/agent/settings/models"
+@@ -81,10 +82,13 @@ func TestResolveAgentProfileEnvVars_SecretAndValue(t *testing.T) {
+ 
+ 	log, _ := logger.NewLogger(logger.LoggingConfig{Level: "error", Format: "json"})
+ 	m := &Manager{logger: log, secretStore: store}
+-	resolved := m.resolveAgentProfileEnvVars(context.Background(), []settingsmodels.ProfileEnvVar{
++	resolved, err := m.resolveAgentProfileEnvVars(context.Background(), []settingsmodels.ProfileEnvVar{
+ 		{Key: "PLAIN", Value: "plain"},
+ 		{Key: "FROM_SECRET", SecretID: "sec-1"},
+ 	})
++	if err != nil {
++		t.Fatalf("resolve profile env vars: %v", err)
++	}
+ 	if resolved["PLAIN"] != "plain" {
+ 		t.Fatalf("PLAIN: got %q", resolved["PLAIN"])
+ 	}
+@@ -104,10 +108,38 @@ func TestResolveAgentProfileEnvVars_RejectsWorkspaceSecret(t *testing.T) {
+ 
+ 	log, _ := logger.NewLogger(logger.LoggingConfig{Level: "error", Format: "json"})
+ 	m := &Manager{logger: log, secretStore: store}
+-	resolved := m.resolveAgentProfileEnvVars(context.Background(), []settingsmodels.ProfileEnvVar{{
++	resolved, err := m.resolveAgentProfileEnvVars(context.Background(), []settingsmodels.ProfileEnvVar{{
+ 		Key: "WORKSPACE_ONLY", SecretID: "workspace-secret",
+ 	}})
++	if !errors.Is(err, ErrProfileSecret) {
++		t.Fatalf("resolve profile env vars error = %v, want %v", err, ErrProfileSecret)
++	}
++	if resolved != nil {
++		t.Fatalf("secret failure returned partial environment: %#v", resolved)
++	}
+ 	if _, ok := resolved["WORKSPACE_ONLY"]; ok {
+ 		t.Fatalf("workspace secret was resolved into profile environment: %#v", resolved)
+ 	}
+ }
++
++func TestMergeAgentProfileEnv_SecretFailureIsAtomicAndSanitized(t *testing.T) {
++	log, _ := logger.NewLogger(logger.LoggingConfig{Level: "error", Format: "json"})
++	m := &Manager{
++		logger: log,
++		profileResolver: &fixedFingerprintResolver{info: &AgentProfileInfo{
++			ProfileID: "profile-1",
++			EnvVars: []settingsmodels.ProfileEnvVar{
++				{Key: "PLAIN", Value: "must-not-be-merged"},
++				{Key: "SECRET", SecretID: "missing-secret-reference"},
++			},
++		}},
++	}
++	env := map[string]string{"EXISTING": "preserved"}
++	err := m.mergeAgentProfileEnv(context.Background(), "profile-1", env)
++	if !errors.Is(err, ErrProfileSecret) || err.Error() != "BLOCKED_PROFILE_SECRET" {
++		t.Fatalf("error = %v, want sanitized %v", err, ErrProfileSecret)
++	}
++	if len(env) != 1 || env["EXISTING"] != "preserved" {
++		t.Fatalf("secret failure mutated environment: %#v", env)
++	}
++}
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/profile_fingerprint.go b/apps/backend/internal/agent/runtime/lifecycle/profile_fingerprint.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..56133827c3beec42e9e4500217d04f47a46b4b26
+--- /dev/null
++++ b/apps/backend/internal/agent/runtime/lifecycle/profile_fingerprint.go
+@@ -0,0 +1,172 @@
++package lifecycle
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"strings"
++
++	settingsmodels "github.com/kandev/kandev/internal/agent/settings/models"
++)
++
++const (
++	profileFingerprintPrefix              = "sha256:"
++	metadataKeyExpectedProfileFingerprint = "profile_fingerprint_expected"
++	// MetadataKeyExpectedProfileFingerprint is the durable WorkspaceInfo /
++	// AgentExecution binding projected from TaskSession.AgentProfileSnapshot.
++	// Absence is the only legacy compatibility shape; an explicitly present
++	// empty or malformed value is drift and must fail closed.
++	MetadataKeyExpectedProfileFingerprint = metadataKeyExpectedProfileFingerprint
++)
++
++var (
++	// ErrProfileDrift is deliberately stable and detail-free. Profile launch
++	// bindings are safe to surface, but callers must not accidentally append
++	// profile environment values while reporting a mismatch.
++	ErrProfileDrift = errors.New("BLOCKED_PROFILE_DRIFT")
++	// ErrProfileSecret is the public boundary for any profile secret lookup
++	// failure. The underlying store/reveal error is never wrapped because it may
++	// contain a secret identifier or provider detail.
++	ErrProfileSecret = errors.New("BLOCKED_PROFILE_SECRET")
++)
++
++type fingerprintCLIFlag struct {
++	Flag    string `json:"flag"`
++	Enabled bool   `json:"enabled"`
++}
++
++type profileFingerprintSnapshot struct {
++	ProfileID                  string                         `json:"profile_id"`
++	AgentID                    string                         `json:"agent_id"`
++	AgentName                  string                         `json:"agent_name"`
++	Model                      string                         `json:"model"`
++	Mode                       string                         `json:"mode"`
++	FallbackModel              string                         `json:"fallback_model"`
++	AutoFallback               bool                           `json:"auto_fallback"`
++	ConfigOptions              map[string]string              `json:"config_options"`
++	AutoApprove                bool                           `json:"auto_approve"`
++	DangerouslySkipPermissions bool                           `json:"dangerously_skip_permissions"`
++	AllowIndexing              bool                           `json:"allow_indexing"`
++	CLIFlags                   []fingerprintCLIFlag           `json:"cli_flags"`
++	CommandPrefix              string                         `json:"command_prefix"`
++	EnvVars                    []settingsmodels.ProfileEnvVar `json:"env_vars"`
++	CLIPassthrough             bool                           `json:"cli_passthrough"`
++	NativeSessionResume        bool                           `json:"native_session_resume"`
++	SupportsMCP                bool                           `json:"supports_mcp"`
++}
++
++// profileFingerprint computes a deterministic, secret-free launch binding.
++// The returned value contains only a digest. Secret references and literal
++// environment values influence the binding but are never returned or logged.
++func profileFingerprint(info *AgentProfileInfo) (string, error) {
++	if info == nil {
++		return "", ErrProfileDrift
++	}
++	flags := make([]fingerprintCLIFlag, len(info.CLIFlags))
++	for i, flag := range info.CLIFlags {
++		flags[i] = fingerprintCLIFlag{Flag: flag.Flag, Enabled: flag.Enabled}
++	}
++	if flags == nil {
++		flags = []fingerprintCLIFlag{}
++	}
++	envVars := append([]settingsmodels.ProfileEnvVar(nil), info.EnvVars...)
++	if envVars == nil {
++		envVars = []settingsmodels.ProfileEnvVar{}
++	}
++	configOptions := make(map[string]string, len(info.ConfigOptions))
++	for key, value := range info.ConfigOptions {
++		configOptions[key] = value
++	}
++	snapshot := profileFingerprintSnapshot{
++		ProfileID: info.ProfileID, AgentID: info.AgentID, AgentName: info.AgentName,
++		Model: info.Model, Mode: info.Mode, FallbackModel: info.FallbackModel,
++		AutoFallback: info.AutoFallback, ConfigOptions: configOptions,
++		AutoApprove: info.AutoApprove, DangerouslySkipPermissions: info.DangerouslySkipPermissions,
++		AllowIndexing: info.AllowIndexing,
++		CLIFlags:      flags, CommandPrefix: info.CommandPrefix, EnvVars: envVars,
++		CLIPassthrough: info.CLIPassthrough, NativeSessionResume: info.NativeSessionResume,
++		SupportsMCP: info.SupportsMCP,
++	}
++	canonical, err := json.Marshal(snapshot)
++	if err != nil {
++		return "", ErrProfileDrift
++	}
++	digest := sha256.Sum256(canonical)
++	return profileFingerprintPrefix + hex.EncodeToString(digest[:]), nil
++}
++
++func resolvedProfileFingerprint(info *AgentProfileInfo) (string, error) {
++	if info == nil {
++		return "", ErrProfileDrift
++	}
++	if info.Fingerprint == "" {
++		return profileFingerprint(info)
++	}
++	if !validProfileFingerprint(info.Fingerprint) {
++		return "", ErrProfileDrift
++	}
++	return info.Fingerprint, nil
++}
++
++func validProfileFingerprint(value string) bool {
++	if len(value) != len(profileFingerprintPrefix)+sha256.Size*2 || !strings.HasPrefix(value, profileFingerprintPrefix) {
++		return false
++	}
++	_, err := hex.DecodeString(strings.TrimPrefix(value, profileFingerprintPrefix))
++	return err == nil
++}
++
++// IsValidProfileFingerprint exposes only shape validation to the orchestrator
++// snapshot boundary. Fingerprint computation remains owned by lifecycle.
++func IsValidProfileFingerprint(value string) bool { return validProfileFingerprint(value) }
++
++func validateProfileFingerprint(expected string, info *AgentProfileInfo) error {
++	if expected == "" { // Explicit compatibility path for pre-binding rows.
++		return nil
++	}
++	if !validProfileFingerprint(expected) {
++		return ErrProfileDrift
++	}
++	actual, err := resolvedProfileFingerprint(info)
++	if err != nil || actual != expected {
++		return ErrProfileDrift
++	}
++	return nil
++}
++
++func expectedProfileFingerprintFromMetadata(metadata map[string]interface{}) (string, error) {
++	if metadata == nil {
++		return "", nil
++	}
++	value, exists := metadata[metadataKeyExpectedProfileFingerprint]
++	if !exists {
++		return "", nil
++	}
++	fingerprint, ok := value.(string)
++	if !ok || !validProfileFingerprint(fingerprint) {
++		return "", ErrProfileDrift
++	}
++	return fingerprint, nil
++}
++
++// validateExecutionProfileFingerprint closes the prepare/start and
++// restart/resume TOCTOU boundary. It must run before any process mutation.
++func (m *Manager) validateExecutionProfileFingerprint(ctx context.Context, execution *AgentExecution) error {
++	if execution == nil {
++		return ErrProfileDrift
++	}
++	expected, err := expectedProfileFingerprintFromMetadata(execution.MetadataSnapshot())
++	if err != nil || expected == "" {
++		return err
++	}
++	if m.profileResolver == nil || execution.AgentProfileID == "" {
++		return ErrProfileDrift
++	}
++	info, err := m.profileResolver.ResolveProfile(ctx, execution.AgentProfileID)
++	if err != nil {
++		return ErrProfileDrift
++	}
++	return validateProfileFingerprint(expected, info)
++}
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/profile_fingerprint_test.go b/apps/backend/internal/agent/runtime/lifecycle/profile_fingerprint_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..edc95994c1600d8f9d56a7d1de8d85759c5f1516
+--- /dev/null
++++ b/apps/backend/internal/agent/runtime/lifecycle/profile_fingerprint_test.go
+@@ -0,0 +1,121 @@
++package lifecycle
++
++import (
++	"context"
++	"errors"
++	"strings"
++	"testing"
++
++	settingsmodels "github.com/kandev/kandev/internal/agent/settings/models"
++)
++
++type fixedFingerprintResolver struct {
++	info *AgentProfileInfo
++	err  error
++}
++
++func (r *fixedFingerprintResolver) ResolveProfile(context.Context, string) (*AgentProfileInfo, error) {
++	return r.info, r.err
++}
++
++func TestProfileFingerprintDeterministicAndOpaque(t *testing.T) {
++	info := &AgentProfileInfo{
++		ProfileID: "profile-1", AgentID: "agent-1", AgentName: "codex-acp",
++		Model: "gpt-5.6-sol", Mode: "agent", ConfigOptions: map[string]string{"z": "last", "a": "first"},
++		CLIFlags: []settingsmodels.CLIFlag{{Description: "display only", Flag: "--safe", Enabled: true}},
++		EnvVars: []settingsmodels.ProfileEnvVar{
++			{Key: "PLAIN", Value: "literal-sensitive-value"},
++			{Key: "SECRET", SecretID: "opaque-secret-reference"},
++		},
++	}
++	first, err := profileFingerprint(info)
++	if err != nil {
++		t.Fatalf("profileFingerprint: %v", err)
++	}
++	second, err := profileFingerprint(info)
++	if err != nil {
++		t.Fatalf("profileFingerprint repeat: %v", err)
++	}
++	if first != second || !IsValidProfileFingerprint(first) {
++		t.Fatalf("fingerprints = %q, %q", first, second)
++	}
++	for _, secret := range []string{"literal-sensitive-value", "opaque-secret-reference"} {
++		if strings.Contains(first, secret) {
++			t.Fatalf("fingerprint exposes profile value %q", secret)
++		}
++	}
++
++	// Map insertion order and presentation-only flag descriptions are not
++	// launch semantics and therefore do not cause false drift.
++	clone := *info
++	clone.ConfigOptions = map[string]string{"a": "first", "z": "last"}
++	clone.CLIFlags = []settingsmodels.CLIFlag{{Description: "renamed label", Flag: "--safe", Enabled: true}}
++	third, err := profileFingerprint(&clone)
++	if err != nil || third != first {
++		t.Fatalf("semantically equal profile fingerprint = %q, want %q (err=%v)", third, first, err)
++	}
++
++	clone.Model = "gpt-5.6-terra"
++	changed, err := profileFingerprint(&clone)
++	if err != nil || changed == first {
++		t.Fatalf("launch-relevant change did not alter fingerprint: %q err=%v", changed, err)
++	}
++}
++
++func TestValidateExecutionProfileFingerprint(t *testing.T) {
++	profile := &AgentProfileInfo{ProfileID: "profile-1", AgentID: "agent-1", Model: "model-a"}
++	expected, err := profileFingerprint(profile)
++	if err != nil {
++		t.Fatalf("profileFingerprint: %v", err)
++	}
++	profile.Fingerprint = expected
++	execution := &AgentExecution{AgentProfileID: "profile-1", metadata: map[string]interface{}{
++		metadataKeyExpectedProfileFingerprint: expected,
++	}}
++	mgr := &Manager{profileResolver: &fixedFingerprintResolver{info: profile}}
++	if err := mgr.validateExecutionProfileFingerprint(context.Background(), execution); err != nil {
++		t.Fatalf("matching fingerprint rejected: %v", err)
++	}
++
++	profile.Fingerprint = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
++	if err := mgr.validateExecutionProfileFingerprint(context.Background(), execution); !errors.Is(err, ErrProfileDrift) {
++		t.Fatalf("drift error = %v, want %v", err, ErrProfileDrift)
++	}
++
++	// Rows created before profile binding carry no expected fingerprint and
++	// retain their compatibility path even when profile resolution is absent.
++	legacy := &AgentExecution{metadata: map[string]interface{}{}}
++	if err := (&Manager{}).validateExecutionProfileFingerprint(context.Background(), legacy); err != nil {
++		t.Fatalf("legacy empty fingerprint rejected: %v", err)
++	}
++}
++
++func TestExpectedProfileFingerprintRejectsMalformedMetadata(t *testing.T) {
++	for _, value := range []interface{}{nil, "", 42, "sha256:not-hex", strings.Repeat("a", 64)} {
++		if _, err := expectedProfileFingerprintFromMetadata(map[string]interface{}{
++			metadataKeyExpectedProfileFingerprint: value,
++		}); !errors.Is(err, ErrProfileDrift) {
++			t.Fatalf("value %#v error = %v, want %v", value, err, ErrProfileDrift)
++		}
++	}
++}
++
++func TestProfileFingerprintPersistsWithoutResolvedEnvironment(t *testing.T) {
++	if !ShouldPersistMetadataKey(metadataKeyExpectedProfileFingerprint) {
++		t.Fatal("expected profile fingerprint is not restart-persistent")
++	}
++	if ShouldPersistMetadataKey(metadataKeyProfileEnvResolved) {
++		t.Fatal("resolved profile environment must remain memory-only")
++	}
++}
++
++func TestResolveAgentProfileSanitizesBoundResolverFailure(t *testing.T) {
++	mgr := &Manager{profileResolver: &fixedFingerprintResolver{err: errors.New("sensitive storage detail")}}
++	_, _, err := mgr.resolveAgentProfile(context.Background(), &LaunchRequest{
++		AgentProfileID:             "profile-1",
++		ExpectedProfileFingerprint: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++	})
++	if !errors.Is(err, ErrProfileDrift) || err.Error() != "BLOCKED_PROFILE_DRIFT" {
++		t.Fatalf("resolveAgentProfile error = %v, want sanitized %v", err, ErrProfileDrift)
++	}
++}
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/profile_resolver.go b/apps/backend/internal/agent/runtime/lifecycle/profile_resolver.go
+index 01c69cf651e2065f690deb73532fca1267e1a679..42944f985be23c79e479590044cf626a62bdd1da 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/profile_resolver.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/profile_resolver.go
+@@ -69,7 +69,7 @@ func (r *StoreProfileResolver) ResolveProfile(ctx context.Context, profileID str
+ 	// Resolve agent capabilities from the registry.
+ 	model, nativeSessionResume := r.resolveAgentCapabilities(agent.Name, profile.Model)
+ 
+-	return &AgentProfileInfo{
++	info := &AgentProfileInfo{
+ 		ProfileID:                  profile.ID,
+ 		ProfileName:                profile.Name,
+ 		AgentID:                    agent.ID,
+@@ -88,7 +88,13 @@ func (r *StoreProfileResolver) ResolveProfile(ctx context.Context, profileID str
+ 		CLIPassthrough:             profile.CLIPassthrough,
+ 		NativeSessionResume:        nativeSessionResume,
+ 		SupportsMCP:                agent.SupportsMCP,
+-	}, nil
++	}
++	fingerprint, err := profileFingerprint(info)
++	if err != nil {
++		return nil, ErrProfileDrift
++	}
++	info.Fingerprint = fingerprint
++	return info, nil
+ }
+ 
+ func (r *StoreProfileResolver) migrateCursorProfile(
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/types.go b/apps/backend/internal/agent/runtime/lifecycle/types.go
+index 7929cf01fb80f99f9d61d678a2db9a24becbccab..93bc251d8a9032aff6539cbefa1b2012f0cacab6 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/types.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/types.go
+@@ -655,11 +655,15 @@ type LaunchRequest struct {
+ 	// ExecutionProfileID selects the complete CLI runtime profile. Empty keeps
+ 	// backward-compatible behavior by using AgentProfileID.
+ 	ExecutionProfileID string
+-	StartAgent         bool                // Transfer launch activity through initial startup/prompt
+-	WorkspacePath      string              // Host path to workspace (original repository path)
+-	TaskDescription    string              // Task description to send via ACP prompt
+-	Attachments        []MessageAttachment // Attachments (images/files) for the initial prompt
+-	Env                map[string]string   // Additional env vars
++	// ExpectedProfileFingerprint binds a prepared session to the exact
++	// execution profile launch configuration. Empty is the compatibility path
++	// for sessions created before profile binding existed.
++	ExpectedProfileFingerprint string
++	StartAgent                 bool                // Transfer launch activity through initial startup/prompt
++	WorkspacePath              string              // Host path to workspace (original repository path)
++	TaskDescription            string              // Task description to send via ACP prompt
++	Attachments                []MessageAttachment // Attachments (images/files) for the initial prompt
++	Env                        map[string]string   // Additional env vars
+ 	// ApprovedSecretEnvKeys contains repository binding keys that SSH may
+ 	// forward in addition to its managed credential allowlist.
+ 	ApprovedSecretEnvKeys []string
+@@ -804,6 +808,7 @@ type AgentProfileInfo struct {
+ 	ProfileName   string
+ 	AgentID       string
+ 	AgentName     string // e.g., "auggie", "claude", "codex"
++	Fingerprint   string // secret-free digest of every launch-relevant profile field
+ 	Model         string // applied through ACP model selection at session start
+ 	Mode          string // applied via ACP session/set_mode at session start (empty = use agent default)
+ 	ConfigOptions map[string]string
+diff --git a/apps/backend/internal/agent/settings/controller/reconciler.go b/apps/backend/internal/agent/settings/controller/reconciler.go
+index 8831548676f52abe11348b44820ae920c6ba63bb..c2a8d1c19e9b3432a3adc637a1844f6e229c34f1 100644
+--- a/apps/backend/internal/agent/settings/controller/reconciler.go
++++ b/apps/backend/internal/agent/settings/controller/reconciler.go
+@@ -368,9 +368,8 @@ func (r *ProfileReconciler) seedDefaultProfile(
+ }
+ 
+ // healProfile validates the profile's model and mode against the cache and
+-// auto-heals values that no longer exist. User-modified profiles are still
+-// healed — we always keep profiles in a usable state; the "user_modified"
+-// flag survives the write to retain user intent for other fields.
++// seeds system-managed empty values. Explicit non-empty user bindings survive
++// capability drift; the probe is not an authority to replace user intent.
+ func (r *ProfileReconciler) healProfile(
+ 	ctx context.Context,
+ 	p *models.AgentProfile,
+@@ -409,7 +408,7 @@ func (r *ProfileReconciler) healProfile(
+ 			zap.String("fallback_model", p.FallbackModel))
+ 	}
+ 
+-	if p.Mode != "" && !modeExists(p.Mode, caps.Modes) {
++	if p.Mode != "" && !modeExists(p.Mode, caps.Modes) && !p.UserModified {
+ 		r.log.Info("profile mode no longer available, clearing",
+ 			zap.String("profile_id", p.ID),
+ 			zap.String("old_mode", p.Mode))
+diff --git a/apps/backend/internal/agent/settings/controller/reconciler_test.go b/apps/backend/internal/agent/settings/controller/reconciler_test.go
+index 06aa3fc4c02af07743e9a923e8b701b18111e884..08bd37b17fcec0e0136506f704cfd6071584b7e7 100644
+--- a/apps/backend/internal/agent/settings/controller/reconciler_test.go
++++ b/apps/backend/internal/agent/settings/controller/reconciler_test.go
+@@ -491,6 +491,55 @@ func TestProfileReconciler_SeedsEmptyModel(t *testing.T) {
+ 	}
+ }
+ 
++func TestProfileReconciler_UserModifiedLaunchBindings(t *testing.T) {
++	tests := []struct {
++		name      string
++		model     string
++		mode      string
++		wantModel string
++		wantMode  string
++	}{
++		{
++			name: "non-empty values survive catalog drift", model: "explicit-model", mode: "explicit-mode",
++			wantModel: "explicit-model", wantMode: "explicit-mode",
++		},
++		{
++			name:      "empty values still seed from capabilities",
++			wantModel: "catalog-model", wantMode: "catalog-mode",
++		},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			st := newFakeStore()
++			dbAgent := &models.Agent{Name: "codex-acp"}
++			_ = st.CreateAgent(context.Background(), dbAgent)
++			existing := &models.AgentProfile{
++				AgentID: dbAgent.ID, Name: "Explicit", Model: tt.model, Mode: tt.mode, UserModified: true,
++			}
++			_ = st.CreateAgentProfile(context.Background(), existing)
++
++			ag := &mockInferenceAgent{id: "codex-acp", displayName: "Codex", enabled: true}
++			caps := &fakeCapReader{caps: map[string]hostutility.AgentCapabilities{
++				"codex-acp": {
++					AgentType: "codex-acp", Status: hostutility.StatusOK,
++					Models: []hostutility.Model{{ID: "catalog-model", Name: "Catalog"}}, CurrentModelID: "catalog-model",
++					Modes: []hostutility.Mode{{ID: "catalog-mode", Name: "Catalog"}}, CurrentModeID: "catalog-mode",
++				},
++			}}
++			if err := newReconciler(t, st, caps, ag).Run(context.Background()); err != nil {
++				t.Fatalf("Run: %v", err)
++			}
++			live, err := st.GetAgentProfile(context.Background(), existing.ID)
++			if err != nil {
++				t.Fatalf("get profile: %v", err)
++			}
++			if live.Model != tt.wantModel || live.Mode != tt.wantMode {
++				t.Fatalf("launch binding = (%q, %q), want (%q, %q)", live.Model, live.Mode, tt.wantModel, tt.wantMode)
++			}
++		})
++	}
++}
++
+ // TestProfileReconciler_KeepsGoneFallbackModel verifies a gone fallback model is kept, not healed.
+ 
+ func TestProfileReconciler_KeepsGoneFallbackModel(t *testing.T) {
+diff --git a/apps/backend/internal/backendapp/adapters.go b/apps/backend/internal/backendapp/adapters.go
+index f9758e12c62bb439941749dc33499f6c09941aa5..069587ff19704802d393ac12a7bfb51e3fe00d90 100644
+--- a/apps/backend/internal/backendapp/adapters.go
++++ b/apps/backend/internal/backendapp/adapters.go
+@@ -191,6 +191,7 @@ func buildLifecycleLaunchRequest(
+ 		TaskTitle:                     req.TaskTitle,
+ 		AgentProfileID:                officeProfileID,
+ 		ExecutionProfileID:            req.AgentProfileID,
++		ExpectedProfileFingerprint:    req.ExpectedProfileFingerprint,
+ 		StartAgent:                    req.StartAgent,
+ 		WorkspacePath:                 workspacePath,
+ 		TaskDescription:               req.TaskDescription,
+@@ -620,6 +621,7 @@ func (a *lifecycleAdapter) ResolveAgentProfile(ctx context.Context, profileID st
+ 		ProfileName:                info.ProfileName,
+ 		AgentID:                    info.AgentID,
+ 		AgentName:                  info.AgentName,
++		Fingerprint:                info.Fingerprint,
+ 		Model:                      info.Model,
+ 		Mode:                       info.Mode,
+ 		ConfigOptions:              info.ConfigOptions,
+diff --git a/apps/backend/internal/orchestrator/event_handlers_test.go b/apps/backend/internal/orchestrator/event_handlers_test.go
+index a708ddbdb0b35d01ae2bb57fd6336f1920e0afd4..9b4491108c2cb9122fe3271481142a8bb36a7480 100644
+--- a/apps/backend/internal/orchestrator/event_handlers_test.go
++++ b/apps/backend/internal/orchestrator/event_handlers_test.go
+@@ -528,7 +528,7 @@ func (m *mockAgentManager) RowLiveness(row *models.ExecutorRunning) models.Proce
+ 	}
+ 	return models.ProcessLivenessUnknown
+ }
+-func (m *mockAgentManager) ResolveAgentProfile(_ context.Context, _ string) (*executor.AgentProfileInfo, error) {
++func (m *mockAgentManager) ResolveAgentProfile(_ context.Context, profileID string) (*executor.AgentProfileInfo, error) {
+ 	if m.resolveProfileErr != nil {
+ 		return nil, m.resolveProfileErr
+ 	}
+@@ -536,6 +536,10 @@ func (m *mockAgentManager) ResolveAgentProfile(_ context.Context, _ string) (*ex
+ 		return m.resolveProfileInfo, nil
+ 	}
+ 	return &executor.AgentProfileInfo{
++		ProfileID:      profileID,
++		AgentID:        "test-agent-id",
++		AgentName:      "test-agent",
++		Fingerprint:    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+ 		SupportsMCP:    true,
+ 		CLIPassthrough: m.isPassthrough,
+ 	}, nil
+diff --git a/apps/backend/internal/orchestrator/executor/executor.go b/apps/backend/internal/orchestrator/executor/executor.go
+index 9cfe0dd06f53ac164988043b0659e41a973c0c4a..cdd5955bbdef0a6429903f300aad9f46f3f258bc 100644
+--- a/apps/backend/internal/orchestrator/executor/executor.go
++++ b/apps/backend/internal/orchestrator/executor/executor.go
+@@ -318,6 +318,7 @@ type AgentProfileInfo struct {
+ 	ProfileName                string
+ 	AgentID                    string
+ 	AgentName                  string
++	Fingerprint                string
+ 	Model                      string
+ 	Mode                       string
+ 	ConfigOptions              map[string]string
+@@ -336,6 +337,9 @@ type LaunchAgentRequest struct {
+ 	TaskEnvironmentID string // Env owning this session (shared across sessions in the same task)
+ 	TaskTitle         string // Human-readable task title for semantic worktree naming
+ 	AgentProfileID    string
++	// ExpectedProfileFingerprint binds the request to the execution profile
++	// snapshot persisted when the session was prepared. Empty is legacy-only.
++	ExpectedProfileFingerprint string
+ 	// OfficeAgentProfileID is the stable Office identity. AgentProfileID stays
+ 	// the concrete execution profile inside the executor for compatibility.
+ 	OfficeAgentProfileID string
+diff --git a/apps/backend/internal/orchestrator/executor/executor_execute.go b/apps/backend/internal/orchestrator/executor/executor_execute.go
+index b16a88808b95f4733c7a29933868ece30e886ec1..2412dd86ec8eba72b7ce4593027dcf0d4338929b 100644
+--- a/apps/backend/internal/orchestrator/executor/executor_execute.go
++++ b/apps/backend/internal/orchestrator/executor/executor_execute.go
+@@ -771,7 +771,10 @@ func (e *Executor) PrepareSession(ctx context.Context, task *v1.Task, agentProfi
+ 	}
+ 
+ 	// Resolve agent profile to get model and other settings for snapshot
+-	agentProfileSnapshot, isPassthrough := e.resolveAgentProfileSnapshot(ctx, agentProfileID)
++	agentProfileSnapshot, isPassthrough, err := e.resolveAgentProfileSnapshot(ctx, agentProfileID)
++	if err != nil {
++		return "", err
++	}
+ 
+ 	// Determine whether this is the task's first session and whether it should
+ 	// become primary. The immutable origin marker follows creation order, not
+@@ -874,16 +877,17 @@ func (e *Executor) PrepareSession(ctx context.Context, task *v1.Task, agentProfi
+ }
+ 
+ // resolveAgentProfileSnapshot resolves an agent profile ID to a snapshot map and passthrough flag.
+-func (e *Executor) resolveAgentProfileSnapshot(ctx context.Context, agentProfileID string) (map[string]interface{}, bool) {
++func (e *Executor) resolveAgentProfileSnapshot(ctx context.Context, agentProfileID string) (map[string]interface{}, bool, error) {
+ 	profileInfo, err := e.agentManager.ResolveAgentProfile(ctx, agentProfileID)
+ 	if err != nil || profileInfo == nil {
+-		return map[string]interface{}{
+-			"id":    agentProfileID,
+-			"model": "",
+-		}, false
++		return nil, false, lifecycle.ErrProfileDrift
++	}
++	if !lifecycle.IsValidProfileFingerprint(profileInfo.Fingerprint) {
++		return nil, false, lifecycle.ErrProfileDrift
+ 	}
+ 	return map[string]interface{}{
+ 		"id":                           profileInfo.ProfileID,
++		"fingerprint":                  profileInfo.Fingerprint,
+ 		"name":                         profileInfo.ProfileName,
+ 		"agent_id":                     profileInfo.AgentID,
+ 		"agent_name":                   profileInfo.AgentName,
+@@ -893,7 +897,37 @@ func (e *Executor) resolveAgentProfileSnapshot(ctx context.Context, agentProfile
+ 		"auto_approve":                 profileInfo.AutoApprove,
+ 		"dangerously_skip_permissions": profileInfo.DangerouslySkipPermissions,
+ 		"cli_passthrough":              profileInfo.CLIPassthrough,
+-	}, profileInfo.CLIPassthrough
++	}, profileInfo.CLIPassthrough, nil
++}
++
++func profileFingerprintFromSnapshot(snapshot map[string]interface{}) (string, error) {
++	if snapshot == nil {
++		return "", nil
++	}
++	value, exists := snapshot["fingerprint"]
++	if !exists {
++		return "", nil
++	}
++	fingerprint, ok := value.(string)
++	if !ok || !lifecycle.IsValidProfileFingerprint(fingerprint) {
++		return "", lifecycle.ErrProfileDrift
++	}
++	return fingerprint, nil
++}
++
++func (e *Executor) validatePreparedProfileFingerprint(
++	ctx context.Context, session *models.TaskSession, executionProfileID string,
++) (string, error) {
++	expected, err := profileFingerprintFromSnapshot(session.AgentProfileSnapshot)
++	if err != nil || expected == "" {
++		return expected, err
++	}
++	current, err := e.agentManager.ResolveAgentProfile(ctx, executionProfileID)
++	if err != nil || current == nil || current.Fingerprint != expected ||
++		!lifecycle.IsValidProfileFingerprint(current.Fingerprint) {
++		return "", lifecycle.ErrProfileDrift
++	}
++	return expected, nil
+ }
+ 
+ // LaunchPreparedSession launches the workspace (and optionally the agent) for a pre-created session.
+@@ -934,6 +968,10 @@ func (e *Executor) LaunchPreparedSession(ctx context.Context, task *v1.Task, ses
+ 	if session.TaskID != task.ID {
+ 		return nil, fmt.Errorf("session does not belong to task")
+ 	}
++	expectedProfileFingerprint, err := e.validatePreparedProfileFingerprint(ctx, session, agentProfileID)
++	if err != nil {
++		return nil, err
++	}
+ 	if opts.McpMode == "" {
+ 		opts.McpMode, err = e.resolveTaskSessionMCPMode(ctx, task.ID, session, opts.StartAgent)
+ 		if err != nil {
+@@ -1030,6 +1068,7 @@ func (e *Executor) LaunchPreparedSession(ctx context.Context, task *v1.Task, ses
+ 		session.ExecutorID = execCfg.ExecutorID
+ 	}
+ 	req.OfficeAgentProfileID = opts.OfficeAgentProfileID
++	req.ExpectedProfileFingerprint = expectedProfileFingerprint
+ 	if req.OfficeAgentProfileID == "" && session.AgentProfileID != "" {
+ 		req.OfficeAgentProfileID = session.AgentProfileID
+ 	}
+diff --git a/apps/backend/internal/orchestrator/executor/executor_interaction.go b/apps/backend/internal/orchestrator/executor/executor_interaction.go
+index 9e6adcd098fd173a6573ab0f07a24ab74f5c6ff1..c4e7224e909a3a4fdd5a9a0d9d4d70fc324f5476 100644
+--- a/apps/backend/internal/orchestrator/executor/executor_interaction.go
++++ b/apps/backend/internal/orchestrator/executor/executor_interaction.go
+@@ -628,6 +628,13 @@ func (e *Executor) prepareModelSwitch(ctx context.Context, taskID, sessionID str
+ 	if session.TaskID != taskID {
+ 		return nil, nil, "", nil, fmt.Errorf("session %s does not belong to task %s", sessionID, taskID)
+ 	}
++	executionProfileID := session.ExecutionProfileID
++	if executionProfileID == "" {
++		executionProfileID = session.AgentProfileID
++	}
++	if _, err := e.validatePreparedProfileFingerprint(ctx, session, executionProfileID); err != nil {
++		return nil, nil, "", nil, err
++	}
+ 	executionID, err := e.agentManager.GetExecutionIDForSession(ctx, sessionID)
+ 	if err != nil || executionID == "" {
+ 		return nil, nil, "", nil, ErrExecutionNotFound
+@@ -700,20 +707,30 @@ func (e *Executor) launchModelSwitchAgent(ctx context.Context, taskID, sessionID
+ // buildSwitchModelRequest constructs a LaunchAgentRequest for a model switch, applying
+ // repository and worktree config from the existing session.
+ func (e *Executor) buildSwitchModelRequest(ctx context.Context, task *models.Task, session *models.TaskSession, sessionID, newModel, prompt, acpSessionID string, execConfig executorConfig, running *models.ExecutorRunning) (*LaunchAgentRequest, error) {
++	executionProfileID := session.ExecutionProfileID
++	if executionProfileID == "" {
++		executionProfileID = session.AgentProfileID
++	}
++	expectedProfileFingerprint, err := profileFingerprintFromSnapshot(session.AgentProfileSnapshot)
++	if err != nil {
++		return nil, err
++	}
+ 	req := &LaunchAgentRequest{
+-		TaskID:            task.ID,
+-		WorkspaceID:       task.WorkspaceID,
+-		SessionID:         sessionID,
+-		TaskTitle:         task.Title,
+-		AgentProfileID:    session.AgentProfileID,
+-		TaskDescription:   prompt,
+-		ModelOverride:     newModel,
+-		ACPSessionID:      acpSessionID,
+-		ExecutorType:      execConfig.ExecutorType,
+-		Metadata:          execConfig.Metadata,
+-		IsEphemeral:       task.IsEphemeral,
+-		IsPassthrough:     session.IsPassthrough,
+-		TaskEnvironmentID: session.TaskEnvironmentID,
++		TaskID:                     task.ID,
++		WorkspaceID:                task.WorkspaceID,
++		SessionID:                  sessionID,
++		TaskTitle:                  task.Title,
++		AgentProfileID:             executionProfileID,
++		OfficeAgentProfileID:       session.AgentProfileID,
++		ExpectedProfileFingerprint: expectedProfileFingerprint,
++		TaskDescription:            prompt,
++		ModelOverride:              newModel,
++		ACPSessionID:               acpSessionID,
++		ExecutorType:               execConfig.ExecutorType,
++		Metadata:                   execConfig.Metadata,
++		IsEphemeral:                task.IsEphemeral,
++		IsPassthrough:              session.IsPassthrough,
++		TaskEnvironmentID:          session.TaskEnvironmentID,
+ 	}
+ 
+ 	mcpMode, err := e.resolveTaskSessionMCPMode(ctx, task.ID, session, true)
+diff --git a/apps/backend/internal/orchestrator/executor/executor_interaction_test.go b/apps/backend/internal/orchestrator/executor/executor_interaction_test.go
+index a234935d22bfc0323e5fd37ba64abdbe8c9602ca..bd82123ed84f7a7be99f68ab937d7a5fea798ab2 100644
+--- a/apps/backend/internal/orchestrator/executor/executor_interaction_test.go
++++ b/apps/backend/internal/orchestrator/executor/executor_interaction_test.go
+@@ -600,11 +600,15 @@ func TestSwitchModelFallback_PreservesRestrictedMCPMode(t *testing.T) {
+ 				AssigneeAgentProfileID: tt.assignee,
+ 			}
+ 			repo.sessions["session-office"] = &models.TaskSession{
+-				ID:             "session-office",
+-				TaskID:         "task-office",
+-				AgentProfileID: "office-agent",
+-				State:          models.TaskSessionStateRunning,
+-				Metadata:       tt.metadata,
++				ID:                 "session-office",
++				TaskID:             "task-office",
++				AgentProfileID:     "office-agent",
++				ExecutionProfileID: "execution-agent",
++				AgentProfileSnapshot: map[string]interface{}{
++					"fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++				},
++				State:    models.TaskSessionStateRunning,
++				Metadata: tt.metadata,
+ 			}
+ 
+ 			var capturedReq *LaunchAgentRequest
+@@ -633,9 +637,49 @@ func TestSwitchModelFallback_PreservesRestrictedMCPMode(t *testing.T) {
+ 			if capturedReq.McpMode != tt.wantMode {
+ 				t.Fatalf("McpMode = %q, want %q", capturedReq.McpMode, tt.wantMode)
+ 			}
++			if capturedReq.AgentProfileID != "execution-agent" || capturedReq.OfficeAgentProfileID != "office-agent" {
++				t.Fatalf("model-switch profile identities = execution %q office %q",
++					capturedReq.AgentProfileID, capturedReq.OfficeAgentProfileID)
++			}
++			if capturedReq.ExpectedProfileFingerprint != "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
++				t.Fatalf("model-switch expected fingerprint = %q", capturedReq.ExpectedProfileFingerprint)
++			}
+ 			if capturedReq.WorkspaceID != "workspace-1" || capturedReq.Env[envGitLabToken] != "switch-token" {
+ 				t.Fatalf("model-switch credentials not workspace scoped: workspace=%q env=%#v", capturedReq.WorkspaceID, capturedReq.Env)
+ 			}
+ 		})
+ 	}
+ }
++
++func TestSwitchModelFallbackBlocksProfileDriftBeforeStop(t *testing.T) {
++	repo := newMockRepository()
++	repo.tasks["task-1"] = &models.Task{ID: "task-1", WorkspaceID: "workspace-1"}
++	repo.sessions["session-1"] = &models.TaskSession{
++		ID: "session-1", TaskID: "task-1", AgentProfileID: "profile-1", State: models.TaskSessionStateRunning,
++		AgentProfileSnapshot: map[string]interface{}{
++			"fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++		},
++	}
++	stopCalled := false
++	manager := &mockAgentManager{
++		resolveAgentProfileFunc: func(context.Context, string) (*AgentProfileInfo, error) {
++			return &AgentProfileInfo{
++				ProfileID:   "profile-1",
++				Fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
++			}, nil
++		},
++		getExecutionIDForSessionFunc: func(context.Context, string) (string, error) { return "exec-old", nil },
++		stopAgentFunc: func(context.Context, string, bool) error {
++			stopCalled = true
++			return nil
++		},
++	}
++	exec := newTestExecutor(t, manager, repo)
++	_, err := exec.SwitchModel(context.Background(), "task-1", "session-1", "new-model", "continue")
++	if !errors.Is(err, lifecycle.ErrProfileDrift) || err.Error() != "BLOCKED_PROFILE_DRIFT" {
++		t.Fatalf("SwitchModel error = %v, want sanitized %v", err, lifecycle.ErrProfileDrift)
++	}
++	if stopCalled || manager.launchAgentCallCount != 0 {
++		t.Fatalf("drift reached stop/launch: stop=%v launch=%d", stopCalled, manager.launchAgentCallCount)
++	}
++}
+diff --git a/apps/backend/internal/orchestrator/executor/executor_mocks_test.go b/apps/backend/internal/orchestrator/executor/executor_mocks_test.go
+index a76214bce4343eed2fc04cb71b005072a450b90d..5227909a7921fd5a461742db5ddaaa113c2d0ba2 100644
+--- a/apps/backend/internal/orchestrator/executor/executor_mocks_test.go
++++ b/apps/backend/internal/orchestrator/executor/executor_mocks_test.go
+@@ -219,6 +219,7 @@ func (m *mockAgentManager) ResolveAgentProfile(ctx context.Context, profileID st
+ 		AgentID:     "agent-123",
+ 		AgentName:   "Test Agent",
+ 		Model:       "claude-3-opus",
++		Fingerprint: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+ 	}, nil
+ }
+ 
+diff --git a/apps/backend/internal/orchestrator/executor/executor_office.go b/apps/backend/internal/orchestrator/executor/executor_office.go
+index 228a292cb58b96ff5549beee2e7c5ce2632d26e8..4738fb888b7d15878d3a5df8b9c16baea69952a3 100644
+--- a/apps/backend/internal/orchestrator/executor/executor_office.go
++++ b/apps/backend/internal/orchestrator/executor/executor_office.go
+@@ -98,7 +98,10 @@ func (e *Executor) rebindOfficeSessionExecutionProfile(
+ 	if session == nil || executionProfileID == "" || session.ExecutionProfileID == executionProfileID {
+ 		return nil
+ 	}
+-	snapshot, isPassthrough := e.resolveAgentProfileSnapshot(ctx, executionProfileID)
++	snapshot, isPassthrough, err := e.resolveAgentProfileSnapshot(ctx, executionProfileID)
++	if err != nil {
++		return err
++	}
+ 	updater, ok := e.repo.(officeSessionMetadataUpdater)
+ 	if !ok {
+ 		return errors.New("office session rebind requires guarded metadata updates")
+@@ -216,7 +219,10 @@ func (e *Executor) createOfficeSession(
+ 		baseBranch = primaryTaskRepo.BaseBranch
+ 	}
+ 
+-	agentProfileSnapshot, isPassthrough := e.resolveAgentProfileSnapshot(ctx, agentProfileID)
++	agentProfileSnapshot, isPassthrough, err := e.resolveAgentProfileSnapshot(ctx, agentProfileID)
++	if err != nil {
++		return nil, err
++	}
+ 
+ 	now := time.Now().UTC()
+ 	// Office sessions are owned by the stable agent identity while their
+diff --git a/apps/backend/internal/orchestrator/executor/executor_resume.go b/apps/backend/internal/orchestrator/executor/executor_resume.go
+index cbfa9152527ce7a7c1bc9f2a3e8503edf9f370a2..d5f256cfc808094bd34e94a04eba2e48c67f35d5 100644
+--- a/apps/backend/internal/orchestrator/executor/executor_resume.go
++++ b/apps/backend/internal/orchestrator/executor/executor_resume.go
+@@ -535,6 +535,13 @@ func (e *Executor) ResumeSession(ctx context.Context, session *models.TaskSessio
+ 		return nil, err
+ 	}
+ 	defer unlock()
++	executionProfileID := session.ExecutionProfileID
++	if executionProfileID == "" {
++		executionProfileID = session.AgentProfileID
++	}
++	if _, err := e.validatePreparedProfileFingerprint(ctx, session, executionProfileID); err != nil {
++		return nil, err
++	}
+ 
+ 	resumeInitialState := session.State
+ 	previousCredentialSnapshot := captureResumeCredentialSnapshot(session)
+@@ -879,19 +886,24 @@ func (e *Executor) buildResumeRequestAtCredentialBoundary(
+ 	if executionProfileID == "" {
+ 		executionProfileID = session.AgentProfileID
+ 	}
++	expectedProfileFingerprint, err := profileFingerprintFromSnapshot(session.AgentProfileSnapshot)
++	if err != nil {
++		return nil, "", executorConfig{}, nil, nil, err
++	}
+ 	req := &LaunchAgentRequest{
+-		TaskID:               task.ID,
+-		WorkspaceID:          task.WorkspaceID,
+-		SessionID:            session.ID,
+-		TaskTitle:            task.Title,
+-		AgentProfileID:       executionProfileID,
+-		OfficeAgentProfileID: session.AgentProfileID,
+-		StartAgent:           startAgent,
+-		TaskDescription:      task.Description,
+-		Priority:             task.Priority,
+-		IsEphemeral:          task.IsEphemeral,
+-		IsPassthrough:        session.IsPassthrough,
+-		TaskEnvironmentID:    session.TaskEnvironmentID,
++		TaskID:                     task.ID,
++		WorkspaceID:                task.WorkspaceID,
++		SessionID:                  session.ID,
++		TaskTitle:                  task.Title,
++		AgentProfileID:             executionProfileID,
++		OfficeAgentProfileID:       session.AgentProfileID,
++		ExpectedProfileFingerprint: expectedProfileFingerprint,
++		StartAgent:                 startAgent,
++		TaskDescription:            task.Description,
++		Priority:                   task.Priority,
++		IsEphemeral:                task.IsEphemeral,
++		IsPassthrough:              session.IsPassthrough,
++		TaskEnvironmentID:          session.TaskEnvironmentID,
+ 	}
+ 
+ 	metadata := map[string]interface{}{}
+diff --git a/apps/backend/internal/orchestrator/executor/executor_resume_test.go b/apps/backend/internal/orchestrator/executor/executor_resume_test.go
+index 6a453dbfc333fc725c9d3db3d2d14e0c8c402a08..a4b3d92d6549dac4951842a01640941348acf912 100644
+--- a/apps/backend/internal/orchestrator/executor/executor_resume_test.go
++++ b/apps/backend/internal/orchestrator/executor/executor_resume_test.go
+@@ -73,6 +73,55 @@ func setupLiveResumeTestFixture(repo *mockRepository) {
+ 	}
+ }
+ 
++func TestResumeSessionBlocksProfileDriftBeforeCleanupOrLaunch(t *testing.T) {
++	repo := newMockRepository()
++	setupLiveResumeTestFixture(repo)
++	repo.sessions["sess-1"].State = models.TaskSessionStateFailed
++	repo.sessions["sess-1"].AgentProfileSnapshot = map[string]interface{}{
++		"fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++	}
++	agentMgr := &mockAgentManager{resolveAgentProfileFunc: func(context.Context, string) (*AgentProfileInfo, error) {
++		return &AgentProfileInfo{
++			ProfileID:   "profile-1",
++			Fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
++		}, nil
++	}}
++	exec := newTestExecutor(t, agentMgr, repo)
++
++	_, err := exec.ResumeSession(context.Background(), repo.sessions["sess-1"], true)
++	if !errors.Is(err, lifecycle.ErrProfileDrift) || err.Error() != "BLOCKED_PROFILE_DRIFT" {
++		t.Fatalf("ResumeSession error = %v, want sanitized %v", err, lifecycle.ErrProfileDrift)
++	}
++	if agentMgr.cleanupStaleExecutionCallCount != 0 || agentMgr.launchAgentCallCount != 0 {
++		t.Fatalf("drift reached cleanup/launch: cleanup=%d launch=%d",
++			agentMgr.cleanupStaleExecutionCallCount, agentMgr.launchAgentCallCount)
++	}
++	if repo.sessions["sess-1"].State != models.TaskSessionStateFailed {
++		t.Fatalf("drift mutated session state: %s", repo.sessions["sess-1"].State)
++	}
++}
++
++func TestResumeSessionForwardsPreparedProfileFingerprint(t *testing.T) {
++	repo := newMockRepository()
++	setupLiveResumeTestFixture(repo)
++	repo.sessions["sess-1"].AgentProfileSnapshot = map[string]interface{}{
++		"fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++	}
++	var got string
++	agentMgr := &mockAgentManager{launchAgentFunc: func(_ context.Context, req *LaunchAgentRequest) (*LaunchAgentResponse, error) {
++		got = req.ExpectedProfileFingerprint
++		return &LaunchAgentResponse{AgentExecutionID: "exec-1", Status: v1.AgentStatusStarting}, nil
++	}}
++	exec := newTestExecutor(t, agentMgr, repo)
++
++	if _, err := exec.ResumeSession(context.Background(), repo.sessions["sess-1"], true); err != nil {
++		t.Fatalf("ResumeSession: %v", err)
++	}
++	if got != "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
++		t.Fatalf("resume expected fingerprint = %q", got)
++	}
++}
++
+ type resumeCredentialStateIssuer struct {
+ 	repo          *mockRepository
+ 	observedState models.TaskSessionState
+diff --git a/apps/backend/internal/orchestrator/executor/executor_test.go b/apps/backend/internal/orchestrator/executor/executor_test.go
+index 27a38ce9f8ab50687ef53be8adef729e6804a24f..79374fe9f4f4458d15593e5ff37ee764c29ed6e6 100644
+--- a/apps/backend/internal/orchestrator/executor/executor_test.go
++++ b/apps/backend/internal/orchestrator/executor/executor_test.go
+@@ -189,6 +189,7 @@ func TestPrepareSessionSnapshotsProfileRuntimeConfig(t *testing.T) {
+ 				Model:         "gpt-5.6-sol",
+ 				Mode:          "agent",
+ 				ConfigOptions: map[string]string{"reasoning_effort": "high"},
++				Fingerprint:   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+ 			}, nil
+ 		},
+ 	}
+@@ -205,6 +206,9 @@ func TestPrepareSessionSnapshotsProfileRuntimeConfig(t *testing.T) {
+ 	if snapshot["mode"] != "agent" {
+ 		t.Fatalf("profile snapshot mode = %#v", snapshot["mode"])
+ 	}
++	if snapshot["fingerprint"] != "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
++		t.Fatalf("profile snapshot fingerprint = %#v", snapshot["fingerprint"])
++	}
+ 	options, ok := snapshot["config_options"].(map[string]string)
+ 	if !ok || options["reasoning_effort"] != "high" {
+ 		t.Fatalf("profile snapshot config options = %#v", snapshot["config_options"])
+@@ -466,12 +470,13 @@ func TestLaunchPreparedSession_Success(t *testing.T) {
+ 
+ 	// Pre-create session (as PrepareSession would)
+ 	session := &models.TaskSession{
+-		ID:             "session-123",
+-		TaskID:         "task-123",
+-		AgentProfileID: "profile-123",
+-		State:          models.TaskSessionStateCreated,
+-		StartedAt:      time.Now(),
+-		UpdatedAt:      time.Now(),
++		ID:                   "session-123",
++		TaskID:               "task-123",
++		AgentProfileID:       "profile-123",
++		AgentProfileSnapshot: map[string]interface{}{"fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
++		State:                models.TaskSessionStateCreated,
++		StartedAt:            time.Now(),
++		UpdatedAt:            time.Now(),
+ 	}
+ 	repo.sessions[session.ID] = session
+ 
+@@ -480,6 +485,9 @@ func TestLaunchPreparedSession_Success(t *testing.T) {
+ 	agentManager := &mockAgentManager{
+ 		launchAgentFunc: func(ctx context.Context, req *LaunchAgentRequest) (*LaunchAgentResponse, error) {
+ 			launchCalled = true
++			if req.ExpectedProfileFingerprint != "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
++				t.Fatalf("expected profile fingerprint = %q", req.ExpectedProfileFingerprint)
++			}
+ 			if !req.StartAgent {
+ 				t.Error("expected lifecycle launch to retain initial-agent activity")
+ 			}
+@@ -543,6 +551,61 @@ func TestLaunchPreparedSession_Success(t *testing.T) {
+ 	}
+ }
+ 
++func TestPrepareSessionFailsClosedWithoutProfileFingerprint(t *testing.T) {
++	tests := []struct {
++		name string
++		info *AgentProfileInfo
++		err  error
++	}{
++		{name: "resolver error", err: errors.New("sensitive backend detail")},
++		{name: "missing fingerprint", info: &AgentProfileInfo{ProfileID: "profile-123"}},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			repo := newMockRepository()
++			executor := newTestExecutor(t, &mockAgentManager{resolveAgentProfileFunc: func(context.Context, string) (*AgentProfileInfo, error) {
++				return tt.info, tt.err
++			}}, repo)
++			_, err := executor.PrepareSession(context.Background(),
++				&v1.Task{ID: "task-123", WorkspaceID: "workspace-123"},
++				"profile-123", "executor-123", "", "step-123")
++			if !errors.Is(err, lifecycle.ErrProfileDrift) || err.Error() != "BLOCKED_PROFILE_DRIFT" {
++				t.Fatalf("PrepareSession error = %v, want sanitized %v", err, lifecycle.ErrProfileDrift)
++			}
++			if len(repo.createTaskSessionCalls) != 0 {
++				t.Fatalf("prepare persisted session after profile failure: %d calls", len(repo.createTaskSessionCalls))
++			}
++		})
++	}
++}
++
++func TestLaunchPreparedSessionBlocksProfileDriftBeforeLaunch(t *testing.T) {
++	repo := newMockRepository()
++	repo.sessions["session-drift"] = &models.TaskSession{
++		ID: "session-drift", TaskID: "task-drift", AgentProfileID: "profile-123",
++		AgentProfileSnapshot: map[string]interface{}{
++			"fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++		},
++		State: models.TaskSessionStateCreated,
++	}
++	agentManager := &mockAgentManager{resolveAgentProfileFunc: func(context.Context, string) (*AgentProfileInfo, error) {
++		return &AgentProfileInfo{
++			ProfileID:   "profile-123",
++			Fingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
++		}, nil
++	}}
++	executor := newTestExecutor(t, agentManager, repo)
++	_, err := executor.LaunchPreparedSession(context.Background(),
++		&v1.Task{ID: "task-drift", WorkspaceID: "workspace-123"}, "session-drift",
++		LaunchOptions{AgentProfileID: "profile-123", StartAgent: true})
++	if !errors.Is(err, lifecycle.ErrProfileDrift) || err.Error() != "BLOCKED_PROFILE_DRIFT" {
++		t.Fatalf("LaunchPreparedSession error = %v, want sanitized %v", err, lifecycle.ErrProfileDrift)
++	}
++	if agentManager.launchAgentCallCount != 0 {
++		t.Fatalf("profile drift reached lifecycle launch: %d calls", agentManager.launchAgentCallCount)
++	}
++}
++
+ func TestLaunchPreparedSession_PersistsResolvedExecutorID(t *testing.T) {
+ 	repo := newMockRepository()
+ 	now := time.Now().UTC()
+diff --git a/apps/backend/internal/orchestrator/task_operations.go b/apps/backend/internal/orchestrator/task_operations.go
+index 186e5d11749947197090ea4fc2c614d73cea3e3f..4415399aaf9fd650ba5ee6fd5d6287a4fa53dfdf 100644
+--- a/apps/backend/internal/orchestrator/task_operations.go
++++ b/apps/backend/internal/orchestrator/task_operations.go
+@@ -416,30 +416,33 @@ func (s *Service) StartCreatedSession(
+ 	// so the frontend tab displays the correct agent (it reads session.agent_profile_id).
+ 	if effectiveProfileID != session.AgentProfileID {
+ 		observedState := session.State
++		profileInfo, resolveErr := s.agentManager.ResolveAgentProfile(ctx, effectiveProfileID)
++		if resolveErr != nil || profileInfo == nil || profileInfo.ProfileID != effectiveProfileID ||
++			!lifecycle.IsValidProfileFingerprint(profileInfo.Fingerprint) {
++			return nil, lifecycle.ErrProfileDrift
++		}
++		profileSnapshot := map[string]interface{}{
++			"id":                           profileInfo.ProfileID,
++			"fingerprint":                  profileInfo.Fingerprint,
++			"name":                         profileInfo.ProfileName,
++			"agent_id":                     profileInfo.AgentID,
++			"agent_name":                   profileInfo.AgentName,
++			"model":                        profileInfo.Model,
++			"mode":                         profileInfo.Mode,
++			"config_options":               maps.Clone(profileInfo.ConfigOptions),
++			"auto_approve":                 profileInfo.AutoApprove,
++			"dangerously_skip_permissions": profileInfo.DangerouslySkipPermissions,
++			"cli_passthrough":              profileInfo.CLIPassthrough,
++		}
+ 		s.logger.Info("updating session agent profile for workflow step override",
+ 			zap.String("session_id", sessionID),
+ 			zap.String("old_profile", session.AgentProfileID),
+ 			zap.String("new_profile", effectiveProfileID))
+ 		session.AgentProfileID = effectiveProfileID
+-		// Re-resolve the agent profile snapshot so the tab shows the correct agent logo/name.
+-		// Set a minimal snapshot first so stale data is never persisted if resolution fails.
+-		session.AgentProfileSnapshot = map[string]interface{}{"id": effectiveProfileID}
+-		if profileInfo, err := s.agentManager.ResolveAgentProfile(ctx, effectiveProfileID); err != nil {
+-			s.logger.Warn("failed to resolve agent profile snapshot for workflow step override",
+-				zap.String("session_id", sessionID),
+-				zap.String("profile_id", effectiveProfileID),
+-				zap.Error(err))
+-		} else if profileInfo != nil {
+-			session.AgentProfileSnapshot = map[string]interface{}{
+-				"id":             profileInfo.ProfileID,
+-				"name":           profileInfo.ProfileName,
+-				"agent_id":       profileInfo.AgentID,
+-				"agent_name":     profileInfo.AgentName,
+-				"model":          profileInfo.Model,
+-				"mode":           profileInfo.Mode,
+-				"config_options": maps.Clone(profileInfo.ConfigOptions),
+-			}
+-		}
++		// The override is persisted only after a fresh, complete launch binding
++		// has been resolved. Persisting an ID-only snapshot would make a newly
++		// prepared session indistinguishable from a legacy pre-binding row.
++		session.AgentProfileSnapshot = profileSnapshot
+ 		if err := s.persistFullTaskSessionIfCurrent(ctx, session, observedState); err != nil {
+ 			return nil, fmt.Errorf("persist workflow session profile: %w", err)
+ 		}
+diff --git a/apps/backend/internal/orchestrator/task_operations_test.go b/apps/backend/internal/orchestrator/task_operations_test.go
+index dc9825dfc6ede44f9119bdc0599285891543a061..8bbdfb2e1d387aefb76a9eb44deee356b5bab888 100644
+--- a/apps/backend/internal/orchestrator/task_operations_test.go
++++ b/apps/backend/internal/orchestrator/task_operations_test.go
+@@ -3978,6 +3978,7 @@ func TestStartCreatedSession_WorkflowOverridePromotesPreparedWhenTaskHasNoPrimar
+ 	agentMgr := &mockAgentManager{
+ 		resolveProfileInfo: &executor.AgentProfileInfo{
+ 			ProfileID:     "profile-b",
++			Fingerprint:   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+ 			Mode:          "agent",
+ 			ConfigOptions: profileOptions,
+ 		},
+@@ -4027,6 +4028,9 @@ func TestStartCreatedSession_WorkflowOverridePromotesPreparedWhenTaskHasNoPrimar
+ 	if updated.AgentProfileSnapshot["mode"] != "agent" {
+ 		t.Fatalf("profile snapshot mode = %#v", updated.AgentProfileSnapshot["mode"])
+ 	}
++	if updated.AgentProfileSnapshot["fingerprint"] != "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
++		t.Fatalf("profile snapshot fingerprint = %#v", updated.AgentProfileSnapshot["fingerprint"])
++	}
+ 	profileOptions["reasoning_effort"] = "low"
+ 	configOptions, ok := updated.AgentProfileSnapshot["config_options"].(map[string]interface{})
+ 	if !ok || configOptions["reasoning_effort"] != "high" {
+@@ -4034,6 +4038,54 @@ func TestStartCreatedSession_WorkflowOverridePromotesPreparedWhenTaskHasNoPrimar
+ 	}
+ }
+ 
++func TestStartCreatedSession_WorkflowOverrideResolveFailureLeavesPreparedBindingUntouched(t *testing.T) {
++	ctx := context.Background()
++	repo := setupTestRepo(t)
++	seedTaskAndSession(t, repo, "task1", "session1", models.TaskSessionStateCreated)
++
++	dbTask, err := repo.GetTask(ctx, "task1")
++	if err != nil {
++		t.Fatalf("get task: %v", err)
++	}
++	dbTask.WorkflowStepID = "step1"
++	if err := repo.UpdateTask(ctx, dbTask); err != nil {
++		t.Fatalf("update task: %v", err)
++	}
++	prepared, err := repo.GetTaskSession(ctx, "session1")
++	if err != nil {
++		t.Fatalf("get prepared session: %v", err)
++	}
++	prepared.AgentProfileID = "profile-a"
++	prepared.AgentProfileSnapshot = map[string]interface{}{
++		"id":          "profile-a",
++		"fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++	}
++	if err := repo.UpdateTaskSession(ctx, prepared); err != nil {
++		t.Fatalf("persist prepared binding: %v", err)
++	}
++
++	stepGetter := newMockStepGetter()
++	stepGetter.steps["step1"] = &wfmodels.WorkflowStep{
++		ID: "step1", WorkflowID: "wf1", AgentProfileID: "profile-b",
++	}
++	taskRepo := newMockTaskRepo()
++	taskRepo.tasks["task1"] = &v1.Task{ID: "task1", Title: "Task", State: v1.TaskStateInProgress}
++	agentMgr := &mockAgentManager{resolveProfileErr: errors.New("sensitive profile storage detail")}
++	svc := createTestServiceWithScheduler(repo, stepGetter, taskRepo, agentMgr)
++
++	_, err = svc.StartCreatedSession(ctx, "task1", "session1", "profile-a", "desc", true, false, true, nil, nil)
++	if !errors.Is(err, lifecycle.ErrProfileDrift) || err.Error() != "BLOCKED_PROFILE_DRIFT" {
++		t.Fatalf("StartCreatedSession error = %v, want sanitized profile drift", err)
++	}
++	current, err := repo.GetTaskSession(ctx, "session1")
++	if err != nil {
++		t.Fatalf("reload prepared session: %v", err)
++	}
++	if current.AgentProfileID != "profile-a" || current.AgentProfileSnapshot["fingerprint"] != "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
++		t.Fatalf("failed override changed prepared binding: profile=%q snapshot=%#v", current.AgentProfileID, current.AgentProfileSnapshot)
++	}
++}
++
+ // TestStartCreatedSession_EmptyProfileFallsBackToWorkflowDefault pins the bug
+ // where an auto-started session prepared without an agent_profile_id (e.g. a
+ // task imported from Linear whose metadata agent_profile_id is empty) recorded
+@@ -4066,7 +4118,13 @@ func TestStartCreatedSession_EmptyProfileFallsBackToWorkflowDefault(t *testing.T
+ 
+ 	taskRepo := newMockTaskRepo()
+ 	taskRepo.tasks["task1"] = &v1.Task{ID: "task1", Title: "Test Task", State: v1.TaskStateInProgress}
+-	agentMgr := &mockAgentManager{repoForExecutionLookup: repo}
++	agentMgr := &mockAgentManager{
++		repoForExecutionLookup: repo,
++		resolveProfileInfo: &executor.AgentProfileInfo{
++			ProfileID:   "wf-default-profile",
++			Fingerprint: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
++		},
++	}
+ 	svc := createTestServiceWithScheduler(repo, stepGetter, taskRepo, agentMgr)
+ 	svc.messageCreator = &mockMessageCreator{}
+ 
+diff --git a/apps/backend/internal/task/service/service_turns.go b/apps/backend/internal/task/service/service_turns.go
+index d9f565cd425c1782e97f13e9e872501e487702ec..dbb0d2591e0da10ca2f80aae5bba76afcd5bacc8 100644
+--- a/apps/backend/internal/task/service/service_turns.go
++++ b/apps/backend/internal/task/service/service_turns.go
+@@ -666,6 +666,18 @@ func (s *Service) GetWorkspaceInfoForSession(ctx context.Context, taskID, sessio
+ 			}
+ 		}
+ 	}
++	// AgentProfileSnapshot is the durable prepare-time launch binding. Project
++	// it independently of ExecutorRunning so workspace-only recovery and a
++	// freshly prepared session cannot silently take the legacy empty-fingerprint
++	// path merely because no runtime row exists yet. Do this after merging the
++	// running row so that runtime metadata cannot replace the authoritative
++	// session binding. An explicitly malformed value is retained for the
++	// lifecycle parser to reject fail-closed.
++	if session.AgentProfileSnapshot != nil {
++		if fingerprint, exists := session.AgentProfileSnapshot["fingerprint"]; exists {
++			ensureWorkspaceMetadata(info)[lifecycle.MetadataKeyExpectedProfileFingerprint] = fingerprint
++		}
++	}
+ 
+ 	return info, nil
+ }
+diff --git a/apps/backend/internal/task/service/service_turns_test.go b/apps/backend/internal/task/service/service_turns_test.go
+index be200c65d73ef1b2e30b09e58d9812a2ee59736d..ea1e9ba0d5d5c80557fc2fbfa64ae6e4f52ef869 100644
+--- a/apps/backend/internal/task/service/service_turns_test.go
++++ b/apps/backend/internal/task/service/service_turns_test.go
+@@ -934,8 +934,12 @@ func TestGetWorkspaceInfoForSession_NoExecutorRunning(t *testing.T) {
+ 	now := time.Now().UTC()
+ 
+ 	session := &models.TaskSession{
+-		ID:        "session-1",
+-		TaskID:    "task-123",
++		ID:             "session-1",
++		TaskID:         "task-123",
++		AgentProfileID: "profile-1",
++		AgentProfileSnapshot: map[string]interface{}{
++			"fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++		},
+ 		State:     models.TaskSessionStateCompleted,
+ 		StartedAt: now,
+ 		UpdatedAt: now,
+@@ -958,6 +962,9 @@ func TestGetWorkspaceInfoForSession_NoExecutorRunning(t *testing.T) {
+ 	if info.ExecutorType != "" {
+ 		t.Errorf("expected empty ExecutorType, got %q", info.ExecutorType)
+ 	}
++	if got := info.Metadata[lifecycle.MetadataKeyExpectedProfileFingerprint]; got != "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
++		t.Fatalf("profile fingerprint metadata = %#v, want prepared session binding", got)
++	}
+ }
+ 
+ // TestGetWorkspaceInfoForSession_AlignsTaskEnvironmentIDOnFallback locks in
+-- 
+2.55.0
+

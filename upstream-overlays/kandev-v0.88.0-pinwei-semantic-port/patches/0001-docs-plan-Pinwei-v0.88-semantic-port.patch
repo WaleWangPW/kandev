@@ -1,0 +1,840 @@
+From af991f4006dd3b3bf13aedc466b99d68f95750ed Mon Sep 17 00:00:00 2001
+From: WaleWangPW <396218656@qq.com>
+Date: Sat, 15 Aug 2026 16:40:50 +0800
+Subject: [PATCH 01/22] docs: plan Pinwei v0.88 semantic port
+
+---
+ docs/plans/pinwei-v088-semantic-port/plan.md  | 224 ++++++++++++++++++
+ .../task-01-profile-launch-binding.md         |  24 ++
+ .../task-02-worktree-failure-atomicity.md     |  23 ++
+ ...task-03-environment-repo-generation-cas.md |  24 ++
+ .../task-04-central-admission.md              |  26 ++
+ .../task-05-reconcile-lifecycle.md            |  24 ++
+ .../task-06-terminal-db-only-actions.md       |  24 ++
+ .../task-07-consumer-integration.md           |  24 ++
+ .../task-08-migration-verification.md         |  26 ++
+ .../task-09-overlay-delivery.md               |  24 ++
+ .../task-10-runtime-handoff.md                |  24 ++
+ docs/specs/INDEX.md                           |   1 +
+ docs/specs/no-silent-model-fallback/spec.md   |  43 +++-
+ .../tasks/archived-resource-safety/spec.md    | 195 +++++++++++++++
+ 14 files changed, 705 insertions(+), 1 deletion(-)
+ create mode 100644 docs/plans/pinwei-v088-semantic-port/plan.md
+ create mode 100644 docs/plans/pinwei-v088-semantic-port/task-01-profile-launch-binding.md
+ create mode 100644 docs/plans/pinwei-v088-semantic-port/task-02-worktree-failure-atomicity.md
+ create mode 100644 docs/plans/pinwei-v088-semantic-port/task-03-environment-repo-generation-cas.md
+ create mode 100644 docs/plans/pinwei-v088-semantic-port/task-04-central-admission.md
+ create mode 100644 docs/plans/pinwei-v088-semantic-port/task-05-reconcile-lifecycle.md
+ create mode 100644 docs/plans/pinwei-v088-semantic-port/task-06-terminal-db-only-actions.md
+ create mode 100644 docs/plans/pinwei-v088-semantic-port/task-07-consumer-integration.md
+ create mode 100644 docs/plans/pinwei-v088-semantic-port/task-08-migration-verification.md
+ create mode 100644 docs/plans/pinwei-v088-semantic-port/task-09-overlay-delivery.md
+ create mode 100644 docs/plans/pinwei-v088-semantic-port/task-10-runtime-handoff.md
+ create mode 100644 docs/specs/tasks/archived-resource-safety/spec.md
+
+diff --git a/docs/plans/pinwei-v088-semantic-port/plan.md b/docs/plans/pinwei-v088-semantic-port/plan.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..a4fdf17e9fa81b5b28fdb57f19278f4d21e8f78d
+--- /dev/null
++++ b/docs/plans/pinwei-v088-semantic-port/plan.md
+@@ -0,0 +1,224 @@
++---
++spec: docs/specs/tasks/archived-resource-safety/spec.md
++related_specs:
++  - docs/specs/no-silent-model-fallback/spec.md
++  - docs/specs/tasks/runtime-cleanup.md
++  - docs/specs/system-page/storage-maintenance.md
++created: 2026-08-15
++status: draft
++---
++
++# Implementation Plan: Pinwei v0.88 Semantic Port
++
++## Overview
++
++Port the accepted Pinwei safety contracts from the v0.85 lineage onto the clean
++official `v0.88.0` commit `cab9eaf19d997bb4c8020dd263ddc60d5b035b64`.
++The port preserves behavior, not old patches: v0.88 model/profile and
++`task_environment_repos` ownership are authoritative, and removed
++`task_session_worktrees` code is never restored. Each layer is a clean immutable
++successor with targeted tests before the next layer begins.
++
++Confirmed root causes:
++
++- v0.88 preserves a missing configured model but still heals a user-modified
++  mode, has no prepared-execution profile fingerprint, and may launch with a
++  partial environment when secret resolution fails.
++- Worktree cleanup still continues branch/store/cache mutation after physical
++  removal failure.
++- v0.88 has no generation-bound release contract for
++  `task_environment_repos`; an old cleanup retry can overwrite a reactivated
++  reference.
++- The Pinwei central admission and archived-resource DB-only lifecycle are
++  private v0.85 capabilities and are absent from upstream v0.88.
++
++---
++
++## Backend
++
++### Profile launch binding
++
++Amend `internal/agent/settings/controller/reconciler.go` so user-modified
++non-empty mode/model values survive capability drift. Add a deterministic,
++secret-free profile fingerprint in `internal/agent/runtime/lifecycle` and carry
++it through lifecycle and orchestrator launch DTOs. Resolve the entire profile
++environment atomically: secret store absence, missing references, or reveal
++failure returns sanitized `BLOCKED_PROFILE_SECRET` with no partial environment.
++Every ACP, passthrough, resume, recovery, startup, and executor launch verifies
++the fingerprint and returns `BLOCKED_PROFILE_DRIFT` before process creation on
++mismatch. Legacy rows without a fingerprint retain the compatibility path.
++
++### Worktree failure atomicity
++
++Change `internal/worktree/manager_cleanup.go` so `removeWorktreeDir` failure
++returns immediately and preserves branch, store row, cache, path, and Git
++registration. Batch cleanup tracks successful items and evicts only their
++caches. This task does not claim rollback after a successful physical removal;
++central admission remains the authority for broader DB/filesystem atomicity.
++
++### Environment-repository generation CAS
++
++Introduce a v0.88-native release snapshot and explicit Store method for
++`task_environment_repos`. Bind all fourteen persisted columns. The
++operation-bound identity snapshot is `id`, `task_environment_id`,
++`repository_id`, `branch_slug`, `worktree_id`, `worktree_path`,
++`worktree_branch`, and `created_at`; mutable CAS generation is `position`,
++`error_message`, `status`, `updated_at`, `merged_at`, and `deleted_at`. SQLite
++compares canonical instants and updates with raw
++lexical tokens loaded in the same transaction. PostgreSQL uses typed timestamps
++and row locks. Complete tombstones are zero-write no-ops; row replacement,
++partial or reactivated tombstones, or drift in any individual column returns a
++typed fail-closed error. The test matrix mutates every column independently.
++
++### Central physical-delete admission
++
++Port `internal/physicaldelete` as the only managed-root mutation authority.
++Admission owns typed actions/resources, canonical path and Git common-dir
++validation, complete authoritative inventory, lock ordering, and provisional
++creation leases. `BeginProvisional` and `Execute` share one lock domain. No
++managed-root physical executor is available in this release; missing admission
++or executor denies before consumer repository, Git, filesystem, or runtime
++mutation. Inventory decodes generic cleanup and strict versioned anchors from
++the existing cleanup-job table and rejects unknown/future/malformed rows.
++
++Wire the two restart-scoped flags through `profiles.yaml`, typed config,
++`runtimeflags.Registry`, feature boot payload, and frontend feature defaults.
++All shipped profiles remain false.
++
++### Reconcile persistence and service
++
++Port strict canonical v2/v3 snapshot models, fail-closed schema migration,
++partial unique active-scope index verification, exact replay admission,
++participant-aware lifecycle gates, and repository methods to the v0.88 schema.
++Generic cleanup selectors and completion APIs exclude versioned jobs in every
++state. Direct, startup, periodic, and retry paths use a shared completion helper,
++same-attempt interrupted recovery, stable participant locks, and exact task,
++association, runtime, branch, path, and generation validation.
++
++Unarchive uses one sealed serializable repository transaction for exact task
++generation CAS, generic cleanup cancellation, v2/v3 validation, and association
++restore. Historical retained generations are strict active no-ops and never
++expand current participant cleanup.
++
++### Pending move, absent release, and environment retirement
++
++Port only the accepted final pending-move behavior, including historical
++terminal sessions and exact seven-field pending-row generation. Port the sealed
++absent-target release and stopped/failed environment retirement routes.
++Environment retirement scans every active versioned anchor and treats a v3 task
++participant as protected even when it is not the coordinator. It recognizes
++only the explicit workspace-group inventory states accepted by the fixed v0.85
++successor; all unknown resource kinds/states remain globally fail-closed.
++
++### Consumer integration
++
++Replace every managed-root physical mutation entry with central admission:
++worktree cleanup/recreate, task/session/workspace lifecycle, Office GC, system
++storage/quarantine, Git worktree removal, agentctl cleanup, database reset, and
++fallback removal paths. Ordinary user workspace-file edit/delete APIs remain
++outside managed-root physical cleanup. No WebSocket, MCP, or Office mutation
++route is added for archived-resource operations.
++
++---
++
++## Frontend
++
++No bespoke archived-resource action UI is added. Extend only the typed feature
++contract/defaults required by the generic Feature Toggles surface. Frontend
++validation runs only when dependencies already exist; this plan does not
++authorize installing them.
++
++---
++
++## Tests
++
++- **Profile preservation and fingerprint:** table-driven reconciler, lifecycle,
++  passthrough, startup, resume, executor, and secret-failure tests in the
++  affected packages. Assert zero process/env on block and sanitized outputs.
++- **Worktree removal failure:** real Git worktree fixture proves path,
++  registration, branch OID, store row, and cache remain unchanged.
++- **Environment-repo release:** SQLite replay/partial/reactivation/offset/1us
++  drift and channel-barrier concurrency; env-gated PostgreSQL typed CAS.
++- **Admission:** action/resource/path/common-dir/lock/provisional matrices and
++  nil-admission zero-touch tests for every creation and deletion consumer.
++- **Persistence:** SQLite fresh/legacy/half-migrated/replay and exact partial
++  index verification. PostgreSQL DDL/query behavior remains env-gated.
++- **Reconcile:** canonical JSON adversarial matrix, 0/128/129 association bounds,
++  exact replay/conflict, v2/v3 atomic completion, same-attempt recovery,
++  participant lock convergence, unarchive generations, and disabled zero-touch.
++- **Pending/release/retirement:** exact generation, stale/historical, participant
++  protection, outcome-unknown, and non-target byte-equivalence tests.
++- **Integration:** handlers with real auth middleware, assembled routes off/on,
++  generic cleanup regression, storage/Office/task/worktree consumers, full
++  backend compile, focused race, vet, gofmt, and diff checks.
++
++No test reads ambient `KANDEV_TEST_POSTGRES_DSN`. Commands explicitly unset it;
++PostgreSQL runtime is reported `NOT_RUN` unless a separately authorized isolated
++DSN exists.
++
++---
++
++## Verification Results
++
++Pending. Each task records exact commands and results before its status changes
++to done.
++
++---
++
++## Implementation Waves And Parallel Candidates
++
++The primary execution order is sequential because later layers depend on exact
++contracts and schemas from earlier layers.
++
++Wave 1:
++
++- [ ] [Task 01: profile launch binding](task-01-profile-launch-binding.md)
++- [ ] [Task 02: worktree failure atomicity](task-02-worktree-failure-atomicity.md)
++
++Task 02 is a parallel candidate only because its files are disjoint from Task
++01; user authorization is still required before delegation.
++
++Wave 2:
++
++- [ ] [Task 03: environment-repository generation CAS](task-03-environment-repo-generation-cas.md)
++
++Wave 3:
++
++- [ ] [Task 04: central physical-delete admission](task-04-central-admission.md)
++
++Wave 4:
++
++- [ ] [Task 05: reconcile persistence and lifecycle](task-05-reconcile-lifecycle.md)
++
++Wave 5:
++
++- [ ] [Task 06: pending move, release, and retirement](task-06-terminal-db-only-actions.md)
++
++Wave 6:
++
++- [ ] [Task 07: managed-root consumer integration](task-07-consumer-integration.md)
++
++Wave 7:
++
++- [ ] [Task 08: migration and adversarial verification](task-08-migration-verification.md)
++
++Wave 8:
++
++- [ ] [Task 09: fixed-object and private overlay delivery](task-09-overlay-delivery.md)
++
++Wave 9:
++
++- [ ] [Task 10: offline staging and controlled runtime readback](task-10-runtime-handoff.md)
++
++## Risks
++
++- v0.88 normalized environment ownership is not source-compatible with the old
++  session-worktree implementation; copying old SQL is a safety failure.
++- Full PostgreSQL runtime behavior remains unknown without an isolated DSN and
++  must not be inferred from SQLite.
++- The installed v0.85 database contains durable retained anchors. Upgrade
++  migrations must prove byte-equivalent preservation before any runtime canary.
++- Two pre-existing upstream worktrees and the documented Pinwei dirty/HOLD set
++  remain out of scope and must not be read, reset, cleaned, or retired.
++- Physical execution remains deliberately unavailable. This plan does not make
++  disk reclamation or dirty-worktree cleanup a completion criterion.
+diff --git a/docs/plans/pinwei-v088-semantic-port/task-01-profile-launch-binding.md b/docs/plans/pinwei-v088-semantic-port/task-01-profile-launch-binding.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..756fe19a10e14f15bc5b3c5fee9cf96f52cdeaa6
+--- /dev/null
++++ b/docs/plans/pinwei-v088-semantic-port/task-01-profile-launch-binding.md
+@@ -0,0 +1,24 @@
++---
++id: "01-profile-launch-binding"
++title: "Preserve explicit profile launch bindings"
++status: pending
++wave: 1
++depends_on: []
++plan: "plan.md"
++spec: "../../specs/no-silent-model-fallback/spec.md"
++---
++
++# Task 01: Preserve explicit profile launch bindings
++
++- **Acceptance:** User-modified non-empty model/mode values survive catalog drift; system-managed empty fields still seed normally.
++- **Acceptance:** Prepared executions carry a secret-free deterministic fingerprint; every launch path blocks drift before process creation while legacy empty fingerprints remain compatible.
++- **Acceptance:** Secret-store or reveal failure returns sanitized `BLOCKED_PROFILE_SECRET`, supplies no partial environment, and starts no process.
++- **Verification:** `cd apps/backend && env -u KANDEV_TEST_POSTGRES_DSN go test ./internal/agent/settings/controller ./internal/agent/runtime/lifecycle ./internal/orchestrator/executor ./internal/backendapp && env -u KANDEV_TEST_POSTGRES_DSN go test -race ./internal/agent/runtime/lifecycle ./internal/orchestrator/executor && env -u KANDEV_TEST_POSTGRES_DSN go vet ./internal/agent/settings/controller ./internal/agent/runtime/lifecycle ./internal/orchestrator/executor ./internal/backendapp`
++- **Files likely touched:** `internal/agent/settings/controller/reconciler.go`; `internal/agent/runtime/lifecycle/profile_env.go`; new `profile_fingerprint.go`; lifecycle resolver/types/manager launch/startup/execution/passthrough files; `internal/backendapp/adapters.go`; `internal/orchestrator/executor/executor*.go`; adjacent tests.
++- **Dependencies:** None.
++- **Parallelism:** sequential; Task 02 is disjoint and may be delegated only by explicit user instruction.
++- **Inputs:** no-silent-model-fallback persistent binding amendment; plan Profile launch binding section.
++
++## Results
++
++Pending.
+diff --git a/docs/plans/pinwei-v088-semantic-port/task-02-worktree-failure-atomicity.md b/docs/plans/pinwei-v088-semantic-port/task-02-worktree-failure-atomicity.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..64c8fdbb5aaa89664f454f010d7ef66dec7d3187
+--- /dev/null
++++ b/docs/plans/pinwei-v088-semantic-port/task-02-worktree-failure-atomicity.md
+@@ -0,0 +1,23 @@
++---
++id: "02-worktree-failure-atomicity"
++title: "Preserve worktrees when physical removal fails"
++status: pending
++wave: 1
++depends_on: []
++plan: "plan.md"
++spec: "../../specs/tasks/archived-resource-safety/spec.md"
++---
++
++# Task 02: Preserve worktrees when physical removal fails
++
++- **Acceptance:** A physical worktree removal error causes zero subsequent branch, store, cache, path, or Git-registration mutation.
++- **Acceptance:** Batch cleanup evicts cache only for successful items and returns the first failure without hiding later results.
++- **Verification:** `cd apps/backend && env -u KANDEV_TEST_POSTGRES_DSN go test ./internal/worktree -run 'Cleanup|Remove|SharedReference' -count=1 && env -u KANDEV_TEST_POSTGRES_DSN go test -race ./internal/worktree -run 'Cleanup|Remove|SharedReference' -count=1 && env -u KANDEV_TEST_POSTGRES_DSN go vet ./internal/worktree`
++- **Files likely touched:** `internal/worktree/manager_cleanup.go`; new `internal/worktree/manager_cleanup_error_test.go`; existing cleanup fixture tests only when needed.
++- **Dependencies:** None.
++- **Parallelism:** parallel-safe with Task 01; exact files are disjoint and no shared schema/config is touched.
++- **Inputs:** archived-resource-safety Failure modes; plan Worktree failure atomicity section.
++
++## Results
++
++Pending.
+diff --git a/docs/plans/pinwei-v088-semantic-port/task-03-environment-repo-generation-cas.md b/docs/plans/pinwei-v088-semantic-port/task-03-environment-repo-generation-cas.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..bcab66f2e67f22c3b9b08bc126fe78f196154d92
+--- /dev/null
++++ b/docs/plans/pinwei-v088-semantic-port/task-03-environment-repo-generation-cas.md
+@@ -0,0 +1,24 @@
++---
++id: "03-environment-repo-generation-cas"
++title: "Add environment-repository generation CAS"
++status: pending
++wave: 2
++depends_on: ["02-worktree-failure-atomicity"]
++plan: "plan.md"
++spec: "../../specs/tasks/archived-resource-safety/spec.md"
++---
++
++# Task 03: Add environment-repository generation CAS
++
++- **Acceptance:** Release binds all fourteen v0.88 `task_environment_repos` columns: operation-bound identity snapshot `id`, `task_environment_id`, `repository_id`, `branch_slug`, `worktree_id`, `worktree_path`, `worktree_branch`, `created_at`; mutable CAS generation `position`, `error_message`, `status`, `updated_at`, `merged_at`, `deleted_at`. Complete tombstone replay is byte-stable and zero-write.
++- **Acceptance:** Row replacement and an independent drift mutation for each of the fourteen columns, partial tombstone, reactivation, and concurrent stale release all fail closed without overwriting a newer generation.
++- **Acceptance:** SQLite raw lexical and PostgreSQL typed timestamp behavior have explicit tests; PostgreSQL is `NOT_RUN` when the isolated DSN is absent.
++- **Verification:** `cd apps/backend && env -u KANDEV_TEST_POSTGRES_DSN go test ./internal/worktree ./internal/agent/runtime/lifecycle -run 'Release|Cleanup|Environment' -count=1 && env -u KANDEV_TEST_POSTGRES_DSN go test -race ./internal/worktree -run 'Release|Cleanup|Environment' -count=1 && env -u KANDEV_TEST_POSTGRES_DSN go vet ./internal/worktree ./internal/agent/runtime/lifecycle`
++- **Files likely touched:** `internal/worktree/errors.go`; `manager.go`; `manager_cleanup.go`; `store.go`; new generation tests; `store_postgres_test.go`; compile-affected lifecycle fakes.
++- **Dependencies:** Task 02.
++- **Parallelism:** sequential because it extends the cleanup contract from Task 02.
++- **Inputs:** archived-resource-safety Data model; exact v0.88 `task_environment_repos` schema.
++
++## Results
++
++Pending.
+diff --git a/docs/plans/pinwei-v088-semantic-port/task-04-central-admission.md b/docs/plans/pinwei-v088-semantic-port/task-04-central-admission.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..74f94cc7464e009768604ec9add3a20b1ca36d26
+--- /dev/null
++++ b/docs/plans/pinwei-v088-semantic-port/task-04-central-admission.md
+@@ -0,0 +1,26 @@
++---
++id: "04-central-admission"
++title: "Port central physical-delete admission"
++status: pending
++wave: 3
++depends_on: ["03-environment-repo-generation-cas"]
++plan: "plan.md"
++spec: "../../specs/tasks/archived-resource-safety/spec.md"
++---
++
++# Task 04: Port central physical-delete admission
++
++- **Acceptance:** All typed managed-root actions share canonical inventory, locks, and provisional leases; nil admission fails before dependent repository/Git/filesystem/runtime access.
++- **Acceptance:** Unknown/future/malformed cleanup rows fail inventory closed, while known generic lifecycle rows and strict archived-resource anchors remain distinct.
++- **Acceptance:** Both shipped flags are complete across backend/frontend contracts, disabled in all profiles, and no physical executor can succeed.
++- **Acceptance:** A dependency-free static backend test reads the shipped frontend feature types/defaults and proves the exact two keys default false. When existing frontend dependencies are present, the focused Vitest contract also passes; when absent, verification records `FRONTEND_NOT_RUN_DEPENDENCIES_ABSENT` and does not install anything.
++- **Verification:** `cd apps/backend && env -u KANDEV_TEST_POSTGRES_DSN go test ./internal/physicaldelete ./internal/worktree ./internal/common/config ./internal/runtimeflags ./internal/profiles ./internal/backendapp -count=1 && env -u KANDEV_TEST_POSTGRES_DSN go test ./internal/backendapp -run FeatureContract -count=1 && env -u KANDEV_TEST_POSTGRES_DSN go test -race ./internal/physicaldelete ./internal/worktree -count=1 && env -u KANDEV_TEST_POSTGRES_DSN go vet ./internal/physicaldelete ./internal/worktree ./internal/backendapp`
++- **Verification:** From the repository root: `if test -d apps/node_modules; then cd apps && pnpm --filter @kandev/web test -- lib/state/slices/features/features-contract.test.ts lib/state/slices/features/features-slice.test.ts app/actions/features.test.ts lib/api/domains/runtime-flags-api.test.ts; else echo FRONTEND_NOT_RUN_DEPENDENCIES_ABSENT; fi`. Dependency installation is forbidden.
++- **Files likely touched:** new `internal/physicaldelete/*`; worktree admission seams; `profiles.yaml`; typed config/runtimeflags/profiles; backend boot wiring; frontend feature types/defaults; focused tests.
++- **Dependencies:** Task 03.
++- **Parallelism:** sequential because every later physical consumer depends on this contract.
++- **Inputs:** archived-resource-safety What/Failure modes; ADR 0009; runtime feature-flag ADRs.
++
++## Results
++
++Pending.
+diff --git a/docs/plans/pinwei-v088-semantic-port/task-05-reconcile-lifecycle.md b/docs/plans/pinwei-v088-semantic-port/task-05-reconcile-lifecycle.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..6331b85ba57cdeede6a49723fece4dd713f7cc5b
+--- /dev/null
++++ b/docs/plans/pinwei-v088-semantic-port/task-05-reconcile-lifecycle.md
+@@ -0,0 +1,24 @@
++---
++id: "05-reconcile-lifecycle"
++title: "Port retained-anchor reconcile lifecycle"
++status: pending
++wave: 4
++depends_on: ["01-profile-launch-binding", "04-central-admission"]
++plan: "plan.md"
++spec: "../../specs/tasks/archived-resource-safety/spec.md"
++---
++
++# Task 05: Port retained-anchor reconcile lifecycle
++
++- **Acceptance:** Strict v2/v3 canonical admission, active-scope uniqueness, exact replay, participant-aware lifecycle gates, and generic-job isolation pass fresh/legacy/replay tests.
++- **Acceptance:** Completion, unarchive, and interrupted same-attempt recovery are atomic under stable participant locks; stale generations never affect reactivated rows.
++- **Acceptance:** Disabled routes/workers are zero-touch; enabled routes require real install-admin auth and return metadata only.
++- **Verification:** `cd apps/backend && env -u KANDEV_TEST_POSTGRES_DSN go test ./internal/task/models ./internal/task/repository/sqlite ./internal/task/service ./internal/task/handlers ./internal/backendapp -run 'ArchivedResource|Reconcile|Unarchive|FeatureContract' -count=1 && env -u KANDEV_TEST_POSTGRES_DSN go test -race ./internal/task/repository/sqlite ./internal/task/service ./internal/task/handlers -run 'ArchivedResource|Reconcile|Unarchive' -count=1 && env -u KANDEV_TEST_POSTGRES_DSN go vet ./internal/task/... ./internal/backendapp`
++- **Files likely touched:** task archived-resource models; repository interfaces and SQLite migrations/reconcile files; service reconcile/unarchive/worker files; handlers/routes; backend wiring; adjacent tests.
++- **Dependencies:** Tasks 01 and 04; this is the mandatory merge point for the profile-binding and archived-resource safety chains.
++- **Parallelism:** sequential because models, schema, service, and routes form one security boundary.
++- **Inputs:** archived-resource-safety Data model/API/State machine; accepted v0.85 final snapshots as behavioral evidence only.
++
++## Results
++
++Pending.
+diff --git a/docs/plans/pinwei-v088-semantic-port/task-06-terminal-db-only-actions.md b/docs/plans/pinwei-v088-semantic-port/task-06-terminal-db-only-actions.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..7982ab0f4cd82de8535d273abcd7e103a24d8b61
+--- /dev/null
++++ b/docs/plans/pinwei-v088-semantic-port/task-06-terminal-db-only-actions.md
+@@ -0,0 +1,24 @@
++---
++id: "06-terminal-db-only-actions"
++title: "Port terminal DB-only archived-resource actions"
++status: pending
++wave: 5
++depends_on: ["05-reconcile-lifecycle"]
++plan: "plan.md"
++spec: "../../specs/tasks/archived-resource-safety/spec.md"
++---
++
++# Task 06: Port terminal DB-only archived-resource actions
++
++- **Acceptance:** Historical-session stale pending moves cancel only by exact generation and change no anchor, association, task, Git, or filesystem state.
++- **Acceptance:** Absent-target release is sealed behind central admission and produces no physical/Git action.
++- **Acceptance:** Environment retirement is one serializable exact-set transaction and blocks every active v2/v3 participant, including non-coordinators and malformed/unknown inventory.
++- **Verification:** `cd apps/backend && env -u KANDEV_TEST_POSTGRES_DSN go test ./internal/task/models ./internal/task/repository/sqlite ./internal/task/service ./internal/task/handlers ./internal/physicaldelete -run 'PendingMove|ReleaseAbsent|EnvironmentRetirement|Inventory' -count=1 && env -u KANDEV_TEST_POSTGRES_DSN go test -race ./internal/task/repository/sqlite ./internal/task/service -run 'PendingMove|ReleaseAbsent|EnvironmentRetirement' -count=1 && env -u KANDEV_TEST_POSTGRES_DSN go vet ./internal/task/... ./internal/physicaldelete`
++- **Files likely touched:** pending-move, release, and environment-retirement models/repository/service/handler files; physicaldelete inventory; startup persistence and focused tests.
++- **Dependencies:** Task 05.
++- **Parallelism:** sequential because all three actions consume retained-anchor identity.
++- **Inputs:** archived-resource-safety API/Failure modes/Scenarios.
++
++## Results
++
++Pending.
+diff --git a/docs/plans/pinwei-v088-semantic-port/task-07-consumer-integration.md b/docs/plans/pinwei-v088-semantic-port/task-07-consumer-integration.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..3232a0ae22d38ab5360945e927259353e4293fec
+--- /dev/null
++++ b/docs/plans/pinwei-v088-semantic-port/task-07-consumer-integration.md
+@@ -0,0 +1,24 @@
++---
++id: "07-consumer-integration"
++title: "Route managed-root consumers through central admission"
++status: pending
++wave: 6
++depends_on: ["06-terminal-db-only-actions"]
++plan: "plan.md"
++spec: "../../specs/tasks/archived-resource-safety/spec.md"
++---
++
++# Task 07: Route managed-root consumers through central admission
++
++- **Acceptance:** Worktree, task/session/workspace, Office GC, storage/quarantine, agentctl, database reset, recreate, and fallback deletion paths all deny before mutation when admission/executor is unavailable.
++- **Acceptance:** Normal user workspace-file edit/delete APIs remain functional and explicitly outside managed-root cleanup.
++- **Acceptance:** No alternate WebSocket, MCP, Office, or generic cleanup route can mutate versioned anchors or perform physical actions.
++- **Verification:** `cd apps/backend && env -u KANDEV_TEST_POSTGRES_DSN go test ./internal/worktree ./internal/task/... ./internal/office/... ./internal/system/storage/... ./internal/agentctl/server/process ./internal/backendapp -run 'Admission|Cleanup|Delete|Recreate|ArchivedResource' -count=1 && env -u KANDEV_TEST_POSTGRES_DSN go test -race ./internal/worktree ./internal/task/service ./internal/system/storage -run 'Admission|Cleanup|ArchivedResource' -count=1`
++- **Files likely touched:** managed-root consumer files discovered by the central inventory; their focused tests; no unrelated file-edit handlers.
++- **Dependencies:** Task 06.
++- **Parallelism:** sequential because this is the global mutation-entry closure.
++- **Inputs:** archived-resource-safety What/Out of scope; ADR 0009 and storage maintenance spec.
++
++## Results
++
++Pending.
+diff --git a/docs/plans/pinwei-v088-semantic-port/task-08-migration-verification.md b/docs/plans/pinwei-v088-semantic-port/task-08-migration-verification.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..68a992e23cb62bc2e77282fe8240acadbb27664f
+--- /dev/null
++++ b/docs/plans/pinwei-v088-semantic-port/task-08-migration-verification.md
+@@ -0,0 +1,26 @@
++---
++id: "08-migration-verification"
++title: "Verify migrations and adversarial safety matrix"
++status: pending
++wave: 7
++depends_on: ["01-profile-launch-binding", "07-consumer-integration"]
++plan: "plan.md"
++spec: "../../specs/tasks/archived-resource-safety/spec.md"
++---
++
++# Task 08: Verify migrations and adversarial safety matrix
++
++- **Acceptance:** SQLite fresh, v0.88 legacy, half-migrated, replay, rollback, malformed-index, and existing retained-anchor preservation matrices pass without physical effects.
++- **Acceptance:** All targeted ordinary/race/vet checks and the full backend compile/test gate have classified results; PostgreSQL is honestly PASS or `NOT_RUN`, never inferred.
++- **Acceptance:** The dependency-free backend/frontend feature-contract test passes. Focused frontend tests pass when the existing dependency tree is present, or the receipt explicitly says `FRONTEND_NOT_RUN_DEPENDENCIES_ABSENT`; dependencies are never installed for this task.
++- **Acceptance:** Final diff is formatted, contains no unexpected paths, and leaves the source worktree clean after commit.
++- **Verification:** `cd apps/backend && env -u KANDEV_TEST_POSTGRES_DSN go test ./... -count=1 && env -u KANDEV_TEST_POSTGRES_DSN go test ./internal/backendapp -run FeatureContract -count=1 && env -u KANDEV_TEST_POSTGRES_DSN go test -race ./internal/physicaldelete ./internal/worktree ./internal/task/repository/sqlite ./internal/task/service ./internal/task/handlers ./internal/agent/runtime/lifecycle ./internal/orchestrator/executor -count=1 && env -u KANDEV_TEST_POSTGRES_DSN go vet ./... && test -z "$(gofmt -l internal)" && git -C ../.. diff --check`
++- **Verification:** From the repository root: `if test -d apps/node_modules; then cd apps && pnpm --filter @kandev/web test -- lib/state/slices/features/features-contract.test.ts lib/state/slices/features/features-slice.test.ts app/actions/features.test.ts lib/api/domains/runtime-flags-api.test.ts; else echo FRONTEND_NOT_RUN_DEPENDENCIES_ABSENT; fi`; record either PASS or the explicit `NOT_RUN` receipt. Dependency installation is forbidden.
++- **Files likely touched:** tests and migration fixtures already owned by Tasks 01-07; plan/task result sections.
++- **Dependencies:** Tasks 01 and 07; source acceptance cannot bypass either chain.
++- **Parallelism:** sequential final source acceptance.
++- **Inputs:** all spec scenarios and task results.
++
++## Results
++
++Pending.
+diff --git a/docs/plans/pinwei-v088-semantic-port/task-09-overlay-delivery.md b/docs/plans/pinwei-v088-semantic-port/task-09-overlay-delivery.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..a55c995980d858f5b7f2384618cdae24ce539bff
+--- /dev/null
++++ b/docs/plans/pinwei-v088-semantic-port/task-09-overlay-delivery.md
+@@ -0,0 +1,24 @@
++---
++id: "09-overlay-delivery"
++title: "Freeze and deliver the private v0.88 overlay"
++status: pending
++wave: 8
++depends_on: ["08-migration-verification"]
++plan: "plan.md"
++spec: "../../specs/tasks/archived-resource-safety/spec.md"
++---
++
++# Task 09: Freeze and deliver the private v0.88 overlay
++
++- **Acceptance:** Independent read-only review binds parent/HEAD/tree/path closure and reproduces all security-critical task checks from the fixed commit object.
++- **Acceptance:** A minimal private overlay contains only manifest, exact binary/full-index patch, source/receipt/security docs, and verifier; fresh archive application yields the accepted source tree.
++- **Acceptance:** One normal private push and one Draft PR read back the exact head; no public push, Ready, merge, rebase, or force-push occurs.
++- **Verification:** Run the overlay's checksum-bound verifier from a fresh archive with `KANDEV_TEST_POSTGRES_DSN` unset, then read back the private branch and Draft PR head/state.
++- **Files likely touched:** private `upstream-overlays/kandev-v0.88.0-pinwei-semantic-port/` package only; source worktree is read-only after freeze.
++- **Dependencies:** Task 08.
++- **Parallelism:** sequential fixed-object handoff.
++- **Inputs:** accepted source commit and all verification receipts.
++
++## Results
++
++Pending.
+diff --git a/docs/plans/pinwei-v088-semantic-port/task-10-runtime-handoff.md b/docs/plans/pinwei-v088-semantic-port/task-10-runtime-handoff.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..5f13b6fcd8078b9ae0de5bab90652ccd65da2040
+--- /dev/null
++++ b/docs/plans/pinwei-v088-semantic-port/task-10-runtime-handoff.md
+@@ -0,0 +1,24 @@
++---
++id: "10-runtime-handoff"
++title: "Build staging and perform controlled runtime readback"
++status: pending
++wave: 9
++depends_on: ["09-overlay-delivery"]
++plan: "plan.md"
++spec: "../../specs/tasks/archived-resource-safety/spec.md"
++---
++
++# Task 10: Build staging and perform controlled runtime readback
++
++- **Acceptance:** An offline arm64 backend/staging App is checksum-bound, signed, uses the verified static assets, and has zero open handles before installation.
++- **Acceptance:** A completed official backup and closed listener/supervisor/boot/queue/executor/flag gate precede installation; failure permits only the fixed rollback.
++- **Acceptance:** Post-restart readback proves exact binary/version/signature/assets, retained-anchor preservation, `auth=true`, reconcile disabled, physical release disabled, and no physical action. Only then may the Company-AI Root rebind proceed outside this repository plan.
++- **Verification:** Use the checksum-bound deployment manifest, official backup/restart capabilities, authenticated metadata-only readback, and Inventory V4-style retained-anchor recomputation; record every exact object and outcome in Results.
++- **Files likely touched:** no source files after freeze; temporary staging and fixed deployment manifest only.
++- **Dependencies:** Task 09.
++- **Parallelism:** sequential operational handoff.
++- **Inputs:** accepted source/overlay fixed objects and installed-runtime safety gates.
++
++## Results
++
++Pending.
+diff --git a/docs/specs/INDEX.md b/docs/specs/INDEX.md
+index 4cfc777756831be68d85ee9510055b39df1cc8ab..a227f68fc4511f2b0dab50aa6bce964eac98a23a 100644
+--- a/docs/specs/INDEX.md
++++ b/docs/specs/INDEX.md
+@@ -86,6 +86,7 @@ Kandev's task model: documents, execution stages, labels, blocker escalation, su
+ | [subtree-controls](tasks/subtree-controls.md) | shipped |
+ | [blocked-task-escalation](tasks/blocked-task-escalation.md) | draft |
+ | [runtime-cleanup](tasks/runtime-cleanup.md) | draft |
++| [archived-resource-safety](tasks/archived-resource-safety/spec.md) | draft |
+ | [session-delete-resource-cleanup](session-delete-resource-cleanup/spec.md) | draft |
+ | [archive-confirmation](tasks/archive-confirmation.md) | shipped |
+ | [link-existing-task-github-issue](tasks/link-existing-task-github-issue.md) | building |
+diff --git a/docs/specs/no-silent-model-fallback/spec.md b/docs/specs/no-silent-model-fallback/spec.md
+index bbcdc4abeccdb96946d7b4bb6209b0c5d0ae2290..39f18c9499e52aabbb842000d9e3b8a8514d627a 100644
+--- a/docs/specs/no-silent-model-fallback/spec.md
++++ b/docs/specs/no-silent-model-fallback/spec.md
+@@ -1,6 +1,6 @@
+ # No Silent Model Fallback
+ 
+-**Status**: approved (design package; amended 2026-08-09)
++**Status**: approved (design package; amended 2026-08-15)
+ **Date**: 2026-08-04
+ **Slug**: `no-silent-model-fallback`
+ 
+@@ -392,3 +392,44 @@ explicitly enable the toggle — that opt-in is the point of the feature.
+ - **Hover is supplementary**: every info icon is focusable, and coarse-pointer
+   devices receive the same content in a drawer. The visible option helper copy
+   remains the baseline explanation.
++
++## Persistent launch binding amendment
++
++An explicit profile selection remains authoritative between task preparation and
++process launch. Kandev derives a deterministic, secret-free SHA-256 fingerprint
++from every launch-relevant profile field, stores it with the prepared execution,
++and verifies the same fingerprint immediately before every initial launch,
++resume, recovery launch, and passthrough launch.
++
++- A user-modified, non-empty model or mode is never replaced merely because the
++  current capability catalog does not advertise it. System-managed profiles may
++  still seed empty fields and reconcile defaults.
++- A legacy prepared execution without a fingerprint remains launchable under the
++  compatibility path. Once a fingerprint exists, a mismatch fails closed with a
++  sanitized `BLOCKED_PROFILE_DRIFT` classification and starts no agent process.
++- The fingerprint contains no resolved secret value, secret identifier, token,
++  raw command prefix, or other credential material. Logs and API errors expose
++  only the classification and the digest when needed for correlation.
++- Resolving a profile environment is atomic. If the secret store is unavailable,
++  a referenced secret is missing, or revealing it fails, the launch fails with
++  sanitized `BLOCKED_PROFILE_SECRET`; Kandev supplies no partial environment and
++  starts no agent process.
++- ACP, passthrough, initial launch, resume, startup recovery, executor launch, and
++  office-driven launch use the same binding and secret-failure outcome. No path
++  silently falls back to a different persisted profile or a partial environment.
++
++### Binding scenarios
++
++- **GIVEN** a user-modified profile with a non-empty mode that is absent from the
++  current catalog, **WHEN** profile reconciliation runs, **THEN** the stored mode
++  remains unchanged.
++- **GIVEN** a prepared execution whose profile fingerprint differs from the
++  current profile, **WHEN** any launch or resume path runs, **THEN** the result is
++  `BLOCKED_PROFILE_DRIFT` and no process starts.
++- **GIVEN** a legacy prepared execution without a fingerprint, **WHEN** its
++  profile is otherwise valid, **THEN** the compatibility launch path remains
++  available.
++- **GIVEN** one required profile secret cannot be resolved, **WHEN** any launch
++  path builds the environment, **THEN** the result is
++  `BLOCKED_PROFILE_SECRET`, the environment is empty, and no secret identifier
++  or value appears in the error or logs.
+diff --git a/docs/specs/tasks/archived-resource-safety/spec.md b/docs/specs/tasks/archived-resource-safety/spec.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..c1ba8f9e7e825cb051f07342caa646b54fc793e2
+--- /dev/null
++++ b/docs/specs/tasks/archived-resource-safety/spec.md
+@@ -0,0 +1,195 @@
++---
++status: draft
++created: 2026-08-15
++owner: cfl
++---
++
++# Archived Resource Safety
++
++## Why
++
++Archived tasks and interrupted cleanup leave durable runtime, environment, Git,
++and filesystem references. Operators need Kandev to reconcile obsolete database
++ownership without losing local work, while every physical deletion path remains
++provably fail-closed until a separately authorized executor exists.
++
++## What
++
++- Every managed-root remove, rename, quarantine, restore, purge, worktree remove,
++  recreate, and fallback deletion passes through one central admission service.
++- Missing admission, incomplete inventory, unknown resource state, path drift,
++  generation drift, concurrent ownership growth, or an unavailable executor
++  denies the action before Git, filesystem, runtime, or database mutation.
++- This release keeps managed-root physical execution unavailable. Successful
++  reconcile operations are DB-only and report `physical_retained=true` and
++  `physical_removed=false`.
++- The existing `task_resource_cleanup_jobs` table is the sole durable ledger.
++  Reconcile, retained, blocked, release, and environment-retirement state do not
++  create a second cleanup ledger.
++- A retained anchor preserves the immutable snapshot, digest, operation identity,
++  managed root, resource identity, association generations, branch OIDs, and
++  physical-path metadata after task/session/workspace cleanup.
++- Single-target v2 and complete shared-target v3 reconcile atomically tombstone
++  only the exact active association generation captured by admission. A stale
++  job never applies to a reactivated or later generation.
++- Interrupted running v2/v3 jobs recover the same claimed attempt under the full
++  participant lock set. Deterministic zero-effect conflicts may become blocked;
++  transport, commit, mixed-state, or readback uncertainty remains
++  `OUTCOME_UNKNOWN` and is never presented as retry-safe.
++- Unarchive, reconcile, lifecycle creation, storage maintenance, Office GC,
++  Git worktree management, task/session/workspace cleanup, and startup recovery
++  share the same ownership and lock contracts.
++- A pristine stale pending move may be cancelled only by exact generation-bound,
++  canonical DB-only request. The retained anchor and all non-target rows remain
++  byte-equivalent.
++- A retained target whose physical path and Git registration are already absent
++  may transition to released only through the sealed absent-target admission.
++  Release does not delete files or branches.
++- A stopped or failed task environment whose exact historical repository
++  reference is no longer needed may be retired DB-only after all task,
++  participant, active-cleanup, runtime, association, and retained-anchor guards
++  pass in one serializable transaction.
++- All shipped profiles keep `archivedResourceReconcile` and
++  `archivedResourcePhysicalRelease` disabled by default. Physical release cannot
++  be enabled implicitly by reconcile or migration.
++
++## Data model
++
++### `task_resource_cleanup_jobs`
++
++The existing table remains authoritative. Generic lifecycle jobs use
++`snapshot_version=0` and known generic triggers. Archived-resource anchors use
++strict versioned canonical JSON, non-empty digests, deterministic operation IDs,
++and an active scope key. Unknown triggers, versions, states, malformed headers,
++or partial lifecycle combinations fail inventory validation.
++
++Version 2 represents one task-owned target. Version 3 represents one physical
++target and the complete sorted participant task/association/branch sets.
++Retained and blocked anchors keep their non-null scope and immutable raw snapshot.
++
++### `task_environment_repos`
++
++Version 0.88 environment repository rows are the authoritative physical
++worktree references. Cleanup release binds all fourteen persisted columns. The
++operation-bound identity snapshot is `id`, `task_environment_id`, `repository_id`,
++`branch_slug`, `worktree_id`, `worktree_path`, `worktree_branch`, and
++`created_at`. The mutable CAS generation is `position`, `error_message`,
++`status`, `updated_at`, `merged_at`, and `deleted_at`. Complete tombstone replay
++is a zero-write no-op. Row replacement, partial tombstones, reactivation, or
++drift in any one of the fourteen columns fails closed. Tests mutate each column
++independently so a generic claim such as "all generation fields" cannot hide a
++missing predicate.
++
++The removed `task_session_worktrees` schema is historical input only and is not
++reintroduced, dual-read, or dual-written.
++
++## API surface
++
++All routes require a real authenticated install administrator and are absent
++when their governing restart-scoped flag is disabled. Bodies are canonical,
++bounded JSON with duplicate keys, unknown fields, trailing values, and
++non-canonical timestamps rejected.
++
++- `POST /api/v1/tasks/:id/resource-cleanup/reconcile`: one exact v2 target.
++- `POST /api/v1/system/resource-cleanup/reconcile-group`: one exact v3 shared
++  target with the complete participant and association sets.
++- `POST /api/v1/system/resource-cleanup/cancel-stale-pending-move`: one exact
++  stale pending move associated with a retained anchor.
++- `POST /api/v1/system/resource-cleanup/release-absent-retained-target`: one
++  exact retained target whose path and Git worktree registration are absent.
++- `POST /api/v1/system/resource-cleanup/retire-stale-environment-reference`:
++  one exact stopped/failed environment and repository reference.
++
++Success responses expose only operation identity, terminal state, bounded
++counts, and physical-retention booleans. They never echo paths, snapshots,
++secrets, task text, or association bodies.
++
++## State machine
++
++- Generic cleanup: `prepared -> pending -> running -> retry_wait -> running`,
++  ending in `succeeded`, `failed`, or exact pristine `cancelled`.
++- Reconcile anchor: `prepared -> pending -> running`, optionally through
++  `retry_wait`, ending in `retained` or `blocked`.
++- Physical release: `retained -> released` only after exact absent-target
++  admission; no intermediate state authorizes a physical action.
++- Environment retirement removes only the exact historical environment rows;
++  it does not change the retained anchor state.
++
++Generic selectors, reset, claim, completion, and cancellation never select or
++mutate versioned archived-resource jobs. Versioned paths never reinterpret an
++unknown generic trigger.
++
++## Permissions
++
++- Real install administrators may invoke enabled metadata-only routes.
++- Synthetic identities, members, foreign-workspace administrators, agents,
++  WebSocket callers, MCP tools, Office actions, and unauthenticated callers have
++  no archived-resource mutation surface.
++- Internal workers use the same feature gates, participant inventory, lock set,
++  and repository CAS as direct routes.
++
++## Failure modes
++
++- Unknown or malformed inventory, repository errors, runtime liveness unknown,
++  active executors, active sessions, archive-generation drift, hidden
++  associations, participant growth, branch drift, or path identity drift cause
++  zero mutation.
++- Filesystem or Git removal failure preserves database state, branch state,
++  registration, path, and cache. Batch cleanup evicts cache only for successful
++  items.
++- Missing physical paths may be retained as durable metadata; absence is not
++  permission to delete, reconstruct, or prune anything.
++- SQLite compares canonical instants but uses same-transaction raw lexical time
++  tokens for exact CAS. PostgreSQL uses typed timestamps under row locks.
++- A commit or post-write readback whose outcome cannot be proven returns
++  `OUTCOME_UNKNOWN`. Automatic retry is forbidden until exact readback proves
++  zero effect.
++- PostgreSQL runtime behavior remains `NOT_RUN` unless an explicitly isolated
++  test DSN is supplied. Ambient or live PostgreSQL is never used for validation.
++
++## Persistence guarantees
++
++Retained, blocked, and released anchors, their immutable snapshots, digests,
++scope keys, attempts, revisions, and completion timestamps survive task,
++session, workspace, and backend lifecycle changes. Disabled feature flags cause
++zero archived-resource repository activity. Startup recovery touches only exact
++interrupted jobs when enabled and never increases an already claimed attempt.
++
++## Scenarios
++
++- **GIVEN** central admission is unavailable, **WHEN** any managed-root creation,
++  cleanup, release, or fallback path is requested, **THEN** it fails before any
++  repository, Git, filesystem, or runtime mutation required by that path.
++- **GIVEN** two tasks share one target, **WHEN** v3 reconcile omits either owner
++  or association, **THEN** it returns conflict with zero mutation.
++- **GIVEN** an association is tombstoned, reactivated, and later tombstoned as a
++  new generation, **WHEN** an old retained job replays or unarchives, **THEN** it
++  cannot modify the new generation.
++- **GIVEN** a running job was interrupted before completion, **WHEN** enabled
++  startup recovery runs, **THEN** it completes the same attempt or preserves an
++  explicit blocked/unknown outcome without a second claim.
++- **GIVEN** worktree removal fails, **WHEN** cleanup runs, **THEN** its path, Git
++  registration, branch OID, database reference, and cache remain unchanged.
++- **GIVEN** a complete tombstone, **WHEN** identical cleanup retries, **THEN** no
++  persisted timestamp or field changes.
++- **GIVEN** a retained anchor with one exact stale pending move, **WHEN** the
++  cancellation route succeeds, **THEN** only that row disappears and the anchor,
++  session, association, task generation, Git, and filesystem state are unchanged.
++- **GIVEN** an absent retained target, **WHEN** sealed release succeeds, **THEN**
++  the anchor becomes released and no physical or Git action occurs.
++- **GIVEN** an environment is a non-coordinator participant in any active v3
++  cleanup, **WHEN** environment retirement is requested, **THEN** retirement is
++  rejected with zero mutation.
++- **GIVEN** both archived-resource flags are disabled, **WHEN** routes, startup,
++  periodic workers, and generic cleanup execute, **THEN** versioned anchors are
++  byte-equivalent before and after.
++
++## Out of scope
++
++- Enabling any physical deletion executor or setting
++  `archivedResourcePhysicalRelease=true` in shipped profiles.
++- Deleting or cleaning dirty worktrees, branches, task records, queue messages,
++  retained anchors, or user files.
++- Reintroducing v0.85 session-worktree persistence or a second ledger.
++- Installing dependencies, using live/ambient PostgreSQL, or treating an
++  offline test as a production result.
+-- 
+2.55.0
+

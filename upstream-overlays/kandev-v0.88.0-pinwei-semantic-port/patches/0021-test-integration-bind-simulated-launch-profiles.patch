@@ -1,0 +1,27 @@
+From 7e987c0a7bb06f68c9f395c5cff7e38672d72d1a Mon Sep 17 00:00:00 2001
+From: WaleWangPW <396218656@qq.com>
+Date: Mon, 17 Aug 2026 20:36:12 +0800
+Subject: [PATCH 21/22] test(integration): bind simulated launch profiles
+
+---
+ .../internal/integration/simulated_agent_manager_test.go      | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/apps/backend/internal/integration/simulated_agent_manager_test.go b/apps/backend/internal/integration/simulated_agent_manager_test.go
+index 6d614b3e4bc80de10224ab14f3369e0d764df0a2..afdd98aea84679000d62337bdc0de45c26d2ff30 100644
+--- a/apps/backend/internal/integration/simulated_agent_manager_test.go
++++ b/apps/backend/internal/integration/simulated_agent_manager_test.go
+@@ -474,6 +474,10 @@ func (s *SimulatedAgentManagerClient) ResolveAgentProfile(ctx context.Context, p
+ 		ProfileName: "Simulated Profile",
+ 		AgentID:     "augment-agent",
+ 		AgentName:   "Augment Agent",
++		// Production resolvers now attach a durable launch binding. Keep the
++		// integration simulator production-shaped so launch-path tests exercise
++		// their intended behavior instead of being rejected as malformed input.
++		Fingerprint: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+ 		Model:       "claude-sonnet-4-20250514",
+ 	}, nil
+ }
+-- 
+2.55.0
+

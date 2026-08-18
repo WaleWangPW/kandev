@@ -1,0 +1,50 @@
+From c70fd4fb7d77d3f679f2639ab992c6868240e773 Mon Sep 17 00:00:00 2001
+From: WaleWangPW <396218656@qq.com>
+Date: Mon, 17 Aug 2026 20:38:57 +0800
+Subject: [PATCH 22/22] docs(plan): record Task08 verification receipt
+
+---
+ .../task-08-migration-verification.md         | 23 ++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/docs/plans/pinwei-v088-semantic-port/task-08-migration-verification.md b/docs/plans/pinwei-v088-semantic-port/task-08-migration-verification.md
+index 5850ecd4bcd9ce0522bb46057a8e82a434704e2e..e851e25689fee0bf66db9e612e98e7ca1a8f5104 100644
+--- a/docs/plans/pinwei-v088-semantic-port/task-08-migration-verification.md
++++ b/docs/plans/pinwei-v088-semantic-port/task-08-migration-verification.md
+@@ -1,7 +1,7 @@
+ ---
+ id: "08-migration-verification"
+ title: "Verify migrations and adversarial safety matrix"
+-status: pending
++status: completed
+ wave: 7
+ depends_on: ["01-profile-launch-binding", "07-consumer-integration"]
+ plan: "plan.md"
+@@ -60,3 +60,24 @@ action):
+ - Frontend focused tests: `FRONTEND_NOT_RUN_DEPENDENCIES_ABSENT`; no
+   dependencies were installed. The dependency-free backend feature-contract
+   test passed.
++
++2026-08-17 successor verification receipt (no runtime, database, or physical
++action):
++
++- Integration launch fixtures now provide the same valid, durable profile
++  fingerprint shape as production resolvers. `go test` and `go test -race`
++  for `internal/integration` both PASS; this preserves the profile-drift
++  fail-closed contract rather than weakening it for tests.
++- Full backend compile (`go test ./... -run '^$'`) and `go vet ./...`: PASS.
++  Targeted ordinary and race suites for physicaldelete, worktree, task SQLite
++  repository, task service, task handlers, lifecycle, executor, and backendapp:
++  PASS. `git diff --check`: PASS.
++- Full ordinary backend results remain classified rather than treated as PASS:
++  the agentctl API and config fixture failures reproduce from the Task07 parent;
++  an intermittent process/repoclone pair passes in isolated reruns. No failure
++  is attributed to this Task08 successor. PostgreSQL remains NOT_RUN because
++  `KANDEV_TEST_POSTGRES_DSN` was explicitly unset.
++- The existing workspace package-manager wrapper requested a dependency purge,
++  which is prohibited. No install or purge was performed. The already-present
++  Web Vitest binary ran the four required feature-contract files directly:
++  4 files / 12 tests PASS.
+-- 
+2.55.0
+

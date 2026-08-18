@@ -1,0 +1,98 @@
+From c410c5f5ca59972c9f34bd7c5cbc9fb6a19ad87e Mon Sep 17 00:00:00 2001
+From: WaleWangPW <396218656@qq.com>
+Date: Sun, 16 Aug 2026 04:40:36 +0800
+Subject: [PATCH 09/22] test(executor): cover replacement session environment
+ reuse
+
+---
+ .../orchestrator/executor/executor_test.go    | 74 +++++++++++++++++++
+ 1 file changed, 74 insertions(+)
+
+diff --git a/apps/backend/internal/orchestrator/executor/executor_test.go b/apps/backend/internal/orchestrator/executor/executor_test.go
+index 79374fe9f4f4458d15593e5ff37ee764c29ed6e6..d054bb309e9ee2b44370deccc4f9422eebf78d85 100644
+--- a/apps/backend/internal/orchestrator/executor/executor_test.go
++++ b/apps/backend/internal/orchestrator/executor/executor_test.go
+@@ -800,6 +800,80 @@ func TestAssignLaunchTaskEnvironmentID(t *testing.T) {
+ 	})
+ }
+ 
++// TestLaunchPreparedSession_RebindsFreshSessionToExistingTaskEnvironment
++// covers the recovery boundary where the old session was removed but its
++// task-owned environment and worktree remain durable. A replacement session
++// starts without TaskEnvironmentID, yet must reuse the task environment before
++// the lifecycle can attempt a fresh worktree/provisional lease.
++func TestLaunchPreparedSession_RebindsFreshSessionToExistingTaskEnvironment(t *testing.T) {
++	repo := newMockRepository()
++	const taskID = "task-rebind"
++	const environmentID = "env-rebind"
++	const worktreeID = "worktree-rebind"
++	repo.taskRepositories["task-repository-rebind"] = &models.TaskRepository{
++		ID:           "task-repository-rebind",
++		TaskID:       taskID,
++		RepositoryID: "repository-rebind",
++		BaseBranch:   "main",
++	}
++	repo.repositories["repository-rebind"] = &models.Repository{
++		ID:        "repository-rebind",
++		LocalPath: "/tmp/rebind-repository",
++	}
++	repo.executors["executor-worktree"] = &models.Executor{
++		ID: "executor-worktree", Type: models.ExecutorTypeWorktree, Status: models.ExecutorStatusActive,
++	}
++	repo.taskEnvironments[environmentID] = &models.TaskEnvironment{
++		ID:            environmentID,
++		TaskID:        taskID,
++		Status:        models.TaskEnvironmentStatusReady,
++		WorkspacePath: "/tmp/rebind-worktree",
++		Repos: []*models.TaskEnvironmentRepo{{
++			TaskEnvironmentID: environmentID,
++			RepositoryID:      "repository-rebind",
++			BranchSlug:        "main",
++			WorktreeID:        worktreeID,
++			WorktreePath:      "/tmp/rebind-worktree",
++			WorktreeBranch:    "feature/rebind",
++		}},
++	}
++	repo.sessions["session-replacement"] = &models.TaskSession{
++		ID:             "session-replacement",
++		TaskID:         taskID,
++		AgentProfileID: "profile-123",
++		ExecutorID:     "executor-worktree",
++		State:          models.TaskSessionStateCreated,
++		StartedAt:      time.Now(),
++		UpdatedAt:      time.Now(),
++	}
++
++	var captured *LaunchAgentRequest
++	agentManager := &mockAgentManager{
++		launchAgentFunc: func(_ context.Context, req *LaunchAgentRequest) (*LaunchAgentResponse, error) {
++			captured = req
++			return &LaunchAgentResponse{AgentExecutionID: "exec-rebind", Status: v1.AgentStatusStarting}, nil
++		},
++	}
++	executor := newTestExecutor(t, agentManager, repo)
++	if _, err := executor.LaunchPreparedSession(context.Background(), &v1.Task{
++		ID: taskID, WorkspaceID: "workspace-rebind",
++	}, "session-replacement", LaunchOptions{AgentProfileID: "profile-123", ExecutorID: "executor-worktree", StartAgent: true}); err != nil {
++		t.Fatalf("LaunchPreparedSession: %v", err)
++	}
++	if captured == nil {
++		t.Fatal("LaunchAgent was not called")
++	}
++	if captured.TaskEnvironmentID != environmentID {
++		t.Errorf("TaskEnvironmentID = %q, want durable %q", captured.TaskEnvironmentID, environmentID)
++	}
++	if captured.WorktreeID != worktreeID {
++		t.Errorf("WorktreeID = %q, want durable %q", captured.WorktreeID, worktreeID)
++	}
++	if got := repo.sessions["session-replacement"].TaskEnvironmentID; got != environmentID {
++		t.Errorf("replacement session TaskEnvironmentID = %q, want %q", got, environmentID)
++	}
++}
++
+ // TestLaunchPreparedSession_InheritsEnvFromSessionEnvironmentID pins the
+ // office task-handoffs inheritance contract: when a child task's session
+ // already has TaskEnvironmentID pointing at a parent / shared-group env,
+-- 
+2.55.0
+

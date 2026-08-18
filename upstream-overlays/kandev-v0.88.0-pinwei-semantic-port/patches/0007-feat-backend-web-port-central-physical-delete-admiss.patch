@@ -1,0 +1,391 @@
+From 20def01e43e473f13c744420659647a855eaec59 Mon Sep 17 00:00:00 2001
+From: WaleWangPW <396218656@qq.com>
+Date: Sat, 15 Aug 2026 19:36:49 +0800
+Subject: [PATCH 07/22] feat(backend,web): port central physical-delete
+ admission and archived-resource flags
+
+---
+ .../backendapp/branch_materializer_test.go    | 10 ++
+ .../backendapp/feature_contract_test.go       | 93 +++++++++++++++++++
+ apps/backend/internal/backendapp/worktree.go  | 10 ++
+ apps/backend/internal/common/config/config.go | 10 ++
+ apps/backend/internal/profiles/profiles.yaml  | 12 +++
+ .../backend/internal/runtimeflags/registry.go | 34 +++++++
+ .../internal/worktree/admission_test.go       | 21 +++++
+ apps/backend/internal/worktree/manager.go     | 13 ++-
+ .../internal/worktree/manager_lifecycle.go    |  9 +-
+ apps/web/lib/state/slices/features/types.ts   |  2 +
+ 10 files changed, 208 insertions(+), 6 deletions(-)
+ create mode 100644 apps/backend/internal/backendapp/feature_contract_test.go
+ create mode 100644 apps/backend/internal/worktree/admission_test.go
+
+diff --git a/apps/backend/internal/backendapp/branch_materializer_test.go b/apps/backend/internal/backendapp/branch_materializer_test.go
+index c45354f9174a0b7a5394defd3babe444e12b6fac..9526dd095b1bef212ea54d648d0114981841532c 100644
+--- a/apps/backend/internal/backendapp/branch_materializer_test.go
++++ b/apps/backend/internal/backendapp/branch_materializer_test.go
+@@ -13,6 +13,7 @@ import (
+ 
+ 	"github.com/kandev/kandev/internal/agent/runtime/lifecycle"
+ 	"github.com/kandev/kandev/internal/db"
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/task/models"
+ 	taskrepo "github.com/kandev/kandev/internal/task/repository"
+ 	sqliterepo "github.com/kandev/kandev/internal/task/repository/sqlite"
+@@ -279,6 +280,15 @@ func newMaterializerWorktreeMgr(t *testing.T, taskRoot string) *worktree.Manager
+ 	if err != nil {
+ 		t.Fatalf("NewManager: %v", err)
+ 	}
++	admission, err := physicaldelete.New(physicaldelete.Config{
++		Inventory: physicaldelete.InventorySourceFunc(func(context.Context) (physicaldelete.Inventory, error) {
++			return physicaldelete.Inventory{Complete: true}, nil
++		}),
++	})
++	if err != nil {
++		t.Fatalf("physicaldelete.New: %v", err)
++	}
++	mgr.SetAdmission(admission)
+ 	return mgr
+ }
+ 
+diff --git a/apps/backend/internal/backendapp/feature_contract_test.go b/apps/backend/internal/backendapp/feature_contract_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..088caf665ef91f7d308732406acc5e533f5788ae
+--- /dev/null
++++ b/apps/backend/internal/backendapp/feature_contract_test.go
+@@ -0,0 +1,93 @@
++package backendapp
++
++import (
++	"os"
++	"path/filepath"
++	"regexp"
++	"strings"
++	"testing"
++)
++
++// TestFeatureContract_ArchivedResourceFlagsDefaultFalse verifies that the two
++// archived-resource release toggles are present in the frontend defaults and
++// disabled in every shipped profile. It is intentionally dependency-free so it
++// runs without a database or external services.
++func TestFeatureContract_ArchivedResourceFlagsDefaultFalse(t *testing.T) {
++	repoRoot := filepath.Join("..", "..", "..", "..")
++	typesPath := filepath.Join(repoRoot, "apps", "web", "lib", "state", "slices", "features", "types.ts")
++	profilesPath := filepath.Join(repoRoot, "profiles.yaml")
++
++	typesSource, err := os.ReadFile(typesPath)
++	if err != nil {
++		t.Fatalf("read frontend feature types: %v", err)
++	}
++
++	objectRe := regexp.MustCompile(`export const defaultFeatureFlags = \{([\s\S]*?)\};`)
++	match := objectRe.FindSubmatch(typesSource)
++	if match == nil {
++		t.Fatal("defaultFeatureFlags object not found in frontend types")
++	}
++	objectBody := string(match[1])
++
++	for _, key := range []string{"archivedResourceReconcile", "archivedResourcePhysicalRelease"} {
++		entryRe := regexp.MustCompile(`\b` + key + `\s*:\s*(true|false)`)
++		entryMatch := entryRe.FindStringSubmatch(objectBody)
++		if entryMatch == nil {
++			t.Fatalf("frontend default %q is missing", key)
++		}
++		if entryMatch[1] != "false" {
++			t.Fatalf("frontend default %q = %s, want false", key, entryMatch[1])
++		}
++	}
++
++	profilesSource, err := os.ReadFile(profilesPath)
++	if err != nil {
++		t.Fatalf("read profiles.yaml: %v", err)
++	}
++
++	for _, envVar := range []string{
++		"KANDEV_FEATURES_ARCHIVED_RESOURCE_RECONCILE",
++		"KANDEV_FEATURES_ARCHIVED_RESOURCE_PHYSICAL_RELEASE",
++	} {
++		if !profileFlagAlwaysFalse(string(profilesSource), envVar) {
++			t.Fatalf("profile flag %q is not false in all shipped profiles", envVar)
++		}
++	}
++}
++
++// profileFlagAlwaysFalse reports whether every profile leaf for envVar is "false".
++// It tolerates arbitrary indentation but requires prod/dev/e2e to all be present.
++func profileFlagAlwaysFalse(source, envVar string) bool {
++	lines := strings.Split(source, "\n")
++	var inBlock bool
++	profilesSeen := make(map[string]bool)
++	for _, line := range lines {
++		trimmed := strings.TrimSpace(line)
++		if strings.HasPrefix(trimmed, envVar+":") {
++			inBlock = true
++			continue
++		}
++		if inBlock {
++			if !strings.Contains(line, ":") || strings.HasPrefix(trimmed, "#") {
++				continue
++			}
++			if strings.HasPrefix(trimmed, "KANDEV_") || strings.HasPrefix(trimmed, "#") {
++				break
++			}
++			parts := strings.SplitN(trimmed, ":", 2)
++			if len(parts) != 2 {
++				continue
++			}
++			profile := strings.TrimSpace(parts[0])
++			value := strings.Trim(strings.TrimSpace(parts[1]), `"`)
++			switch profile {
++			case "prod", "dev", "e2e":
++				if value != "false" {
++					return false
++				}
++				profilesSeen[profile] = true
++			}
++		}
++	}
++	return len(profilesSeen) == 3
++}
+diff --git a/apps/backend/internal/backendapp/worktree.go b/apps/backend/internal/backendapp/worktree.go
+index 5529fca2022bf77c29d93395c62786757b2e97ea..b9b426e5ef47f1e895249c075e77f6925970838b 100644
+--- a/apps/backend/internal/backendapp/worktree.go
++++ b/apps/backend/internal/backendapp/worktree.go
+@@ -15,6 +15,7 @@ import (
+ 	"github.com/kandev/kandev/internal/common/logger"
+ 	"github.com/kandev/kandev/internal/common/subproc"
+ 	"github.com/kandev/kandev/internal/db"
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/task/models"
+ 	taskservice "github.com/kandev/kandev/internal/task/service"
+ 	"github.com/kandev/kandev/internal/worktree"
+@@ -71,6 +72,15 @@ func provideWorktreeManager(dbPool *db.Pool, cfg *config.Config, log *logger.Log
+ 	if err != nil {
+ 		return nil, nil, nil, err
+ 	}
++
++	admission, err := physicaldelete.New(physicaldelete.Config{
++		Inventory: physicaldelete.NewSQLInventorySource(dbPool.Writer()),
++	})
++	if err != nil {
++		return nil, nil, nil, fmt.Errorf("physical-delete admission: %w", err)
++	}
++	manager.SetAdmission(admission)
++
+ 	if lifecycleMgr != nil {
+ 		lifecycleMgr.SetWorktreeManager(manager)
+ 		lifecycleMgr.SetBootMessageService(&bootMsgAdapter{svc: taskSvc})
+diff --git a/apps/backend/internal/common/config/config.go b/apps/backend/internal/common/config/config.go
+index 7d9f0ca3dfc0dce969ef041ea3987beea01c8cda..2ce25663c21045c03f17deeb691980f29070efb5 100644
+--- a/apps/backend/internal/common/config/config.go
++++ b/apps/backend/internal/common/config/config.go
+@@ -393,6 +393,16 @@ type FeaturesConfig struct {
+ 	// kill-switch after rollout because the agent-side fold is undocumented and
+ 	// can regress without notice.
+ 	ClaudeMidTurnSteering bool `mapstructure:"claude_mid_turn_steering" json:"claudeMidTurnSteering"`
++
++	// ArchivedResourceReconcile enables DB-only reconciliation of archived
++	// resource anchors. It is a restart-scoped release toggle and remains off in
++	// every shipped profile until the lifecycle service is fully ported.
++	ArchivedResourceReconcile bool `mapstructure:"archived_resource_reconcile" json:"archivedResourceReconcile"`
++
++	// ArchivedResourcePhysicalRelease enables the sealed absent-target release
++	// admission path. Physical release is deliberately unavailable in this
++	// release, so this flag stays off in all profiles.
++	ArchivedResourcePhysicalRelease bool `mapstructure:"archived_resource_physical_release" json:"archivedResourcePhysicalRelease"`
+ }
+ 
+ // LoggingConfig holds logging configuration.
+diff --git a/apps/backend/internal/profiles/profiles.yaml b/apps/backend/internal/profiles/profiles.yaml
+index f3fabd0d7c7484232e8b33daf3c4d98aa0fa004c..78003c5925f635b461ee4b8b060649204a66bf7b 100644
+--- a/apps/backend/internal/profiles/profiles.yaml
++++ b/apps/backend/internal/profiles/profiles.yaml
+@@ -69,6 +69,18 @@ features:
+     dev:  "false"
+     e2e:  "false"
+ 
++  # Archived-resource lifecycle gates. Both remain off in every shipped profile:
++  # reconcile is DB-only and physical release has no available executor.
++  KANDEV_FEATURES_ARCHIVED_RESOURCE_RECONCILE:
++    prod: "false"
++    dev:  "false"
++    e2e:  "false"
++
++  KANDEV_FEATURES_ARCHIVED_RESOURCE_PHYSICAL_RELEASE:
++    prod: "false"
++    dev:  "false"
++    e2e:  "false"
++
+ # ── Mock providers ────────────────────────────────────────────────
+ # Swap real third-party services for in-memory fakes. Production
+ # leaves all of these unset (real APIs). Dev opts into the mock agent
+diff --git a/apps/backend/internal/runtimeflags/registry.go b/apps/backend/internal/runtimeflags/registry.go
+index 0b93433890915f0ad182475edd72fe6e104ed807..df8f9a7a587759220a2bc357a26bd68ef148e99b 100644
+--- a/apps/backend/internal/runtimeflags/registry.go
++++ b/apps/backend/internal/runtimeflags/registry.go
+@@ -103,6 +103,40 @@ var registrations = []runtimeFlagRegistration{
+ 		read:  func(cfg *config.Config) bool { return cfg.Features.ClaudeMidTurnSteering },
+ 		apply: func(cfg *config.Config, value bool) { cfg.Features.ClaudeMidTurnSteering = value },
+ 	},
++	{
++		definition: RuntimeFlagDefinition{
++			Key:         "features.archivedResourceReconcile",
++			EnvVar:      "KANDEV_FEATURES_ARCHIVED_RESOURCE_RECONCILE",
++			Kind:        KindFeature,
++			Label:       "Archived resource reconcile",
++			Description: "Enables DB-only reconciliation of archived resource anchors.",
++			Stability:   StabilityExperimental,
++			RiskLevel:   RiskHigh,
++			RiskDescription: "Archived-resource reconcile mutates durable cleanup anchors. " +
++				"Enable it only after the lifecycle service is fully ported and tested.",
++			RestartRequired: true,
++			Mutable:         true,
++		},
++		read:  func(cfg *config.Config) bool { return cfg.Features.ArchivedResourceReconcile },
++		apply: func(cfg *config.Config, value bool) { cfg.Features.ArchivedResourceReconcile = value },
++	},
++	{
++		definition: RuntimeFlagDefinition{
++			Key:         "features.archivedResourcePhysicalRelease",
++			EnvVar:      "KANDEV_FEATURES_ARCHIVED_RESOURCE_PHYSICAL_RELEASE",
++			Kind:        KindFeature,
++			Label:       "Archived resource physical release",
++			Description: "Enables the sealed absent-target release admission path.",
++			Stability:   StabilityExperimental,
++			RiskLevel:   RiskHigh,
++			RiskDescription: "Physical release is deliberately unavailable in this release. " +
++				"Enabling this flag does not provide a physical executor.",
++			RestartRequired: true,
++			Mutable:         true,
++		},
++		read:  func(cfg *config.Config) bool { return cfg.Features.ArchivedResourcePhysicalRelease },
++		apply: func(cfg *config.Config, value bool) { cfg.Features.ArchivedResourcePhysicalRelease = value },
++	},
+ 	{
+ 		definition: RuntimeFlagDefinition{
+ 			Key:         "debug.devMode",
+diff --git a/apps/backend/internal/worktree/admission_test.go b/apps/backend/internal/worktree/admission_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c4151f0ebad504f861fd158b79163db635c7855
+--- /dev/null
++++ b/apps/backend/internal/worktree/admission_test.go
+@@ -0,0 +1,21 @@
++package worktree
++
++import (
++	"context"
++
++	"github.com/kandev/kandev/internal/physicaldelete"
++)
++
++func init() {
++	testAdmissionFactory = func() physicaldelete.Admission {
++		svc, err := physicaldelete.New(physicaldelete.Config{
++			Inventory: physicaldelete.InventorySourceFunc(func(context.Context) (physicaldelete.Inventory, error) {
++				return physicaldelete.Inventory{Complete: true}, nil
++			}),
++		})
++		if err != nil {
++			panic(err)
++		}
++		return svc
++	}
++}
+diff --git a/apps/backend/internal/worktree/manager.go b/apps/backend/internal/worktree/manager.go
+index 13b6a27a65398d8ae23b2599742288a0c219a591..3046efbc5001bc9a6e35a17bc1f35b8ccae22485 100644
+--- a/apps/backend/internal/worktree/manager.go
++++ b/apps/backend/internal/worktree/manager.go
+@@ -13,6 +13,11 @@ import (
+ 	"github.com/kandev/kandev/internal/physicaldelete"
+ )
+ 
++// testAdmissionFactory is set by worktree tests to inject a fresh
++// physical-delete admission service for every manager created with NewManager.
++// Production callers must wire admission explicitly via SetAdmission.
++var testAdmissionFactory func() physicaldelete.Admission
++
+ const (
+ 	defaultGitFetchTimeout = 90 * time.Second
+ 	defaultGitPullTimeout  = 60 * time.Second
+@@ -164,7 +169,7 @@ func NewManager(cfg Config, store Store, log *logger.Logger) (*Manager, error) {
+ 		pullTimeout = time.Duration(cfg.PullTimeoutSeconds) * time.Second
+ 	}
+ 
+-	return &Manager{
++	m := &Manager{
+ 		config:         cfg,
+ 		logger:         log.WithFields(zap.String("component", "worktree-manager")),
+ 		store:          store,
+@@ -173,7 +178,11 @@ func NewManager(cfg Config, store Store, log *logger.Logger) (*Manager, error) {
+ 		fetchTimeout:   fetchTimeout,
+ 		pullTimeout:    pullTimeout,
+ 		inspectTimeout: defaultGitInspectTimeout,
+-	}, nil
++	}
++	if testAdmissionFactory != nil {
++		m.admission = testAdmissionFactory()
++	}
++	return m, nil
+ }
+ 
+ // SetRepositoryProvider sets the repository provider for fetching repository information.
+diff --git a/apps/backend/internal/worktree/manager_lifecycle.go b/apps/backend/internal/worktree/manager_lifecycle.go
+index 33f0307d7ac5d48ebeef0491e8bb22a6b44a9a85..c44c390674a0f01b58a85d1d92ac4663281fd3d3 100644
+--- a/apps/backend/internal/worktree/manager_lifecycle.go
++++ b/apps/backend/internal/worktree/manager_lifecycle.go
+@@ -10,6 +10,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/google/uuid"
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/system/storage"
+ 	storageworkspaces "github.com/kandev/kandev/internal/system/storage/workspaces"
+ 	"go.uber.org/zap"
+@@ -356,7 +357,7 @@ func (m *Manager) createContributionInTaskDir(
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	worktreeID, branchName, err := m.addContributionWorktree(ctx, req, worktreePath, contributionRef, remoteName, lease)
++	worktreeID, branchName, err := m.addContributionWorktree(ctx, req, worktreePath, contributionRef, remoteName)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -438,12 +439,12 @@ func (m *Manager) validateTaskDir(taskDir string) error {
+ // origin/<checkout-branch> so ahead/behind counts are relative to the PR's remote branch.
+ func (m *Manager) addWorktreeForBranch(ctx context.Context, req CreateRequest, worktreePath, fallbackBranch, startPoint, baseRef string, lease *physicaldelete.ProvisionalLease) (string, string, error) {
+ 	if req.CheckoutBranch == "" {
+-		id, err := m.gitAddWorktree(ctx, req.RepositoryPath, fallbackBranch, worktreePath, baseRef, lease)
++		id, err := m.gitAddWorktree(ctx, req.RepositoryPath, fallbackBranch, worktreePath, baseRef)
+ 		return id, fallbackBranch, err
+ 	}
+ 
+ 	// Try checking out the PR branch directly (common case: single task per PR).
+-	id, err := m.gitAddWorktreeExisting(ctx, req.RepositoryPath, req.CheckoutBranch, worktreePath, lease)
++	id, err := m.gitAddWorktreeExisting(ctx, req.RepositoryPath, req.CheckoutBranch, worktreePath)
+ 	if err == nil {
+ 		m.setUpstreamIfExists(ctx, worktreePath, req.CheckoutBranch, req.CheckoutBranch)
+ 		return id, req.CheckoutBranch, nil
+@@ -455,7 +456,7 @@ func (m *Manager) addWorktreeForBranch(ctx context.Context, req CreateRequest, w
+ 	// Branch is in use by another worktree — create a unique fallback branch
+ 	// using the original branch name with a random suffix.
+ 	suffixed := req.CheckoutBranch + "-" + SmallSuffix(3)
+-	id, err = m.gitAddWorktree(ctx, req.RepositoryPath, suffixed, worktreePath, startPoint, lease)
++	id, err = m.gitAddWorktree(ctx, req.RepositoryPath, suffixed, worktreePath, startPoint)
+ 	if err == nil {
+ 		m.setUpstreamIfExists(ctx, worktreePath, suffixed, req.CheckoutBranch)
+ 	}
+diff --git a/apps/web/lib/state/slices/features/types.ts b/apps/web/lib/state/slices/features/types.ts
+index 4cef4e825a5d1f1e913ffce74699d9199e66d392..0fe6283d9711487c63a61a51e707fefa263125ec 100644
+--- a/apps/web/lib/state/slices/features/types.ts
++++ b/apps/web/lib/state/slices/features/types.ts
+@@ -11,6 +11,8 @@ export const defaultFeatureFlags = {
+   auth: false,
+   claudeBackgroundPromptHandoff: false,
+   claudeMidTurnSteering: false,
++  archivedResourceReconcile: false,
++  archivedResourcePhysicalRelease: false,
+ } as const;
+ 
+ export type FeatureName = keyof typeof defaultFeatureFlags;
+-- 
+2.55.0
+

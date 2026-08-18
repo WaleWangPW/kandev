@@ -1,0 +1,450 @@
+From 24550aaf3a8e54a423aeb112e39e03444bd117a2 Mon Sep 17 00:00:00 2001
+From: WaleWangPW <396218656@qq.com>
+Date: Mon, 17 Aug 2026 15:46:43 +0800
+Subject: [PATCH 17/22] test: verify v0.88 migration safety matrix
+
+---
+ .../env_preparer_worktree_dup_test.go         |  37 ++++
+ .../env_preparer_worktree_multi_test.go       |   5 +
+ .../internal/backendapp/helpers_test.go       |   4 +
+ .../dependency_cleanup_security_unix_test.go  |  19 ++
+ .../workspaces/dependency_cleanup_unix.go     |  19 +-
+ ...source_cleanup_reconcile_migration_test.go | 181 ++++++++++++++++++
+ .../repository/task_environment_repo_test.go  |  11 +-
+ .../task-08-migration-verification.md         |  38 +++-
+ 8 files changed, 309 insertions(+), 5 deletions(-)
+
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/env_preparer_worktree_dup_test.go b/apps/backend/internal/agent/runtime/lifecycle/env_preparer_worktree_dup_test.go
+index 0a0ce5e1a5ae20f14ac0fdb6c4c294e73fc0779e..773002d7306e32bd1dffecfb646b538a1e87c53b 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/env_preparer_worktree_dup_test.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/env_preparer_worktree_dup_test.go
+@@ -11,9 +11,41 @@ import (
+ 
+ 	"github.com/kandev/kandev/internal/agent/executor"
+ 	"github.com/kandev/kandev/internal/common/logger"
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/worktree"
+ )
+ 
++// permissivePreparerAdmission is deliberately test-only.  It models a
++// successful, already-authorized managed-root operation so the preparer tests
++// can continue asserting their rollback behaviour.  Production wiring always
++// uses the sealed physicaldelete.Service; the fail-closed boundary is covered
++// by the worktree admission tests.
++type permissivePreparerAdmission struct {
++	leases *physicaldelete.Service
++}
++
++func (p permissivePreparerAdmission) BeginProvisional(ctx context.Context, req physicaldelete.CreateRequest) (physicaldelete.ProvisionalLease, error) {
++	return p.leases.BeginProvisional(ctx, req)
++}
++
++func (permissivePreparerAdmission) Execute(_ context.Context, req physicaldelete.Request) (physicaldelete.Receipt, error) {
++	return physicaldelete.Receipt{
++		Action: req.Action, ResourceKind: req.Resource.Kind, ResourceID: req.Resource.ID,
++	}, nil
++}
++
++func newPermissiveAdmissionForPreparer() (physicaldelete.Admission, error) {
++	leases, err := physicaldelete.New(physicaldelete.Config{
++		Inventory: physicaldelete.InventorySourceFunc(func(context.Context) (physicaldelete.Inventory, error) {
++			return physicaldelete.Inventory{Complete: true}, nil
++		}),
++	})
++	if err != nil {
++		return nil, err
++	}
++	return permissivePreparerAdmission{leases: leases}, nil
++}
++
+ // fakeRepoProvider returns canned Repository values per ID.
+ type fakeRepoProvider struct {
+ 	repos map[string]*worktree.Repository
+@@ -78,6 +110,11 @@ func newPreparerWithScriptHandler(t *testing.T, repos map[string]*worktree.Repos
+ 	if err != nil {
+ 		t.Fatalf("worktree manager: %v", err)
+ 	}
++	admission, err := newPermissiveAdmissionForPreparer()
++	if err != nil {
++		t.Fatalf("preparer admission: %v", err)
++	}
++	mgr.SetAdmission(admission)
+ 	handler := &recordingScriptHandler{}
+ 	mgr.SetScriptMessageHandler(handler)
+ 	mgr.SetRepositoryProvider(&fakeRepoProvider{repos: repos})
+diff --git a/apps/backend/internal/agent/runtime/lifecycle/env_preparer_worktree_multi_test.go b/apps/backend/internal/agent/runtime/lifecycle/env_preparer_worktree_multi_test.go
+index ed5b48be630c3cd6ce2e8c6ef8345c6797c20999..6a3068a48506cc01bd5f74e9b134cd8a71b5f860 100644
+--- a/apps/backend/internal/agent/runtime/lifecycle/env_preparer_worktree_multi_test.go
++++ b/apps/backend/internal/agent/runtime/lifecycle/env_preparer_worktree_multi_test.go
+@@ -245,6 +245,11 @@ func newPreparerForTestWithStore(t *testing.T) (*WorktreePreparer, *worktree.Man
+ 	if err != nil {
+ 		t.Fatalf("worktree manager: %v", err)
+ 	}
++	admission, err := newPermissiveAdmissionForPreparer()
++	if err != nil {
++		t.Fatalf("preparer admission: %v", err)
++	}
++	mgr.SetAdmission(admission)
+ 	return NewWorktreePreparer(mgr, log), mgr, store
+ }
+ 
+diff --git a/apps/backend/internal/backendapp/helpers_test.go b/apps/backend/internal/backendapp/helpers_test.go
+index 5577c6333eda8032e973a6864d76f53bd0023f42..83e80f6273dce34231dd0cb1a852f7ffb12a588a 100644
+--- a/apps/backend/internal/backendapp/helpers_test.go
++++ b/apps/backend/internal/backendapp/helpers_test.go
+@@ -83,6 +83,9 @@ func TestRegisterTaskRoutesWiresProductionWorkspaceRestorer(t *testing.T) {
+ 		harness.taskRepo, harness.taskRepo,
+ 		taskservice.NewDocumentService(harness.taskRepo, log), nil, nil, log,
+ 	)
++	// Match production composition: archived-resource unarchive is sealed by
++	// the task service rather than falling back to a non-transactional callback.
++	handoff.SetTaskResourceCleaner(harness.taskSvc)
+ 	registerTaskRoutes(routeParams{
+ 		router: router, gateway: gateway, taskSvc: harness.taskSvc, taskRepo: harness.taskRepo,
+ 		services: &Services{Workflow: harness.workflowSvc}, workspaceRestorer: composition.workspaceRestorer, log: log,
+@@ -1978,6 +1981,7 @@ func newBootStateTestHarness(t *testing.T) bootStateTestHarness {
+ 			Executors:        taskRepo,
+ 			Environments:     taskRepo,
+ 			TaskEnvironments: taskRepo,
++			ResourceCleanups: taskRepo,
+ 			Reviews:          taskRepo,
+ 			StatusSummaries:  taskRepo,
+ 		},
+diff --git a/apps/backend/internal/system/storage/workspaces/dependency_cleanup_security_unix_test.go b/apps/backend/internal/system/storage/workspaces/dependency_cleanup_security_unix_test.go
+index df8e7a39a60c5d72907f52e140578253de3e6482..81053c244d51102d0b84a2f256b99cad2c02d67c 100644
+--- a/apps/backend/internal/system/storage/workspaces/dependency_cleanup_security_unix_test.go
++++ b/apps/backend/internal/system/storage/workspaces/dependency_cleanup_security_unix_test.go
+@@ -48,3 +48,22 @@ func TestRemoveDependencyDirectoryDoesNotFollowWorkspaceReplacement(t *testing.T
+ 		t.Fatalf("original dependency directory still exists: %v", err)
+ 	}
+ }
++
++func TestRemoveDependencyDirectoryRejectsSymlinkedWorkspaceRoot(t *testing.T) {
++	parent := t.TempDir()
++	realRoot := filepath.Join(parent, "workspace-real")
++	root := filepath.Join(parent, "workspace")
++	if err := os.MkdirAll(filepath.Join(realRoot, "node_modules"), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Symlink(realRoot, root); err != nil {
++		t.Fatal(err)
++	}
++	err := removeDependencyDirectory(context.Background(), root, filepath.Join(root, "node_modules"))
++	if err == nil {
++		t.Fatal("removeDependencyDirectory accepted a symlinked workspace root")
++	}
++	if _, err := os.Stat(filepath.Join(realRoot, "node_modules")); err != nil {
++		t.Fatalf("symlink target changed: %v", err)
++	}
++}
+diff --git a/apps/backend/internal/system/storage/workspaces/dependency_cleanup_unix.go b/apps/backend/internal/system/storage/workspaces/dependency_cleanup_unix.go
+index 9fe649bcf6501a681e54d8c2c67e056db8c624fd..7fd72b5afb1b4aed4156d09ebc12c0ca22261036 100644
+--- a/apps/backend/internal/system/storage/workspaces/dependency_cleanup_unix.go
++++ b/apps/backend/internal/system/storage/workspaces/dependency_cleanup_unix.go
+@@ -93,11 +93,28 @@ func openDependencyDirectoryPath(path string) (int, error) {
+ 	if !filepath.IsAbs(path) {
+ 		return -1, fmt.Errorf("dependency workspace root must be absolute")
+ 	}
++	// Callers validate the workspace beneath their owned root before entering
++	// this descriptor-level primitive. macOS exposes its temporary hierarchy
++	// through the conventional /var symlink, so opening the lexical path from
++	// / with O_NOFOLLOW would reject every otherwise-validated workspace. After
++	// rejecting a symlinked workspace root, canonicalize those platform aliases
++	// before opening every resulting component with O_NOFOLLOW.
++	info, err := os.Lstat(path)
++	if err != nil {
++		return -1, err
++	}
++	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
++		return -1, fmt.Errorf("dependency workspace root must be a real directory")
++	}
++	canonical, err := filepath.EvalSymlinks(path)
++	if err != nil {
++		return -1, fmt.Errorf("resolve dependency workspace root: %w", err)
++	}
+ 	fd, err := unix.Open(string(filepath.Separator), dependencyDirectoryOpenFlags, 0)
+ 	if err != nil {
+ 		return -1, err
+ 	}
+-	for _, part := range dependencyAbsolutePathComponents(path) {
++	for _, part := range dependencyAbsolutePathComponents(canonical) {
+ 		next, err := unix.Openat(fd, part, dependencyDirectoryOpenFlags, 0)
+ 		if err != nil {
+ 			_ = unix.Close(fd)
+diff --git a/apps/backend/internal/task/repository/sqlite/resource_cleanup_reconcile_migration_test.go b/apps/backend/internal/task/repository/sqlite/resource_cleanup_reconcile_migration_test.go
+index 485fe8846c060bb12beb1d771ed2fa451a3161f7..eadba23167d7f491e78c4d9084964d4348f5c352 100644
+--- a/apps/backend/internal/task/repository/sqlite/resource_cleanup_reconcile_migration_test.go
++++ b/apps/backend/internal/task/repository/sqlite/resource_cleanup_reconcile_migration_test.go
+@@ -2,13 +2,194 @@ package sqlite
+ 
+ import (
+ 	"database/sql"
++	"path/filepath"
+ 	"strings"
+ 	"testing"
+ 
++	"github.com/jmoiron/sqlx"
++
++	dbutil "github.com/kandev/kandev/internal/db"
+ 	"github.com/kandev/kandev/internal/db/dialect"
+ 	"github.com/kandev/kandev/internal/task/models"
+ )
+ 
++const legacyTaskResourceCleanupJobsDDL = `
++	CREATE TABLE task_resource_cleanup_jobs (
++		id TEXT PRIMARY KEY,
++		operation_id TEXT NOT NULL UNIQUE,
++		task_id TEXT NOT NULL,
++		trigger TEXT NOT NULL,
++		state TEXT NOT NULL DEFAULT 'pending',
++		resource_snapshot TEXT NOT NULL DEFAULT '{}',
++		attempts INTEGER NOT NULL DEFAULT 0,
++		next_attempt_at TIMESTAMP,
++		last_error TEXT NOT NULL DEFAULT '',
++		created_at TIMESTAMP NOT NULL,
++		updated_at TIMESTAMP NOT NULL,
++		completed_at TIMESTAMP
++	)`
++
++func openArchivedResourceCleanupMigrationDB(t *testing.T) *sqlx.DB {
++	t.Helper()
++	dbConn, err := dbutil.OpenSQLite(filepath.Join(t.TempDir(), "archived-resource-cleanup-migration.db"))
++	if err != nil {
++		t.Fatalf("open sqlite: %v", err)
++	}
++	database := sqlx.NewDb(dbConn, "sqlite3")
++	t.Cleanup(func() { _ = database.Close() })
++	return database
++}
++
++func createLegacyArchivedResourceCleanupTable(t *testing.T, database *sqlx.DB) {
++	t.Helper()
++	if _, err := database.Exec(legacyTaskResourceCleanupJobsDDL); err != nil {
++		t.Fatalf("create legacy cleanup table: %v", err)
++	}
++}
++
++func TestArchivedResourceCleanupMigratesLegacyAndHalfMigratedSQLite(t *testing.T) {
++	for _, tc := range []struct {
++		name       string
++		preMigrate func(*testing.T, *sqlx.DB)
++	}{
++		{name: "legacy"},
++		{
++			name: "half_migrated",
++			preMigrate: func(t *testing.T, database *sqlx.DB) {
++				t.Helper()
++				for _, statement := range []string{
++					`ALTER TABLE task_resource_cleanup_jobs ADD COLUMN snapshot_version INTEGER NOT NULL DEFAULT 0`,
++					`ALTER TABLE task_resource_cleanup_jobs ADD COLUMN snapshot_digest TEXT NOT NULL DEFAULT ''`,
++				} {
++					if _, err := database.Exec(statement); err != nil {
++						t.Fatalf("prepare half-migrated table: %v", err)
++					}
++				}
++			},
++		},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			database := openArchivedResourceCleanupMigrationDB(t)
++			createLegacyArchivedResourceCleanupTable(t, database)
++			if _, err := database.Exec(`
++				INSERT INTO task_resource_cleanup_jobs (
++					id, operation_id, task_id, trigger, state, resource_snapshot,
++					attempts, next_attempt_at, last_error, created_at, updated_at, completed_at
++				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
++			`, "legacy-job", "legacy-operation", "legacy-task", "archive", "retry_wait", `{"legacy":true}`,
++				3, "2026-08-17T01:02:03.123456+08:00", "preserved", "2026-08-17T01:00:00+08:00",
++				"2026-08-17T01:01:00+08:00", nil); err != nil {
++				t.Fatalf("seed legacy row: %v", err)
++			}
++			if tc.preMigrate != nil {
++				tc.preMigrate(t, database)
++			}
++
++			repo, err := NewWithDB(database, database, nil)
++			if err != nil {
++				t.Fatalf("migrate cleanup schema: %v", err)
++			}
++			verifyArchivedResourceCleanupColumns(t, repo)
++			if _, err := NewWithDB(database, database, nil); err != nil {
++				t.Fatalf("replay cleanup migration: %v", err)
++			}
++
++			var id, operationID, taskID, trigger, state, snapshot, lastError string
++			var attempts int
++			var nextAttempt, createdAt, updatedAt, completedAt sql.NullString
++			var snapshotVersion, anchorRevision int
++			var snapshotDigest, resourceKind, resourceID, managedRootKey string
++			var activeScope sql.NullString
++			if err := database.QueryRow(`
++				SELECT id, operation_id, task_id, trigger, state, resource_snapshot,
++					attempts, CAST(next_attempt_at AS TEXT), last_error,
++					CAST(created_at AS TEXT), CAST(updated_at AS TEXT), CAST(completed_at AS TEXT),
++					snapshot_version, snapshot_digest, resource_kind, resource_id,
++					managed_root_key, anchor_revision, active_scope_key
++				FROM task_resource_cleanup_jobs WHERE id = 'legacy-job'
++			`).Scan(
++				&id, &operationID, &taskID, &trigger, &state, &snapshot,
++				&attempts, &nextAttempt, &lastError, &createdAt, &updatedAt, &completedAt,
++				&snapshotVersion, &snapshotDigest, &resourceKind, &resourceID,
++				&managedRootKey, &anchorRevision, &activeScope,
++			); err != nil {
++				t.Fatalf("read migrated row: %v", err)
++			}
++			if id != "legacy-job" || operationID != "legacy-operation" || taskID != "legacy-task" ||
++				trigger != "archive" || state != "retry_wait" || snapshot != `{"legacy":true}` ||
++				attempts != 3 || !nextAttempt.Valid || nextAttempt.String != "2026-08-17T01:02:03.123456+08:00" ||
++				lastError != "preserved" || !createdAt.Valid || createdAt.String != "2026-08-17T01:00:00+08:00" ||
++				!updatedAt.Valid || updatedAt.String != "2026-08-17T01:01:00+08:00" || completedAt.Valid ||
++				snapshotVersion != 0 || snapshotDigest != "" || resourceKind != "" || resourceID != "" ||
++				managedRootKey != "" || anchorRevision != 0 || activeScope.Valid {
++				t.Fatalf("legacy cleanup row changed during migration: id=%q operation=%q task=%q trigger=%q state=%q snapshot=%q attempts=%d next=%+v lastError=%q created=%+v updated=%+v completed=%+v headers=%d/%q/%q/%q/%q/%d/%+v",
++					id, operationID, taskID, trigger, state, snapshot, attempts, nextAttempt, lastError,
++					createdAt, updatedAt, completedAt, snapshotVersion, snapshotDigest, resourceKind,
++					resourceID, managedRootKey, anchorRevision, activeScope)
++			}
++		})
++	}
++}
++
++func TestArchivedResourceCleanupSchemaReplayPreservesRetainedAnchor(t *testing.T) {
++	database := openArchivedResourceCleanupMigrationDB(t)
++	if _, err := database.Exec(taskResourceCleanupSchemaDDL); err != nil {
++		t.Fatalf("create current cleanup table: %v", err)
++	}
++	snapshot := `{"schema_version":2,"retention_anchor":{"state":"retained"}}`
++	if _, err := database.Exec(`
++		INSERT INTO task_resource_cleanup_jobs (
++			id, operation_id, task_id, trigger, state, resource_snapshot,
++			snapshot_version, snapshot_digest, resource_kind, resource_id,
++			managed_root_key, anchor_revision, active_scope_key,
++			attempts, next_attempt_at, last_error, created_at, updated_at, completed_at
++		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
++	`, "retained-job", "retained-operation", "retained-task", "reconcile", "retained", snapshot,
++		2, "snapshot-digest", "git_worktree", "retained-worktree", "root-digest", 1, nil,
++		1, nil, "", "2026-08-17T01:00:00.123456+08:00", "2026-08-17T01:01:00.123456+08:00",
++		"2026-08-17T01:01:00.123456+08:00"); err != nil {
++		t.Fatalf("seed retained anchor: %v", err)
++	}
++	if _, err := NewWithDB(database, database, nil); err != nil {
++		t.Fatalf("first schema replay: %v", err)
++	}
++	if _, err := NewWithDB(database, database, nil); err != nil {
++		t.Fatalf("second schema replay: %v", err)
++	}
++	var gotSnapshot, digest, kind, resourceID, rootKey string
++	var version, revision, attempts int
++	var createdAt, updatedAt, completedAt string
++	if err := database.QueryRow(`
++		SELECT resource_snapshot, snapshot_digest, resource_kind, resource_id, managed_root_key,
++			snapshot_version, anchor_revision, attempts,
++			CAST(created_at AS TEXT), CAST(updated_at AS TEXT), CAST(completed_at AS TEXT)
++		FROM task_resource_cleanup_jobs WHERE id = 'retained-job'
++	`).Scan(&gotSnapshot, &digest, &kind, &resourceID, &rootKey, &version, &revision, &attempts,
++		&createdAt, &updatedAt, &completedAt); err != nil {
++		t.Fatalf("read retained anchor after replay: %v", err)
++	}
++	if gotSnapshot != snapshot || digest != "snapshot-digest" || kind != "git_worktree" ||
++		resourceID != "retained-worktree" || rootKey != "root-digest" || version != 2 ||
++		revision != 1 || attempts != 1 || createdAt != "2026-08-17T01:00:00.123456+08:00" ||
++		updatedAt != "2026-08-17T01:01:00.123456+08:00" || completedAt != "2026-08-17T01:01:00.123456+08:00" {
++		t.Fatalf("retained anchor changed during schema replay: snapshot=%q digest=%q kind=%q resource=%q root=%q version=%d revision=%d attempts=%d created=%q updated=%q completed=%q",
++			gotSnapshot, digest, kind, resourceID, rootKey, version, revision, attempts, createdAt, updatedAt, completedAt)
++	}
++}
++
++func TestArchivedResourceCleanupSchemaRejectsMalformedActiveScopeIndex(t *testing.T) {
++	database := openArchivedResourceCleanupMigrationDB(t)
++	if _, err := database.Exec(taskResourceCleanupSchemaDDL); err != nil {
++		t.Fatalf("create current cleanup table: %v", err)
++	}
++	if _, err := database.Exec(`CREATE INDEX uniq_task_resource_cleanup_jobs_active_scope ON task_resource_cleanup_jobs(active_scope_key)`); err != nil {
++		t.Fatalf("seed malformed cleanup index: %v", err)
++	}
++	if _, err := NewWithDB(database, database, nil); err == nil || !strings.Contains(err.Error(), "required partial unique constraint") {
++		t.Fatalf("malformed active-scope index accepted: %v", err)
++	}
++}
++
+ func TestArchivedResourceCleanupSchemaColumnsPresent(t *testing.T) {
+ 	repo := newRepoForHealTests(t)
+ 	verifyArchivedResourceCleanupColumns(t, repo)
+diff --git a/apps/backend/internal/task/repository/task_environment_repo_test.go b/apps/backend/internal/task/repository/task_environment_repo_test.go
+index c578ccebd4021a77c6a9e160842da0e8713be061..e26f4279584a03c39e0e35e893f00ecbc3768ff3 100644
+--- a/apps/backend/internal/task/repository/task_environment_repo_test.go
++++ b/apps/backend/internal/task/repository/task_environment_repo_test.go
+@@ -178,7 +178,7 @@ func TestTaskEnvironmentRepo_CreateWithEmbeddedRepos(t *testing.T) {
+ 	}
+ }
+ 
+-func TestTaskEnvironmentRepo_CascadeDeleteOnEnvDelete(t *testing.T) {
++func TestTaskEnvironmentRepo_PreservesReleaseGenerationOnEnvDelete(t *testing.T) {
+ 	repo, cleanup := createTestSQLiteRepo(t)
+ 	defer cleanup()
+ 	ctx := context.Background()
+@@ -196,8 +196,13 @@ func TestTaskEnvironmentRepo_CascadeDeleteOnEnvDelete(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatalf("list after delete: %v", err)
+ 	}
+-	if len(list) != 0 {
+-		t.Errorf("expected cascade delete to remove per-repo rows, got %d", len(list))
++	if len(list) != 1 {
++		t.Fatalf("environment deletion must preserve one durable release generation, got %d", len(list))
++	}
++	got := list[0]
++	if got.ID != er.ID || got.TaskEnvironmentID != env.ID || got.RepositoryID != er.RepositoryID ||
++		got.Status != "active" || got.DeletedAt != nil {
++		t.Fatalf("preserved release generation = %#v, want active unchanged row %#v", got, er)
+ 	}
+ }
+ 
+diff --git a/docs/plans/pinwei-v088-semantic-port/task-08-migration-verification.md b/docs/plans/pinwei-v088-semantic-port/task-08-migration-verification.md
+index 68a992e23cb62bc2e77282fe8240acadbb27664f..5850ecd4bcd9ce0522bb46057a8e82a434704e2e 100644
+--- a/docs/plans/pinwei-v088-semantic-port/task-08-migration-verification.md
++++ b/docs/plans/pinwei-v088-semantic-port/task-08-migration-verification.md
+@@ -23,4 +23,40 @@ spec: "../../specs/tasks/archived-resource-safety/spec.md"
+ 
+ ## Results
+ 
+-Pending.
++2026-08-17 local verification receipt (no runtime, database, or physical
++action):
++
++- SQLite cleanup-schema adversarial matrix: PASS. New fixtures cover a v0.88
++  legacy table, a half-migrated table, idempotent replay, malformed
++  active-scope index rejection, and byte-preserving replay of an existing
++  retained v2 anchor. The existing task-environment release-generation test
++  also verifies that environment deletion preserves the authoritative row.
++- Managed-root regression matrix: PASS. Worktree preparer rollback fixtures
++  now use a test-only authorized admission wrapper; production remains wired
++  to the sealed executor. macOS temporary-directory aliases are canonicalized
++  only after root/path validation, while a symlinked workspace root is still
++  rejected.
++- Targeted ordinary tests: PASS for physicaldelete, worktree, task SQLite
++  repository, task service, task handlers, lifecycle, executor, and
++  backendapp. The backendapp route harness now matches production's
++  resource-cleanup/unarchive composition.
++- Targeted race suite: PASS for physicaldelete, worktree, task SQLite
++  repository, task service, task handlers, lifecycle, and executor.
++- Full backend compile gate (`go test ./... -run '^$'`): PASS. Full vet:
++  PASS. `git diff --check`: PASS. Every changed Go file is gofmt-clean; the
++  repository-wide `gofmt -l internal` gate still reports four unchanged
++  inherited files (`orchestrator/queue_purge_status_test.go`, task SQLite
++  `base.go`, and two task status-summary projector files), so that global
++  formatting receipt is classified FAIL rather than PASS.
++- Full ordinary backend suite (`go test ./... -count=1`): classified FAIL in
++  two inherited host-fixture tests outside this task's source scope:
++  `internal/agentctl/server/api` expects a bundled VS Code remote CLI below
++  the Go test binary, and `internal/agentctl/server/config` assumes a login
++  shell preserves the generated GitHub CLI shim ahead of the host `gh`.
++  Both reproduce in isolation on this host. They are not counted as PASS and
++  need a dedicated agentctl fixture/environment repair.
++- PostgreSQL: NOT_RUN. `KANDEV_TEST_POSTGRES_DSN` was explicitly unset; no
++  PostgreSQL instance was contacted.
++- Frontend focused tests: `FRONTEND_NOT_RUN_DEPENDENCIES_ABSENT`; no
++  dependencies were installed. The dependency-free backend feature-contract
++  test passed.
+-- 
+2.55.0
+

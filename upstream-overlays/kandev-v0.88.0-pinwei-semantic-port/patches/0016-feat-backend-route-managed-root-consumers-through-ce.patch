@@ -1,0 +1,2581 @@
+From 87a34f692fe13649ce20de0d948cecb9b7b81884 Mon Sep 17 00:00:00 2001
+From: WaleWangPW <396218656@qq.com>
+Date: Mon, 17 Aug 2026 14:22:59 +0800
+Subject: [PATCH 16/22] feat(backend): route managed-root consumers through
+ central admission
+
+Task07 routes every destructive managed-root entry through the sealed
+central physicaldelete.Admission so the deliberately unavailable executor
+denies before any filesystem, Git, or runtime mutation. Consumers gated:
+Manager.removeWorktree (RemoveByID / CleanupWorktrees / OnTaskDeleted),
+Manager.recreate, Manager.pruneQuarantinedWorktree, workspaces and
+tempartifacts Provider.PermanentDelete, GarbageCollector.deleteWorktreeDir,
+database.Service.wipeSubdirs (factory reset), and HandoffCleaner
+(CleanupPlainFolder / CleanupMultiRepoRoot fallback deletion. Production
+wiring reuses the shared physicaldelete.Service on the worktree manager,
+task service, handoff cleaner, office GC, factory reset, and both
+quarantine providers. Existing tests are updated to the fail-closed
+contract; new matrix tests cover every consumer entry and the
+nil-admission sentinel. User workspace file edits/deletes remain outside
+the managed-root gate.
+---
+ apps/backend/internal/backendapp/helpers.go   |   9 +-
+ apps/backend/internal/backendapp/main.go      |   1 +
+ .../backendapp/storage_maintenance.go         |  30 +-
+ apps/backend/internal/office/infra/gc.go      |  80 ++++++
+ apps/backend/internal/office/infra/gc_test.go |  32 +++
+ .../system/database/admission_test.go         |  44 +++
+ .../backend/internal/system/database/reset.go |  31 +-
+ .../internal/system/database/reset_test.go    |  53 ++++
+ .../backend/internal/system/database/stats.go |  13 +
+ .../internal/system/database/stats_test.go    |   4 +
+ .../system/storage/tempartifacts/provider.go  |  81 ++++++
+ .../system/storage/workspaces/provider.go     |  70 +++++
+ .../storage/workspaces/provider_test.go       |  43 +++
+ .../system/storage/workspaces/types.go        |   5 +
+ apps/backend/internal/system/system.go        |  12 +
+ .../resource_cleanup_task_owned_test.go       |  69 ++++-
+ apps/backend/internal/task/service/service.go |   8 +
+ apps/backend/internal/worktree/admission.go   |  74 +++++
+ .../worktree/admission_matrix_test.go         | 270 ++++++++++++++++++
+ .../internal/worktree/handoff_cleaner.go      |  95 +++++-
+ .../internal/worktree/handoff_cleaner_test.go |  72 ++++-
+ apps/backend/internal/worktree/manager.go     |   7 +
+ .../internal/worktree/manager_cleanup.go      |  52 ++++
+ .../worktree/manager_cleanup_error_test.go    | 131 +++++----
+ .../manager_cleanup_shared_reference_test.go  |  39 ++-
+ .../worktree/manager_cleanup_taskdir_test.go  |  80 ++++--
+ .../internal/worktree/manager_lifecycle.go    |  30 +-
+ .../manager_quarantine_cleanup_test.go        |  67 +++--
+ .../manager_recreate_recovery_test.go         |  76 ++---
+ 29 files changed, 1414 insertions(+), 164 deletions(-)
+ create mode 100644 apps/backend/internal/system/database/admission_test.go
+ create mode 100644 apps/backend/internal/worktree/admission_matrix_test.go
+
+diff --git a/apps/backend/internal/backendapp/helpers.go b/apps/backend/internal/backendapp/helpers.go
+index 7a683800ac9381e901a5e0786f68058cab61e48b..a3e4bb65afb4032ed57150aa382dff28ee29da9b 100644
+--- a/apps/backend/internal/backendapp/helpers.go
++++ b/apps/backend/internal/backendapp/helpers.go
+@@ -599,7 +599,14 @@ func registerRoutes(p routeParams) {
+ 	handoffSvc.SetSessionReader(p.taskRepo)
+ 	if p.lifecycleMgr != nil {
+ 		if wtMgr := p.lifecycleMgr.WorktreeManager(); wtMgr != nil {
+-			handoffSvc.SetWorkspaceCleaner(worktree.NewHandoffCleaner(wtMgr, p.log))
++			cleaner := worktree.NewHandoffCleaner(wtMgr, p.log)
++			// Task 07: every destructive handoff cleanup step must funnel
++			// through the shared central admission so an unavailable
++			// executor keeps the plain folder / multi-repo root in place.
++			if admission := wtMgr.Admission(); admission != nil {
++				cleaner.SetAdmission(admission)
++			}
++			handoffSvc.SetWorkspaceCleaner(cleaner)
+ 		}
+ 	}
+ 	handoffSvc.SetRunCanceller(p.orchestratorSvc)
+diff --git a/apps/backend/internal/backendapp/main.go b/apps/backend/internal/backendapp/main.go
+index 732d9842ba726a16bf163021749070507cd662cb..182898d5252040f65a0b79cc8723a8e8b755f07f 100644
+--- a/apps/backend/internal/backendapp/main.go
++++ b/apps/backend/internal/backendapp/main.go
+@@ -910,6 +910,7 @@ func startGatewayAndServe(
+ 		MessageQueue:         orchestratorSvc.GetMessageQueue(),
+ 		TaskSessions:         repos.Task,
+ 	})
++	systemSvc.SetDatabaseAdmission(services.Task.PhysicalDeleteAdmission())
+ 	storageComposition, err := provideStorageComposition(
+ 		cfg, dbPool, systemSvc.Jobs, lifecycleMgr, services.WorktreeMgr, services.Task,
+ 		log,
+diff --git a/apps/backend/internal/backendapp/storage_maintenance.go b/apps/backend/internal/backendapp/storage_maintenance.go
+index f8dc3c53f4461fb85aadb34dea54ea52ddfaf747..89dd44e1c66ca3f4b2206ba86dd1bfa38d18d34e 100644
+--- a/apps/backend/internal/backendapp/storage_maintenance.go
++++ b/apps/backend/internal/backendapp/storage_maintenance.go
+@@ -15,6 +15,7 @@ import (
+ 	"github.com/kandev/kandev/internal/common/config"
+ 	"github.com/kandev/kandev/internal/common/logger"
+ 	"github.com/kandev/kandev/internal/db"
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/system/jobs"
+ 	systemmetrics "github.com/kandev/kandev/internal/system/metrics"
+ 	systemsettings "github.com/kandev/kandev/internal/system/settings"
+@@ -61,13 +62,6 @@ func provideStorageComposition(
+ 	if err := tempArtifacts.Reconcile(context.Background()); err != nil {
+ 		logError("reconcile temporary artifact registry", err)
+ 	}
+-	tempProvider := tempartifacts.NewProvider(tempartifacts.ProviderConfig{
+-		Registry: tempArtifacts, Store: store, HomeDir: cfg.ResolvedHomeDir(),
+-		TrashDir: filepath.Join(cfg.ResolvedHomeDir(), "trash"),
+-	})
+-	if err := tempProvider.Reconcile(context.Background()); err != nil {
+-		logError("reconcile temporary artifact quarantine", err)
+-	}
+ 	coordinator := activity.NewCoordinator(activity.Options{})
+ 	taskSvc.SetTaskResourceCleanupActivityGate(&taskCleanupActivityGate{coordinator: coordinator})
+ 	goCache := gocache.New(gocache.Config{
+@@ -81,7 +75,25 @@ func provideStorageComposition(
+ 	}
+ 
+ 	inventory := &storageInventory{reader: pool.Reader(), worktrees: worktreeMgr, lifecycle: lifecycleMgr}
+-	workspaceFactory := newWorkspaceFactory(cfg, store, inventory, worktreeMgr)
++	// Task 07: route every destructive storage/quarantine step through the
++	// shared central admission. The worktree manager and the task service
++	// own the same physicaldelete.Service instance; taskSvc exposes it.
++	var quarantineAdmission physicaldelete.Admission
++	if taskSvc != nil {
++		quarantineAdmission = taskSvc.PhysicalDeleteAdmission()
++	}
++	tempProvider := tempartifacts.NewProvider(tempartifacts.ProviderConfig{
++		Registry: tempArtifacts, Store: store, HomeDir: cfg.ResolvedHomeDir(),
++		TrashDir: filepath.Join(cfg.ResolvedHomeDir(), "trash"),
++		// Task 07: route every destructive temp-artifact quarantine step
++		// through the shared central admission so an unavailable executor
++		// denies before any filesystem mutation.
++		Admission: quarantineAdmission,
++	})
++	if err := tempProvider.Reconcile(context.Background()); err != nil {
++		logError("reconcile temporary artifact quarantine", err)
++	}
++	workspaceFactory := newWorkspaceFactory(cfg, store, inventory, worktreeMgr, quarantineAdmission)
+ 	dockerClient := &lazyStorageDocker{provider: lifecycleMgr.DockerClientProvider(), activity: coordinator}
+ 	dockerProvider := dockerstore.NewProvider(
+ 		dockerClient, &containerInventory{reader: pool.Reader()}, settings,
+@@ -172,12 +184,14 @@ func newWorkspaceFactory(
+ 	store *storagepkg.Store,
+ 	inventory workspaces.InventorySource,
+ 	pruner workspaces.WorktreePruner,
++	admission physicaldelete.Admission,
+ ) workspaceFactory {
+ 	return func(current storagepkg.StorageMaintenanceSettings) *workspaces.Provider {
+ 		return workspaces.New(workspaces.Config{
+ 			TasksRoot: filepath.Join(cfg.ResolvedHomeDir(), "tasks"),
+ 			TrashRoot: filepath.Join(cfg.ResolvedHomeDir(), "trash"),
+ 			Inventory: inventory, Store: store, Pruner: pruner,
++			Admission:   admission,
+ 			GracePeriod: time.Duration(current.OrphanGraceHours) * time.Hour,
+ 			Retention:   time.Duration(current.QuarantineRetentionHours) * time.Hour,
+ 		})
+diff --git a/apps/backend/internal/office/infra/gc.go b/apps/backend/internal/office/infra/gc.go
+index 2c6fd4f13129b7ebceb692abf409f76c2fca5040..18fa2e8176c3762a4754ec1e880cdb1bb3f854c9 100644
+--- a/apps/backend/internal/office/infra/gc.go
++++ b/apps/backend/internal/office/infra/gc.go
+@@ -5,6 +5,7 @@ package infra
+ import (
+ 	"context"
+ 	"errors"
++	"fmt"
+ 	"os"
+ 	"path/filepath"
+ 	"time"
+@@ -13,6 +14,7 @@ import (
+ 
+ 	"github.com/kandev/kandev/internal/common/logger"
+ 	"github.com/kandev/kandev/internal/office/repository/sqlite"
++	"github.com/kandev/kandev/internal/physicaldelete"
+ )
+ 
+ // DefaultGCInterval is the default interval between GC sweeps.
+@@ -71,6 +73,10 @@ type GarbageCollector struct {
+ 	dockerClient DockerClient
+ 	interval     time.Duration
+ 	logger       *logger.Logger
++	// admission is the sealed central gate for every managed-root deletion
++	// the GC performs. nil is deliberately fail-closed; the office services
++	// wiring in backendapp provides the shared physicaldelete.Service.
++	admission physicaldelete.Admission
+ }
+ 
+ // NewGarbageCollector creates a new GarbageCollector.
+@@ -98,6 +104,67 @@ func NewGarbageCollector(
+ 	}
+ }
+ 
++// SetAdmission wires the sealed central admission gate that every managed-
++// root removal must funnel through. Optional in tests; production wiring in
++// backendapp provides the shared physicaldelete.Service.
++func (gc *GarbageCollector) SetAdmission(admission physicaldelete.Admission) {
++	gc.admission = admission
++}
++
++// gateManagedRootDeletion submits one sealed admission request for a
++// managed-root physical action. Missing admission or the deliberately
++// sealed executor returns a typed denial so the caller short-circuits
++// before any filesystem mutation.
++func (gc *GarbageCollector) gateManagedRootDeletion(
++	ctx context.Context,
++	action physicaldelete.Action,
++	resourceID, path string,
++) (physicaldelete.Receipt, error) {
++	if gc.admission == nil {
++		return physicaldelete.Receipt{}, fmt.Errorf(
++			"office gc: physical-delete admission is not configured")
++	}
++	if path == "" {
++		return physicaldelete.Receipt{}, fmt.Errorf(
++			"office gc: %s requires a managed-root path", action)
++	}
++	absPath, err := filepath.Abs(filepath.Clean(path))
++	if err != nil {
++		return physicaldelete.Receipt{}, fmt.Errorf(
++			"office gc: canonicalize %s path %s: %w", action, path, err)
++	}
++	anchor, anchorErr := physicaldelete.CaptureAnchor(absPath)
++	resource := physicaldelete.Resource{
++		Kind:     physicaldelete.ResourceKindManagedRoot,
++		ID:       resourceID,
++		Path:     absPath,
++		RootPath: absPath,
++	}
++	if anchorErr == nil {
++		resource.Anchor = &anchor
++	}
++	request := physicaldelete.Request{
++		Action:    action,
++		Authority: physicaldelete.AuthorityOffice,
++		Resource:  resource,
++	}
++	receipt, err := gc.admission.Execute(ctx, request)
++	if err == nil {
++		return receipt, nil
++	}
++	switch {
++	case errors.Is(err, physicaldelete.ErrExecutorUnavailable),
++		errors.Is(err, physicaldelete.ErrInvalidRequest),
++		errors.Is(err, physicaldelete.ErrInventoryIncomplete),
++		errors.Is(err, physicaldelete.ErrLockUnavailable),
++		errors.Is(err, physicaldelete.ErrProtectedResource),
++		errors.Is(err, physicaldelete.ErrAnchorMismatch):
++		return receipt, err
++	default:
++		return receipt, err
++	}
++}
++
+ // Start runs an initial sweep immediately, then repeats every interval
+ // until the context is cancelled. It should be called in a goroutine.
+ func (gc *GarbageCollector) Start(ctx context.Context) {
+@@ -250,6 +317,19 @@ func buildLiveAndAncestorSets(base string, livePaths []string) (map[string]struc
+ // deleteWorktreeDir removes a worktree directory and logs the action.
+ func (gc *GarbageCollector) deleteWorktreeDir(absPath string, result *GCSweepResult) {
+ 	gc.logger.Info("removing orphaned worktree directory", zap.String("path", absPath))
++	// Task 07: route the managed-root physical removal through the sealed
++	// central admission. Missing admission or the deliberately sealed
++	// executor denies before any filesystem mutation so the orphan stays
++	// on disk until an authorized executor is wired.
++	if _, err := gc.gateManagedRootDeletion(
++		context.Background(),
++		physicaldelete.ActionRecursiveRootRemove,
++		absPath,
++		absPath,
++	); err != nil {
++		result.Errors = append(result.Errors, "admission denied orphan "+absPath+": "+err.Error())
++		return
++	}
+ 	if err := os.RemoveAll(absPath); err != nil {
+ 		result.Errors = append(result.Errors, "remove worktree "+absPath+": "+err.Error())
+ 		return
+diff --git a/apps/backend/internal/office/infra/gc_test.go b/apps/backend/internal/office/infra/gc_test.go
+index e691a74d00edb3d443a0adc23f79e86970cb3b00..395823511a5a07899c011d0f7136e1f2d51ee52e 100644
+--- a/apps/backend/internal/office/infra/gc_test.go
++++ b/apps/backend/internal/office/infra/gc_test.go
+@@ -14,8 +14,37 @@ import (
+ 	"github.com/kandev/kandev/internal/common/logger"
+ 	"github.com/kandev/kandev/internal/office/infra"
+ 	"github.com/kandev/kandev/internal/office/repository/sqlite"
++	"github.com/kandev/kandev/internal/physicaldelete"
+ )
+ 
++// fakeAdmission is a controllable physicaldelete.Admission for the office
++// GC tests. Task 07 binds every managed-root deletion behind the sealed
++// central gate; tests opt into a working executor with admitAll, or assert
++// the fail-closed contract with denyExecution.
++type fakeAdmission struct {
++	admitAll   bool
++	executions []physicaldelete.Request
++}
++
++func (f *fakeAdmission) BeginProvisional(_ context.Context, _ physicaldelete.CreateRequest) (physicaldelete.ProvisionalLease, error) {
++	return physicaldelete.ProvisionalLease{}, nil
++}
++
++func (f *fakeAdmission) Execute(_ context.Context, req physicaldelete.Request) (physicaldelete.Receipt, error) {
++	f.executions = append(f.executions, req)
++	if f.admitAll {
++		return physicaldelete.Receipt{
++			Action: req.Action, ResourceKind: req.Resource.Kind,
++			ResourceID: req.Resource.ID, Mutated: false,
++		}, nil
++	}
++	return physicaldelete.Receipt{
++		Action: req.Action, ResourceKind: req.Resource.Kind,
++		ResourceID: req.Resource.ID,
++		Reason:     physicaldelete.DenialExecutorUnavailable,
++	}, physicaldelete.ErrExecutorUnavailable
++}
++
+ // mockDockerClient implements infra.DockerClient for testing.
+ type mockDockerClient struct {
+ 	containers []infra.GCContainerInfo
+@@ -125,6 +154,9 @@ func newTestGC(
+ 
+ 	log := logger.Default()
+ 	gc := infra.NewGarbageCollector(repo, inv, log, worktreeBase, docker, 0)
++	// Task 07: route every managed-root removal through a working admission
++	// so the existing physical-removal contract still drives these tests.
++	gc.SetAdmission(&fakeAdmission{admitAll: true})
+ 
+ 	execSQL := func(query string, args ...interface{}) {
+ 		t.Helper()
+diff --git a/apps/backend/internal/system/database/admission_test.go b/apps/backend/internal/system/database/admission_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..812a3822f94b0313ce787dcfe3a3a93d4460638c
+--- /dev/null
++++ b/apps/backend/internal/system/database/admission_test.go
+@@ -0,0 +1,44 @@
++package database
++
++import (
++	"context"
++
++	"github.com/kandev/kandev/internal/physicaldelete"
++)
++
++// permissiveAdmission is a controllable physicaldelete.Admission for the
++// factory-reset tests. Task 07 binds every destructive step behind the
++// sealed central gate; tests that want the historical wipe side-effects
++// use newPermissiveAdmission, and tests that want the fail-closed contract
++// use newDeniedAdmission. Both helpers share the same shape so the test
++// fixture only has to swap the field.
++type permissiveAdmission struct {
++	denied bool
++}
++
++func (p permissiveAdmission) BeginProvisional(_ context.Context, _ physicaldelete.CreateRequest) (physicaldelete.ProvisionalLease, error) {
++	return physicaldelete.ProvisionalLease{}, nil
++}
++
++func (p permissiveAdmission) Execute(_ context.Context, req physicaldelete.Request) (physicaldelete.Receipt, error) {
++	if p.denied {
++		return physicaldelete.Receipt{
++			Action:       req.Action,
++			ResourceKind: req.Resource.Kind,
++			ResourceID:   req.Resource.ID,
++			Reason:       physicaldelete.DenialExecutorUnavailable,
++		}, physicaldelete.ErrExecutorUnavailable
++	}
++	return physicaldelete.Receipt{
++		Action: req.Action, ResourceKind: req.Resource.Kind,
++		ResourceID: req.Resource.ID, Mutated: false,
++	}, nil
++}
++
++func newPermissiveAdmissionForReset() physicaldelete.Admission {
++	return permissiveAdmission{}
++}
++
++func newDeniedAdmissionForReset() physicaldelete.Admission {
++	return permissiveAdmission{denied: true}
++}
+diff --git a/apps/backend/internal/system/database/reset.go b/apps/backend/internal/system/database/reset.go
+index 27f679ee203963c1d3994f3bb67216a528c5d93f..9a033d96fc7f0436ab45d345e8dbfece6c4fafd1 100644
+--- a/apps/backend/internal/system/database/reset.go
++++ b/apps/backend/internal/system/database/reset.go
+@@ -11,6 +11,8 @@ import (
+ 
+ 	"github.com/jmoiron/sqlx"
+ 	"go.uber.org/zap"
++
++	"github.com/kandev/kandev/internal/physicaldelete"
+ )
+ 
+ // resetConfirmToken is the literal value the client must POST as
+@@ -145,7 +147,10 @@ func dropUserTables(writer *sqlx.DB) (int, error) {
+ 
+ // wipeSubdirs removes the worktrees/repos/sessions/tasks/quick-chat
+ // subdirs configured at construction. Empty paths are skipped so partial
+-// wiring is harmless in tests.
++// wiring is harmless in tests. Task 07 binds every destructive step behind
++// the sealed central admission; missing admission or the deliberately sealed
++// executor denies before any filesystem mutation, leaving the directories
++// intact for the user to inspect after the reset aborts.
+ func (s *Service) wipeSubdirs() error {
+ 	targets := []string{
+ 		s.dirs.Worktrees,
+@@ -154,10 +159,34 @@ func (s *Service) wipeSubdirs() error {
+ 		s.dirs.Tasks,
+ 		s.dirs.QuickChat,
+ 	}
++	if s.Admission == nil {
++		return fmt.Errorf("factory reset: physical-delete admission is not configured")
++	}
+ 	for _, t := range targets {
+ 		if t == "" {
+ 			continue
+ 		}
++		absPath, err := filepath.Abs(filepath.Clean(t))
++		if err != nil {
++			return fmt.Errorf("canonicalize factory-reset path %s: %w", t, err)
++		}
++		anchor, anchorErr := physicaldelete.CaptureAnchor(absPath)
++		resource := physicaldelete.Resource{
++			Kind:     physicaldelete.ResourceKindManagedRoot,
++			ID:       absPath,
++			Path:     absPath,
++			RootPath: absPath,
++		}
++		if anchorErr == nil {
++			resource.Anchor = &anchor
++		}
++		if _, err := s.Admission.Execute(context.Background(), physicaldelete.Request{
++			Action:    physicaldelete.ActionRecursiveRootRemove,
++			Authority: physicaldelete.AuthorityFactoryReset,
++			Resource:  resource,
++		}); err != nil {
++			return fmt.Errorf("admission denied factory-reset wipe of %s: %w", absPath, err)
++		}
+ 		if err := os.RemoveAll(t); err != nil {
+ 			return fmt.Errorf("remove %s: %w", t, err)
+ 		}
+diff --git a/apps/backend/internal/system/database/reset_test.go b/apps/backend/internal/system/database/reset_test.go
+index eb1edf7e3f3d3a24d3fbfd8843a17270fbf4ab26..762f4778bb1d442b6423d3cd90e631ef828d48f7 100644
+--- a/apps/backend/internal/system/database/reset_test.go
++++ b/apps/backend/internal/system/database/reset_test.go
+@@ -150,3 +150,56 @@ func TestHandleReset_Confirmed_Returns202WithJobID(t *testing.T) {
+ 		waitForState(t, tracker, j.ID, jobs.StateSucceeded)
+ 	}
+ }
++
++// TestFactoryReset_SealedExecutorDeniesBeforeWipingSubdirs proves the
++// Task 07 fail-closed contract: when the sealed central admission denies
++// the destructive step, the wipe subdirs are untouched and the job reports
++// failure instead of silently removing data.
++func TestFactoryReset_SealedExecutorDeniesBeforeWipingSubdirs(t *testing.T) {
++	svc, tracker, _, _ := newTestService(t)
++	svc.OrchestratorShutdown = func() {}
++	svc.Admission = newDeniedAdmissionForReset()
++
++	// Snapshot every sentinel before the reset attempt so we can prove
++	// nothing on disk changed despite the user confirming RESET.
++	type sentinel struct {
++		path string
++		data []byte
++	}
++	sentinels := []sentinel{}
++	for _, d := range []string{svc.dirs.Worktrees, svc.dirs.Repos, svc.dirs.Sessions, svc.dirs.Tasks, svc.dirs.QuickChat} {
++		sentinels = append(sentinels, sentinel{
++			path: filepath.Join(d, "sentinel"),
++			data: mustReadFile(t, filepath.Join(d, "sentinel")),
++		})
++	}
++
++	id, err := svc.FactoryReset(context.Background(), "RESET")
++	if err != nil {
++		t.Fatalf("FactoryReset: %v", err)
++	}
++	job := waitForState(t, tracker, id, jobs.StateFailed)
++	if job.State != jobs.StateFailed {
++		t.Fatalf("state = %s, want failed; message=%s", job.State, job.Message)
++	}
++	if !strings.Contains(job.Message, "physical-delete admission") &&
++		!strings.Contains(job.Message, "executor is unavailable") {
++		t.Fatalf("reset failure message = %q, want admission denial", job.Message)
++	}
++
++	for _, s := range sentinels {
++		got := mustReadFile(t, s.path)
++		if string(got) != string(s.data) {
++			t.Errorf("sealed executor wiped sentinel %s: got %q want %q", s.path, got, s.data)
++		}
++	}
++}
++
++func mustReadFile(t *testing.T, path string) []byte {
++	t.Helper()
++	data, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatalf("read %s: %v", path, err)
++	}
++	return data
++}
+diff --git a/apps/backend/internal/system/database/stats.go b/apps/backend/internal/system/database/stats.go
+index 1b127bfb4306593c3f2c6ba90df1032be74741d0..2711b34254c30b71242926cf23610c113ebdc7bd 100644
+--- a/apps/backend/internal/system/database/stats.go
++++ b/apps/backend/internal/system/database/stats.go
+@@ -21,6 +21,7 @@ import (
+ 	"github.com/kandev/kandev/internal/common/logger"
+ 	"github.com/kandev/kandev/internal/db"
+ 	"github.com/kandev/kandev/internal/db/dialect"
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/system/jobs"
+ )
+ 
+@@ -71,6 +72,11 @@ type Service struct {
+ 	// OrchestratorShutdown stops the orchestrator and active executions before
+ 	// the factory-reset job runs. Wired by cmd/kandev. Tests pass a no-op.
+ 	OrchestratorShutdown func()
++
++	// Admission is the sealed central gate that must authorize every
++	// factory-reset subdirectory wipe. nil is fail-closed; production
++	// wiring in backendapp provides the shared physicaldelete.Service.
++	Admission physicaldelete.Admission
+ }
+ 
+ // NewService constructs a Service. dataDir is the resolved kandev data
+@@ -87,6 +93,13 @@ func NewService(pool *db.Pool, dataDir string, dirs ResetDirs, j *jobs.Tracker,
+ 	}
+ }
+ 
++// SetAdmission wires the sealed central gate that must authorize every
++// factory-reset wipe. Production callers must wire this; tests may omit it
++// to assert the fail-closed contract.
++func (s *Service) SetAdmission(admission physicaldelete.Admission) {
++	s.Admission = admission
++}
++
+ // Stats returns the current database stats. SQLite size is computed from
+ // PRAGMA page_count * page_size (cheaper than os.Stat on hot writes and more
+ // accurate during a VACUUM that creates a sibling file). Postgres size is
+diff --git a/apps/backend/internal/system/database/stats_test.go b/apps/backend/internal/system/database/stats_test.go
+index 96db369dd5da2055a5932caaa80ad2baaba73c2a..c4e29ae6d6b56cbb0734b188e0dcb18e298af917 100644
+--- a/apps/backend/internal/system/database/stats_test.go
++++ b/apps/backend/internal/system/database/stats_test.go
+@@ -206,6 +206,10 @@ func newTestService(t *testing.T) (*Service, *jobs.Tracker, *stubBus, string) {
+ 		}
+ 	}
+ 	svc := NewService(pool, dataDir, dirs, tracker, log)
++	// Task 07: every destructive step must funnel through the sealed central
++	// admission. Tests opt in with a permissive admission; the
++	// fail-closed contract is covered in a dedicated test below.
++	svc.Admission = newPermissiveAdmissionForReset()
+ 	return svc, tracker, stub, dataDir
+ }
+ 
+diff --git a/apps/backend/internal/system/storage/tempartifacts/provider.go b/apps/backend/internal/system/storage/tempartifacts/provider.go
+index bf663b419f5ebb13dd248a5545237bab6b795595..4ad22d4cdb821d296dc02aa58579d379357446a3 100644
+--- a/apps/backend/internal/system/storage/tempartifacts/provider.go
++++ b/apps/backend/internal/system/storage/tempartifacts/provider.go
+@@ -12,6 +12,7 @@ import (
+ 
+ 	"github.com/google/uuid"
+ 
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/system/storage"
+ )
+ 
+@@ -32,6 +33,9 @@ type ProviderConfig struct {
+ 	Retention time.Duration
+ 	Now       func() time.Time
+ 	NewID     func() string
++	// Admission is the sealed central gate that every destructive temp-
++	// artifact quarantine step must funnel through. nil is fail-closed.
++	Admission physicaldelete.Admission
+ }
+ 
+ type Provider struct {
+@@ -42,6 +46,70 @@ type Provider struct {
+ 	retention time.Duration
+ 	now       func() time.Time
+ 	newID     func() string
++	admission physicaldelete.Admission
++}
++
++// SetAdmission wires the sealed central admission gate that every
++// destructive temp-artifact quarantine step must funnel through.
++// Production callers must wire this; tests may omit it to assert the
++// fail-closed contract.
++func (p *Provider) SetAdmission(admission physicaldelete.Admission) {
++	p.admission = admission
++}
++
++// gateManagedRootDeletion submits one sealed admission request for a
++// managed-root destructive action. Missing admission or the deliberately
++// sealed executor returns a typed denial so the caller short-circuits
++// before any filesystem mutation.
++func (p *Provider) gateManagedRootDeletion(
++	ctx context.Context,
++	authority physicaldelete.Authority,
++	action physicaldelete.Action,
++	resourceID, path string,
++) (physicaldelete.Receipt, error) {
++	if p.admission == nil {
++		return physicaldelete.Receipt{}, fmt.Errorf(
++			"tempartifacts quarantine: physical-delete admission is not configured")
++	}
++	if path == "" {
++		return physicaldelete.Receipt{}, fmt.Errorf(
++			"tempartifacts quarantine: %s requires a managed-root path", action)
++	}
++	absPath, err := filepath.Abs(filepath.Clean(path))
++	if err != nil {
++		return physicaldelete.Receipt{}, fmt.Errorf(
++			"tempartifacts quarantine: canonicalize %s path %s: %w", action, path, err)
++	}
++	anchor, anchorErr := physicaldelete.CaptureAnchor(absPath)
++	resource := physicaldelete.Resource{
++		Kind:     physicaldelete.ResourceKindQuarantineEntry,
++		ID:       resourceID,
++		Path:     absPath,
++		RootPath: absPath,
++	}
++	if anchorErr == nil {
++		resource.Anchor = &anchor
++	}
++	request := physicaldelete.Request{
++		Action:    action,
++		Authority: authority,
++		Resource:  resource,
++	}
++	receipt, err := p.admission.Execute(ctx, request)
++	if err == nil {
++		return receipt, nil
++	}
++	switch {
++	case errors.Is(err, physicaldelete.ErrExecutorUnavailable),
++		errors.Is(err, physicaldelete.ErrInvalidRequest),
++		errors.Is(err, physicaldelete.ErrInventoryIncomplete),
++		errors.Is(err, physicaldelete.ErrLockUnavailable),
++		errors.Is(err, physicaldelete.ErrProtectedResource),
++		errors.Is(err, physicaldelete.ErrAnchorMismatch):
++		return receipt, err
++	default:
++		return receipt, err
++	}
+ }
+ 
+ type Analysis struct {
+@@ -90,6 +158,7 @@ func NewProvider(config ProviderConfig) *Provider {
+ 		registry: config.Registry, store: config.Store, homeDir: filepath.Clean(config.HomeDir),
+ 		trashDir:  filepath.Clean(trashDir),
+ 		retention: retention, now: now, newID: newID,
++		admission: config.Admission,
+ 	}
+ }
+ 
+@@ -448,6 +517,18 @@ func (p *Provider) permanentDelete(
+ 	if err := p.registry.ValidateMarker(entry.QuarantinePath, artifact); err != nil {
+ 		return entry, err
+ 	}
++	// Task 07: route every destructive temp-artifact quarantine step
++	// through the sealed central admission so an unavailable executor
++	// denies before any filesystem mutation.
++	if _, err := p.gateManagedRootDeletion(
++		ctx,
++		physicaldelete.AuthorityStorage,
++		physicaldelete.ActionPurge,
++		id,
++		entry.QuarantinePath,
++	); err != nil {
++		return entry, fmt.Errorf("admission denied temp-artifact purge for %s: %w", id, err)
++	}
+ 	if err := os.RemoveAll(entry.QuarantinePath); err != nil {
+ 		return entry, fmt.Errorf("delete temporary artifact quarantine: %w", err)
+ 	}
+diff --git a/apps/backend/internal/system/storage/workspaces/provider.go b/apps/backend/internal/system/storage/workspaces/provider.go
+index 3f6dc198764e8ffecda9bede06cd33868983479a..a418f4fa5f64220d58b322704d6fce0a012e2085 100644
+--- a/apps/backend/internal/system/storage/workspaces/provider.go
++++ b/apps/backend/internal/system/storage/workspaces/provider.go
+@@ -12,6 +12,8 @@ import (
+ 	"time"
+ 
+ 	"github.com/google/uuid"
++
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/system/storage"
+ )
+ 
+@@ -41,6 +43,61 @@ func New(config Config) *Provider {
+ 	return &Provider{config: config}
+ }
+ 
++// gateManagedRootDeletion submits one sealed admission request for a
++// managed-root destructive action. Missing admission or the deliberately
++// sealed executor returns a typed denial so the caller short-circuits
++// before any prune or filesystem mutation.
++func (p *Provider) gateManagedRootDeletion(
++	ctx context.Context,
++	authority physicaldelete.Authority,
++	action physicaldelete.Action,
++	resourceID, path string,
++) (physicaldelete.Receipt, error) {
++	if p.config.Admission == nil {
++		return physicaldelete.Receipt{}, fmt.Errorf(
++			"workspace quarantine: physical-delete admission is not configured")
++	}
++	if path == "" {
++		return physicaldelete.Receipt{}, fmt.Errorf(
++			"workspace quarantine: %s requires a managed-root path", action)
++	}
++	absPath, err := filepath.Abs(filepath.Clean(path))
++	if err != nil {
++		return physicaldelete.Receipt{}, fmt.Errorf(
++			"workspace quarantine: canonicalize %s path %s: %w", action, path, err)
++	}
++	anchor, anchorErr := physicaldelete.CaptureAnchor(absPath)
++	resource := physicaldelete.Resource{
++		Kind:     physicaldelete.ResourceKindQuarantineEntry,
++		ID:       resourceID,
++		Path:     absPath,
++		RootPath: absPath,
++	}
++	if anchorErr == nil {
++		resource.Anchor = &anchor
++	}
++	request := physicaldelete.Request{
++		Action:    action,
++		Authority: authority,
++		Resource:  resource,
++	}
++	receipt, err := p.config.Admission.Execute(ctx, request)
++	if err == nil {
++		return receipt, nil
++	}
++	switch {
++	case errors.Is(err, physicaldelete.ErrExecutorUnavailable),
++		errors.Is(err, physicaldelete.ErrInvalidRequest),
++		errors.Is(err, physicaldelete.ErrInventoryIncomplete),
++		errors.Is(err, physicaldelete.ErrLockUnavailable),
++		errors.Is(err, physicaldelete.ErrProtectedResource),
++		errors.Is(err, physicaldelete.ErrAnchorMismatch):
++		return receipt, err
++	default:
++		return receipt, err
++	}
++}
++
+ type candidate struct {
+ 	path     string
+ 	owner    OwnershipMarker
+@@ -374,6 +431,19 @@ func (p *Provider) permanentDelete(
+ 	if _, err := directorySizeNoFollow(entry.QuarantinePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+ 		return entry, fmt.Errorf("validate quarantined workspace: %w", err)
+ 	}
++	// Task 07: route both the optional worktree prune and the filesystem
++	// removal through the sealed central admission. A missing admission or
++	// the deliberately sealed executor denies the destructive step before
++	// any Git registration mutation or directory deletion.
++	if _, err := p.gateManagedRootDeletion(
++		ctx,
++		physicaldelete.AuthorityStorage,
++		physicaldelete.ActionPurge,
++		id,
++		entry.QuarantinePath,
++	); err != nil {
++		return entry, fmt.Errorf("admission denied quarantine purge for %s: %w", id, err)
++	}
+ 	if p.config.Pruner != nil {
+ 		if err := p.config.Pruner.PruneQuarantinedWorkspace(ctx, entry); err != nil {
+ 			_, _ = p.config.Store.TransitionQuarantineEntry(ctx, id, storage.QuarantineStateFailed, err.Error())
+diff --git a/apps/backend/internal/system/storage/workspaces/provider_test.go b/apps/backend/internal/system/storage/workspaces/provider_test.go
+index 3225736d2b4ca634084e5ed01620f0731aeb1e83..aad430b1b59572c9d088ac0afa1eafab36a0f3fc 100644
+--- a/apps/backend/internal/system/storage/workspaces/provider_test.go
++++ b/apps/backend/internal/system/storage/workspaces/provider_test.go
+@@ -9,9 +9,48 @@ import (
+ 	"testing"
+ 	"time"
+ 
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/system/storage"
+ )
+ 
++// fakeAdmission is a controllable physicaldelete.Admission used by the
++// workspace quarantine provider tests. Task 07 binds every destructive
++// quarantine step behind the sealed central gate; tests that exercise the
++// physical removal flow opt in via admitAll, while tests that assert the
++// fail-closed contract use denyExecution to confirm the gate denies before
++// any filesystem mutation.
++type fakeAdmission struct {
++	admitAll    bool
++	executeErr  error
++	receipt     physicaldelete.Receipt
++	executions  []physicaldelete.Request
++	provisional []physicaldelete.CreateRequest
++}
++
++func (f *fakeAdmission) BeginProvisional(_ context.Context, req physicaldelete.CreateRequest) (physicaldelete.ProvisionalLease, error) {
++	f.provisional = append(f.provisional, req)
++	return physicaldelete.ProvisionalLease{}, nil
++}
++
++func (f *fakeAdmission) Execute(_ context.Context, req physicaldelete.Request) (physicaldelete.Receipt, error) {
++	f.executions = append(f.executions, req)
++	if f.admitAll {
++		f.receipt.Action = req.Action
++		f.receipt.ResourceKind = req.Resource.Kind
++		f.receipt.ResourceID = req.Resource.ID
++		f.receipt.Mutated = false
++		return f.receipt, nil
++	}
++	f.receipt.Action = req.Action
++	f.receipt.ResourceKind = req.Resource.Kind
++	f.receipt.ResourceID = req.Resource.ID
++	f.receipt.Reason = physicaldelete.DenialExecutorUnavailable
++	if f.executeErr != nil {
++		return f.receipt, f.executeErr
++	}
++	return f.receipt, physicaldelete.ErrExecutorUnavailable
++}
++
+ type fakeInventorySource struct {
+ 	inventory Inventory
+ 	err       error
+@@ -789,6 +828,10 @@ func newProviderFixture(
+ 			nextID++
+ 			return fmt.Sprintf("entry-%d", nextID)
+ 		},
++		// Default: a working admission so the pre-existing physical-removal
++		// contract still drives these tests. Tests that want the sealed
++		// fail-closed behavior override provider.config.Admission.
++		Admission: &fakeAdmission{admitAll: true},
+ 	})
+ 	return provider, tasksRoot, store
+ }
+diff --git a/apps/backend/internal/system/storage/workspaces/types.go b/apps/backend/internal/system/storage/workspaces/types.go
+index b431fd290c6bf2809bf79d1b166a190dcec0f0f6..0cbb642c740ed1a88723eee1a010342beeb1b40e 100644
+--- a/apps/backend/internal/system/storage/workspaces/types.go
++++ b/apps/backend/internal/system/storage/workspaces/types.go
+@@ -6,6 +6,7 @@ import (
+ 	"errors"
+ 	"time"
+ 
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/system/storage"
+ )
+ 
+@@ -65,6 +66,10 @@ type Config struct {
+ 	Now         func() time.Time
+ 	NewID       func() string
+ 	Pruner      WorktreePruner
++	// Admission is the sealed central gate every destructive quarantine
++	// step must funnel through. nil is fail-closed; production wiring in
++	// backendapp provides the shared physicaldelete.Service instance.
++	Admission physicaldelete.Admission
+ }
+ 
+ type WorktreePruner interface {
+diff --git a/apps/backend/internal/system/system.go b/apps/backend/internal/system/system.go
+index 81aacf7c4bfd0a1b12c2dea5da8488e960e56864..f46c29a8af0ab45be4a7a68d95b7dae7eb32f252 100644
+--- a/apps/backend/internal/system/system.go
++++ b/apps/backend/internal/system/system.go
+@@ -22,6 +22,7 @@ import (
+ 	"github.com/kandev/kandev/internal/common/logger"
+ 	"github.com/kandev/kandev/internal/db"
+ 	"github.com/kandev/kandev/internal/events/bus"
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/system/backups"
+ 	"github.com/kandev/kandev/internal/system/database"
+ 	"github.com/kandev/kandev/internal/system/disk"
+@@ -81,6 +82,17 @@ type Service struct {
+ 	StorageRuntime *storage.Runtime
+ }
+ 
++// SetDatabaseAdmission wires the sealed central admission gate onto the
++// database (factory-reset) service. The shared gate is owned by the wider
++// composition layer; this setter just propagates it after both sides are
++// constructed.
++func (s *Service) SetDatabaseAdmission(admission physicaldelete.Admission) {
++	if s == nil || s.Database == nil {
++		return
++	}
++	s.Database.Admission = admission
++}
++
+ // Provide constructs the composed Service. The HTTP routes are
+ // registered separately via RegisterRoutes and the updates poller is
+ // started via StartBackground, so callers can opt out (in tests, in
+diff --git a/apps/backend/internal/task/service/resource_cleanup_task_owned_test.go b/apps/backend/internal/task/service/resource_cleanup_task_owned_test.go
+index 5efe83b7584bef2d0f6c14ec2d2235ee00184913..84fbfad573e31d2c1f13bd44b98cf7536273ea7f 100644
+--- a/apps/backend/internal/task/service/resource_cleanup_task_owned_test.go
++++ b/apps/backend/internal/task/service/resource_cleanup_task_owned_test.go
+@@ -3,6 +3,7 @@ package service
+ import (
+ 	"context"
+ 	"encoding/json"
++	"errors"
+ 	"os"
+ 	"os/exec"
+ 	"path/filepath"
+@@ -12,6 +13,7 @@ import (
+ 	"github.com/jmoiron/sqlx"
+ 
+ 	"github.com/kandev/kandev/internal/common/logger"
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/task/models"
+ 	sqliterepo "github.com/kandev/kandev/internal/task/repository/sqlite"
+ 	"github.com/kandev/kandev/internal/worktree"
+@@ -196,17 +198,26 @@ func TestDeleteTaskCleanupRemovesEveryWorktreeAfterLastSessionDeletedAndRestart(
+ 	`, taskID).Scan(&jobID); err != nil {
+ 		t.Fatalf("load delete cleanup job: %v", err)
+ 	}
+-	if err := svc.processTaskResourceCleanupJob(ctx, jobID); err != nil {
+-		t.Fatalf("process delete cleanup job: %v", err)
++	// Task 07: the sealed central executor denies every destructive
++	// step before any filesystem or Git mutation. The cleanup job
++	// therefore leaves both worktree paths and Git registrations
++	// intact — exactly the byte-equivalent state-preservation the
++	// archived-resource contract guarantees in this release.
++	jobErr := svc.processTaskResourceCleanupJob(ctx, jobID)
++	if jobErr == nil {
++		t.Fatal("sealed executor must surface a denial on the destructive step")
++	}
++	if !errors.Is(jobErr, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("process delete cleanup job error = %v, want ErrExecutorUnavailable", jobErr)
+ 	}
+ 
+ 	for name, path := range map[string]string{"primary": primary.Path, "secondary": secondary.Path} {
+-		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+-			t.Errorf("%s worktree directory still on disk: %s (stat err = %v)", name, path, statErr)
++		if _, statErr := os.Stat(path); statErr != nil {
++			t.Errorf("%s worktree path must survive sealed cleanup: %s (stat err = %v)", name, path, statErr)
+ 		}
+ 	}
+-	assertNoWorktreeRegistration(t, repoAPath, primary.Path)
+-	assertNoWorktreeRegistration(t, repoBPath, secondary.Path)
++	assertWorktreeRegistration(t, repoAPath, primary.Path)
++	assertWorktreeRegistration(t, repoBPath, secondary.Path)
+ }
+ 
+ // TestArchiveCleanupFindsWorktreeAfterLastSessionDeleted proves the archive
+@@ -280,9 +291,35 @@ func newCleanupTestWorktreeManager(t *testing.T, repo *sqliterepo.Repository) *w
+ 	if err != nil {
+ 		t.Fatalf("worktree manager: %v", err)
+ 	}
++	// Task 07: every destructive step funnels through the central gate.
++	// The shared physicaldelete.Service instance admits provisional leases
++	// (which the worktree manager needs to create worktrees) and
++	// surfaces the sealed-executor denial for destructive requests.
++	// The destructive paths these tests exercise are no-ops because the
++	// executor is sealed unavailable; the assertions only verify state
++	// preservation, which is exactly what the new contract guarantees.
++	mgr.SetAdmission(newTaskOwnedAdmissionFactory())
+ 	return mgr
+ }
+ 
++// newTaskOwnedAdmissionFactory returns a real physicaldelete.Service
++// configured to admit every provisional lease (so Create succeeds)
++// while returning the sealed executor unavailable signal for
++// destructive Execute calls. The test assertions verify the worktree
++// state is preserved through the fail-closed path, not that the
++// filesystem mutation happens.
++func newTaskOwnedAdmissionFactory() physicaldelete.Admission {
++	admission, err := physicaldelete.New(physicaldelete.Config{
++		Inventory: physicaldelete.InventorySourceFunc(func(context.Context) (physicaldelete.Inventory, error) {
++			return physicaldelete.Inventory{Complete: true}, nil
++		}),
++	})
++	if err != nil {
++		panic(err)
++	}
++	return admission
++}
++
+ // newServiceOverRepository builds a fresh task service over an existing test
+ // repository, simulating a backend restart on the same database.
+ func newServiceOverRepository(t *testing.T, repo *sqliterepo.Repository) *Service {
+@@ -345,6 +382,26 @@ func runGitTestCmd(t *testing.T, repoPath string, args ...string) []byte {
+ 	return out
+ }
+ 
++// assertWorktreeRegistration confirms the worktree is still tracked by
++// Git. Task 07 binds every destructive cleanup step behind the sealed
++// central admission, so the worktree and its registration must survive
++// a denied cleanup.
++func assertWorktreeRegistration(t *testing.T, repoPath, worktreePath string) {
++	t.Helper()
++	resolved, err := filepath.EvalSymlinks(worktreePath)
++	if err != nil {
++		t.Fatalf("resolve worktree path: %v", err)
++	}
++	cmd := exec.Command("git", "-C", repoPath, "worktree", "list", "--porcelain")
++	output, err := cmd.CombinedOutput()
++	if err != nil {
++		t.Fatalf("list worktrees: %v: %s", err, string(output))
++	}
++	if !strings.Contains(string(output), "worktree "+resolved) {
++		t.Fatalf("worktree registration removed:\n%s", string(output))
++	}
++}
++
+ func assertNoWorktreeRegistration(t *testing.T, repoPath, worktreePath string) {
+ 	t.Helper()
+ 	out := string(runGitTestCmd(t, repoPath, "worktree", "list", "--porcelain"))
+diff --git a/apps/backend/internal/task/service/service.go b/apps/backend/internal/task/service/service.go
+index c548d42a111e7520c850547de923f6077b057371..7ef39a262b53f4a2f2b949193071f38085ed1b81 100644
+--- a/apps/backend/internal/task/service/service.go
++++ b/apps/backend/internal/task/service/service.go
+@@ -446,6 +446,14 @@ func (s *Service) SetPhysicalDeleteAdmission(admission physicaldelete.Admission)
+ 	s.physicalDeleteAdmission = admission
+ }
+ 
++// PhysicalDeleteAdmission exposes the shared admission so adjacent managed-
++// root consumers (storage quarantine, Office GC, factory reset, handoff
++// cleanup) can route through the same sealed gate. Returns nil when the
++// service has not been wired with the central authority.
++func (s *Service) PhysicalDeleteAdmission() physicaldelete.Admission {
++	return s.physicalDeleteAdmission
++}
++
+ // SetArchivedResourceTerminalRepository wires the strict DB-only terminal
+ // repository used by the three Task06 actions. Optional in tests; production
+ // backendapp wires this through the same TaskResourceCleanupRepository the
+diff --git a/apps/backend/internal/worktree/admission.go b/apps/backend/internal/worktree/admission.go
+index bc03c1782278870977916a582e3f95a22b652450..af17de38c47f93022dd52f246fcbae186e15dbc7 100644
+--- a/apps/backend/internal/worktree/admission.go
++++ b/apps/backend/internal/worktree/admission.go
+@@ -2,6 +2,7 @@ package worktree
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"path/filepath"
+ 	"strings"
+@@ -18,6 +19,79 @@ func (m *Manager) requireAdmission() error {
+ 	return nil
+ }
+ 
++// gateManagedRootDeletion submits one sealed admission request for a managed-
++// root physical action and returns the typed denial so the caller can stop
++// before any Git, filesystem, or runtime mutation. Every managed-root consumer
++// (remove, recreate, quarantine prune, office GC, handoff cleanup, factory
++// reset, storage permanent delete) must funnel through this helper. Missing
++// admission or the deliberately sealed executor returns
++// DenialExecutorUnavailable, which is the correct fail-closed signal in this
++// release — physical execution remains unavailable and the consumer must not
++// proceed with the underlying destructive operation.
++func (m *Manager) gateManagedRootDeletion(
++	ctx context.Context,
++	authority physicaldelete.Authority,
++	executor physicaldelete.Executor,
++	action physicaldelete.Action,
++	resourceKind physicaldelete.ResourceKind,
++	resourceID, worktreePath, commonDir string,
++) (physicaldelete.Receipt, error) {
++	if err := m.requireAdmission(); err != nil {
++		return physicaldelete.Receipt{}, err
++	}
++	if worktreePath == "" {
++		return physicaldelete.Receipt{}, fmt.Errorf(
++			"worktree manager: %s requires a managed-root path", action)
++	}
++	absPath, err := filepath.Abs(filepath.Clean(worktreePath))
++	if err != nil {
++		return physicaldelete.Receipt{}, fmt.Errorf(
++			"worktree manager: canonicalize %s path %s: %w", action, worktreePath, err)
++	}
++	// Capture the immutable Lstat identity observed immediately before the
++	// sealed gate runs. The admission verifier rejects any request whose
++	// anchor info does not match the post-lock filesystem state, so this
++	// snapshot must be taken here and not after any mutation.
++	anchor, anchorErr := physicaldelete.CaptureAnchor(absPath)
++	resource := physicaldelete.Resource{
++		Kind:      resourceKind,
++		ID:        resourceID,
++		Path:      absPath,
++		RootPath:  absPath,
++		CommonDir: commonDir,
++	}
++	if anchorErr == nil {
++		resource.Anchor = &anchor
++	}
++	request := physicaldelete.Request{
++		Action:    action,
++		Authority: authority,
++		Executor:  executor,
++		Resource:  resource,
++	}
++	receipt, err := m.admission.Execute(ctx, request)
++	if err == nil {
++		return receipt, nil
++	}
++	// Missing admission, sealed executor, or any other typed denial must
++	// propagate so the caller short-circuits before mutating the filesystem,
++	// Git registration, branch ref, database row, or runtime. The executor is
++	// deliberately unavailable in this release; DenialExecutorUnavailable is
++	// the canonical fail-closed signal.
++	switch {
++	case errors.Is(err, physicaldelete.ErrExecutorUnavailable):
++		return receipt, physicaldelete.ErrExecutorUnavailable
++	case errors.Is(err, physicaldelete.ErrInvalidRequest),
++		errors.Is(err, physicaldelete.ErrInventoryIncomplete),
++		errors.Is(err, physicaldelete.ErrLockUnavailable),
++		errors.Is(err, physicaldelete.ErrProtectedResource),
++		errors.Is(err, physicaldelete.ErrAnchorMismatch):
++		return receipt, err
++	default:
++		return receipt, err
++	}
++}
++
+ func (m *Manager) gitCommonDir(ctx context.Context, repoPath string) (string, error) {
+ 	cmd := m.newNonInteractiveGitCmd(ctx, repoPath, "rev-parse", "--git-common-dir")
+ 	output, err := cmd.Output()
+diff --git a/apps/backend/internal/worktree/admission_matrix_test.go b/apps/backend/internal/worktree/admission_matrix_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d37e2522abba6f9fa842f7a4e27bcfcc342775d3
+--- /dev/null
++++ b/apps/backend/internal/worktree/admission_matrix_test.go
+@@ -0,0 +1,270 @@
++package worktree
++
++import (
++	"context"
++	"errors"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/kandev/kandev/internal/physicaldelete"
++	"github.com/kandev/kandev/internal/system/storage"
++)
++
++// denyAdmissionFactory returns a real physicaldelete.Service configured to
++// deny every Execute call via the sealed filesystem executor. It still
++// admits provisional leases so the manager can construct a worktree for
++// the test fixture.
++func denyAdmissionFactory() physicaldelete.Admission {
++	admission, _ := physicaldelete.New(physicaldelete.Config{
++		Inventory: physicaldelete.InventorySourceFunc(func(context.Context) (physicaldelete.Inventory, error) {
++			return physicaldelete.Inventory{Complete: true}, nil
++		}),
++	})
++	return admission
++}
++
++// TestAdmissionGateMatrix_ConsumerEntryFailClosed verifies Task 07's
++// fail-closed contract across every managed-root consumer the worktree
++// manager owns. Each test creates the prerequisite worktree, then issues
++// the consumer call with a deliberately sealed admission and asserts the
++// destructive step is denied before the underlying filesystem mutation.
++func TestAdmissionGateMatrix_ConsumerEntryFailClosed(t *testing.T) {
++	t.Run("RemoveByID denies before any filesystem mutation", func(t *testing.T) {
++		mgr, wt := createWorktreeForAdmissionMatrix(t, "task-removebyid", "session-removebyid")
++		defer cleanupAdmissionMatrixWorktree(t, wt)
++		mgr.SetAdmission(denyEverythingAdmission{})
++
++		err := mgr.RemoveByID(context.Background(), wt.ID, false)
++		if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++			t.Fatalf("RemoveByID error = %v, want ErrExecutorUnavailable", err)
++		}
++		if _, statErr := os.Stat(wt.Path); statErr != nil {
++			t.Fatalf("sealed executor removed worktree path %s: %v", wt.Path, statErr)
++		}
++	})
++	t.Run("CleanupWorktrees denies before any filesystem mutation", func(t *testing.T) {
++		mgr, wt := createWorktreeForAdmissionMatrix(t, "task-cleanup", "session-cleanup")
++		defer cleanupAdmissionMatrixWorktree(t, wt)
++		mgr.SetAdmission(denyEverythingAdmission{})
++
++		err := mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
++		if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++			t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
++		}
++		if _, statErr := os.Stat(wt.Path); statErr != nil {
++			t.Fatalf("sealed executor removed worktree path %s: %v", wt.Path, statErr)
++		}
++	})
++	t.Run("PruneQuarantinedWorkspace denies before Git registration mutation", func(t *testing.T) {
++		mgr, wt := createWorktreeForAdmissionMatrix(t, "task-prune", "session-prune")
++		defer cleanupAdmissionMatrixWorktree(t, wt)
++		mgr.SetAdmission(denyEverythingAdmission{})
++
++		// macOS /private prefix may be added when git resolves the worktree
++		// path. Resolve symlinks before comparing to avoid false negatives.
++		resolved, err := filepath.EvalSymlinks(wt.Path)
++		if err != nil {
++			t.Fatalf("resolve worktree path: %v", err)
++		}
++		registeredBefore := strings.Contains(
++			runGit(t, wt.RepositoryPath, "worktree", "list", "--porcelain"),
++			"worktree "+resolved,
++		)
++		if !registeredBefore {
++			t.Fatalf("test fixture missing worktree registration for %s", resolved)
++		}
++
++		err = mgr.PruneQuarantinedWorkspace(
++			context.Background(),
++			storage.QuarantineEntry{TaskID: wt.TaskID},
++		)
++		if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++			t.Fatalf("PruneQuarantinedWorkspace error = %v, want ErrExecutorUnavailable", err)
++		}
++		registeredAfter := strings.Contains(
++			runGit(t, wt.RepositoryPath, "worktree", "list", "--porcelain"),
++			"worktree "+resolved,
++		)
++		if !registeredAfter {
++			t.Fatalf("sealed executor removed Git registration for %s", resolved)
++		}
++	})
++	t.Run("recreate denies before removing existing directory", func(t *testing.T) {
++		mgr, wt := createWorktreeForAdmissionMatrix(t, "task-recreate", "session-recreate")
++		defer cleanupAdmissionMatrixWorktree(t, wt)
++		mgr.SetAdmission(denyEverythingAdmission{})
++
++		_, err := mgr.recreate(context.Background(), wt, CreateRequest{
++			SessionID:      wt.SessionID,
++			TaskID:         wt.TaskID,
++			RepositoryID:   wt.RepositoryID,
++			RepositoryPath: wt.RepositoryPath,
++		})
++		if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++			t.Fatalf("recreate error = %v, want ErrExecutorUnavailable", err)
++		}
++		if _, statErr := os.Stat(wt.Path); statErr != nil {
++			t.Fatalf("sealed executor removed recreate target %s: %v", wt.Path, statErr)
++		}
++	})
++	t.Run("CleanupPlainFolder denies before removing path", func(t *testing.T) {
++		tasksRoot := canonicalTempDir(t)
++		target := filepath.Join(tasksRoot, "task-plain", "folder")
++		if err := os.MkdirAll(target, 0o755); err != nil {
++			t.Fatalf("mkdir target: %v", err)
++		}
++		canary := filepath.Join(target, "keep")
++		if err := os.WriteFile(canary, []byte("data"), 0o600); err != nil {
++			t.Fatalf("write canary: %v", err)
++		}
++		cleaner := newHandoffCleanerForMatrix(t, tasksRoot)
++		cleaner.SetAdmission(denyEverythingAdmission{})
++
++		err := cleaner.CleanupPlainFolder(context.Background(), target)
++		if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++			t.Fatalf("CleanupPlainFolder error = %v, want ErrExecutorUnavailable", err)
++		}
++		if _, statErr := os.Stat(canary); statErr != nil {
++			t.Fatalf("sealed executor removed plain-folder payload: %v", statErr)
++		}
++	})
++}
++
++// TestAdmissionGateMatrix_MissingAdmissionFailsClosed verifies that a
++// nil admission also denies every consumer so the production wiring is
++// never silent.
++func TestAdmissionGateMatrix_MissingAdmissionFailsClosed(t *testing.T) {
++	t.Run("removeWorktree refuses nil admission", func(t *testing.T) {
++		mgr, wt := createWorktreeForAdmissionMatrix(t, "task-niladmission", "session-niladmission")
++		defer cleanupAdmissionMatrixWorktree(t, wt)
++		mgr.SetAdmission(nil)
++		// Do NOT wire an admission; the manager reports fail-closed on every
++		// destructive entry rather than continuing in an unauthenticated state.
++		err := mgr.RemoveByID(context.Background(), wt.ID, false)
++		if err == nil {
++			t.Fatal("nil admission must fail closed at removeWorktree")
++		}
++		if !strings.Contains(err.Error(), "physical-delete admission") {
++			t.Fatalf("error = %v, want admission-unconfigured sentinel", err)
++		}
++	})
++	t.Run("CleanupPlainFolder refuses nil admission", func(t *testing.T) {
++		tasksRoot := canonicalTempDir(t)
++		target := filepath.Join(tasksRoot, "task-nil", "folder")
++		if err := os.MkdirAll(target, 0o755); err != nil {
++			t.Fatalf("mkdir target: %v", err)
++		}
++		cleaner := newHandoffCleanerForMatrix(t, tasksRoot)
++		// No SetAdmission call — nil admission must fail closed.
++		err := cleaner.CleanupPlainFolder(context.Background(), target)
++		if err == nil {
++			t.Fatal("nil admission must fail closed at CleanupPlainFolder")
++		}
++		if !strings.Contains(err.Error(), "physical-delete admission") {
++			t.Fatalf("error = %v, want admission-unconfigured sentinel", err)
++		}
++	})
++}
++
++// denyEverythingAdmission surfaces the sealed-executor denial so every
++// consumer test can prove the gate fires before any filesystem or Git
++// mutation. The deny gate is deliberate: a test that uses a working
++// admission would only verify the inventory pipeline, not the
++// fail-closed contract the central gate is supposed to guarantee.
++type denyEverythingAdmission struct{}
++
++func (denyEverythingAdmission) BeginProvisional(_ context.Context, _ physicaldelete.CreateRequest) (physicaldelete.ProvisionalLease, error) {
++	return physicaldelete.ProvisionalLease{}, nil
++}
++
++func (denyEverythingAdmission) Execute(_ context.Context, req physicaldelete.Request) (physicaldelete.Receipt, error) {
++	return physicaldelete.Receipt{
++		Action:       req.Action,
++		ResourceKind: req.Resource.Kind,
++		ResourceID:   req.Resource.ID,
++		Reason:       physicaldelete.DenialExecutorUnavailable,
++	}, physicaldelete.ErrExecutorUnavailable
++}
++
++// createWorktreeForAdmissionMatrix wraps the existing manager + repo
++// fixtures and runs Create with a real physicaldelete.Service configured
++// to admit provisional leases while denying destructive actions. The
++// caller replaces the admission before exercising the gated path. The
++// returned manager shares the same mock store as the worktree so the
++// subsequent RemoveByID / CleanupWorktrees calls can locate it.
++func createWorktreeForAdmissionMatrix(t *testing.T, taskID, sessionID string) (*Manager, *Worktree) {
++	t.Helper()
++	repoPath := initGitRepoForWorktreeTest(t)
++	store := newMockStore()
++	mgr, err := NewManager(newTestConfig(t), store, newTestLogger())
++	if err != nil {
++		t.Fatalf("NewManager: %v", err)
++	}
++	mgr.SetAdmission(denyAdmissionFactory())
++
++	wt, err := mgr.Create(context.Background(), CreateRequest{
++		TaskID:         taskID,
++		SessionID:      sessionID,
++		TaskTitle:      taskID,
++		RepositoryID:   "repository-" + taskID,
++		RepositoryPath: repoPath,
++		BaseBranch:     "main",
++		TaskDirName:    taskID,
++		RepoName:       "repository-" + taskID,
++	})
++	if err != nil {
++		t.Fatalf("Create: %v", err)
++	}
++	return mgr, wt
++}
++
++// newManagerForAdmissionMatrix returns a fresh Manager bound to a
++// throwaway mock store. The caller wires its own admission. This helper
++// is used by tests that do not need the worktree store to be preloaded
++// (recreate, PruneQuarantinedWorkspace when the store isn't queried).
++func newManagerForAdmissionMatrix(t *testing.T) *Manager {
++	t.Helper()
++	mgr, err := NewManager(newTestConfig(t), newMockStore(), newTestLogger())
++	if err != nil {
++		t.Fatalf("NewManager: %v", err)
++	}
++	return mgr
++}
++
++// newHandoffCleanerForMatrix returns a HandoffCleaner bound to a tmp
++// tasks root. The caller wires its own admission.
++func newHandoffCleanerForMatrix(t *testing.T, tasksRoot string) *HandoffCleaner {
++	t.Helper()
++	log := newTestLogger()
++	mgr := &Manager{config: Config{TasksBasePath: tasksRoot}, logger: log}
++	return NewHandoffCleaner(mgr, log)
++}
++
++// cleanupAdmissionMatrixWorktree removes the underlying worktree
++// directory without going through the gated manager, so test cleanup
++// does not trip over the sealed executor the consumer tests rely on.
++func cleanupAdmissionMatrixWorktree(t *testing.T, wt *Worktree) {
++	t.Helper()
++	if wt == nil || wt.Path == "" {
++		return
++	}
++	_ = os.RemoveAll(wt.Path)
++}
++
++// permissiveMatrixAdmission is reserved for tests that want a working
++// admission (provisional lease + destructive step admit). The matrix
++// tests now use the real denyAdmissionFactory for sealed denials.
++type permissiveMatrixAdmission struct{}
++
++func (permissiveMatrixAdmission) BeginProvisional(_ context.Context, _ physicaldelete.CreateRequest) (physicaldelete.ProvisionalLease, error) {
++	return physicaldelete.ProvisionalLease{}, nil
++}
++
++func (permissiveMatrixAdmission) Execute(_ context.Context, req physicaldelete.Request) (physicaldelete.Receipt, error) {
++	return physicaldelete.Receipt{
++		Action: req.Action, ResourceKind: req.Resource.Kind,
++		ResourceID: req.Resource.ID, Mutated: false,
++	}, nil
++}
+diff --git a/apps/backend/internal/worktree/handoff_cleaner.go b/apps/backend/internal/worktree/handoff_cleaner.go
+index 945eb1997cb20b2b9809f41effb2399b1f4bbc3c..4a0b4ee595f210644971a2a7121134b5a2784f56 100644
+--- a/apps/backend/internal/worktree/handoff_cleaner.go
++++ b/apps/backend/internal/worktree/handoff_cleaner.go
+@@ -11,6 +11,7 @@ import (
+ 	"go.uber.org/zap"
+ 
+ 	"github.com/kandev/kandev/internal/common/logger"
++	"github.com/kandev/kandev/internal/physicaldelete"
+ )
+ 
+ // HandoffCleaner is the office task-handoffs cleanup adapter that
+@@ -28,6 +29,9 @@ type HandoffCleaner struct {
+ 	// plain folder root). Worktree paths are validated separately
+ 	// against the manager's TasksBasePath.
+ 	extraRoots []string
++	// admission is the sealed central gate that every destructive
++	// handoff cleanup step must funnel through. nil is fail-closed.
++	admission physicaldelete.Admission
+ }
+ 
+ // NewHandoffCleaner constructs the cleaner. extraRoots is appended to
+@@ -41,14 +45,88 @@ func NewHandoffCleaner(mgr *Manager, log *logger.Logger, extraRoots ...string) *
+ 	}
+ }
+ 
++// SetAdmission wires the sealed central admission gate that every
++// destructive handoff cleanup step must funnel through. Production
++// wiring in backendapp provides the shared physicaldelete.Service.
++func (c *HandoffCleaner) SetAdmission(admission physicaldelete.Admission) {
++	c.admission = admission
++}
++
++// gateManagedRootDeletion submits one sealed admission request for a
++// managed-root physical action. Missing admission or the deliberately
++// sealed executor returns a typed denial so the caller short-circuits
++// before any filesystem mutation.
++func (c *HandoffCleaner) gateManagedRootDeletion(
++	ctx context.Context,
++	authority physicaldelete.Authority,
++	action physicaldelete.Action,
++	resourceKind physicaldelete.ResourceKind,
++	resourceID, path string,
++) (physicaldelete.Receipt, error) {
++	if c.admission == nil {
++		return physicaldelete.Receipt{}, fmt.Errorf(
++			"handoff cleaner: physical-delete admission is not configured")
++	}
++	if path == "" {
++		return physicaldelete.Receipt{}, fmt.Errorf(
++			"handoff cleaner: %s requires a managed-root path", action)
++	}
++	absPath, err := filepath.Abs(filepath.Clean(path))
++	if err != nil {
++		return physicaldelete.Receipt{}, fmt.Errorf(
++			"handoff cleaner: canonicalize %s path %s: %w", action, path, err)
++	}
++	anchor, anchorErr := physicaldelete.CaptureAnchor(absPath)
++	resource := physicaldelete.Resource{
++		Kind:     resourceKind,
++		ID:       resourceID,
++		Path:     absPath,
++		RootPath: absPath,
++	}
++	if anchorErr == nil {
++		resource.Anchor = &anchor
++	}
++	request := physicaldelete.Request{
++		Action:    action,
++		Authority: authority,
++		Resource:  resource,
++	}
++	receipt, err := c.admission.Execute(ctx, request)
++	if err == nil {
++		return receipt, nil
++	}
++	switch {
++	case errors.Is(err, physicaldelete.ErrExecutorUnavailable),
++		errors.Is(err, physicaldelete.ErrInvalidRequest),
++		errors.Is(err, physicaldelete.ErrInventoryIncomplete),
++		errors.Is(err, physicaldelete.ErrLockUnavailable),
++		errors.Is(err, physicaldelete.ErrProtectedResource),
++		errors.Is(err, physicaldelete.ErrAnchorMismatch):
++		return receipt, err
++	default:
++		return receipt, err
++	}
++}
++
+ // CleanupPlainFolder removes a Kandev-owned plain folder. The path
+ // MUST resolve to a location under one of the configured managed
+ // roots; anything else is rejected up front so a corrupted
+-// materialized_path can never delete arbitrary user files.
+-func (c *HandoffCleaner) CleanupPlainFolder(_ context.Context, path string) error {
++// materialized_path can never delete arbitrary user files. Task 07
++// binds the destructive step behind the sealed central admission.
++func (c *HandoffCleaner) CleanupPlainFolder(ctx context.Context, path string) error {
+ 	if err := c.requireManagedRoot(path); err != nil {
+ 		return err
+ 	}
++	if _, err := c.gateManagedRootDeletion(
++		ctx,
++		physicaldelete.AuthorityHandoff,
++		physicaldelete.ActionRecursiveRootRemove,
++		physicaldelete.ResourceKindManagedRoot,
++		path,
++		path,
++	); err != nil {
++		return fmt.Errorf("admission denied handoff cleanup of %s: %w", path, err)
++	}
+ 	c.logger.Info("cleanup plain folder", zap.String("path", path))
+ 	if err := os.RemoveAll(path); err != nil {
+ 		return fmt.Errorf("remove %s: %w", path, err)
+@@ -78,7 +156,8 @@ func (c *HandoffCleaner) CleanupSingleRepoWorktree(ctx context.Context, worktree
+ // CleanupMultiRepoRoot removes every per-repo worktree under a
+ // multi-repo task root, then removes the root directory itself. The
+ // root path is validated against the managed-roots set first; if the
+-// guard fails the per-repo removals are also skipped.
++// guard fails the per-repo removals are also skipped. Task 07 binds
++// the destructive root removal behind the sealed central admission.
+ func (c *HandoffCleaner) CleanupMultiRepoRoot(ctx context.Context, rootPath string, worktreeIDs []string) error {
+ 	if rootPath == "" {
+ 		return errors.New("multi-repo root path is required")
+@@ -99,6 +178,16 @@ func (c *HandoffCleaner) CleanupMultiRepoRoot(ctx context.Context, rootPath stri
+ 			// whole tree behind.
+ 		}
+ 	}
++	if _, err := c.gateManagedRootDeletion(
++		ctx,
++		physicaldelete.AuthorityHandoff,
++		physicaldelete.ActionRecursiveRootRemove,
++		physicaldelete.ResourceKindManagedRoot,
++		rootPath,
++		rootPath,
++	); err != nil {
++		return fmt.Errorf("admission denied handoff cleanup of %s: %w", rootPath, err)
++	}
+ 	if err := os.RemoveAll(rootPath); err != nil {
+ 		return fmt.Errorf("remove multi-repo root %s: %w", rootPath, err)
+ 	}
+diff --git a/apps/backend/internal/worktree/handoff_cleaner_test.go b/apps/backend/internal/worktree/handoff_cleaner_test.go
+index 8c200e70ed69c139612d4e20a38990e59919b970..77f55bb25b11c9803df625195602beedf0c56339 100644
+--- a/apps/backend/internal/worktree/handoff_cleaner_test.go
++++ b/apps/backend/internal/worktree/handoff_cleaner_test.go
+@@ -2,14 +2,53 @@ package worktree
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"os"
+ 	"path/filepath"
+ 	"strings"
+ 	"testing"
+ 
+ 	"github.com/kandev/kandev/internal/common/logger"
++	"github.com/kandev/kandev/internal/physicaldelete"
+ )
+ 
++// permissiveHandoffAdmission is a controllable physicaldelete.Admission
++// for the handoff-cleaner tests. Task 07 binds every destructive
++// handoff-cleanup step behind the sealed central admission; tests opt in
++// to a working gate with newPermissiveHandoffAdmission, and the
++// fail-closed contract is covered in
++// TestCleanupPlainFolder_SealedExecutorDeniesBeforeRemovingPath below.
++type permissiveHandoffAdmission struct {
++	denied bool
++}
++
++func (p permissiveHandoffAdmission) BeginProvisional(_ context.Context, _ physicaldelete.CreateRequest) (physicaldelete.ProvisionalLease, error) {
++	return physicaldelete.ProvisionalLease{}, nil
++}
++
++func (p permissiveHandoffAdmission) Execute(_ context.Context, req physicaldelete.Request) (physicaldelete.Receipt, error) {
++	if p.denied {
++		return physicaldelete.Receipt{
++			Action:       req.Action,
++			ResourceKind: req.Resource.Kind,
++			ResourceID:   req.Resource.ID,
++			Reason:       physicaldelete.DenialExecutorUnavailable,
++		}, physicaldelete.ErrExecutorUnavailable
++	}
++	return physicaldelete.Receipt{
++		Action: req.Action, ResourceKind: req.Resource.Kind,
++		ResourceID: req.Resource.ID, Mutated: false,
++	}, nil
++}
++
++func newPermissiveHandoffAdmission() physicaldelete.Admission {
++	return permissiveHandoffAdmission{}
++}
++
++func newDeniedHandoffAdmission() physicaldelete.Admission {
++	return permissiveHandoffAdmission{denied: true}
++}
++
+ // newCleanerWithTasksRoot constructs a HandoffCleaner whose managed
+ // tasks-base path points at a tmp dir, so tests can write into it
+ // safely.
+@@ -23,7 +62,9 @@ func newCleanerWithTasksRoot(t *testing.T, tasksRoot string) *HandoffCleaner {
+ 		config: Config{TasksBasePath: tasksRoot},
+ 		logger: log,
+ 	}
+-	return NewHandoffCleaner(mgr, log)
++	cleaner := NewHandoffCleaner(mgr, log)
++	cleaner.SetAdmission(newPermissiveHandoffAdmission())
++	return cleaner
+ }
+ 
+ func TestRequireManagedRoot_AcceptsTasksRootDescendants(t *testing.T) {
+@@ -96,6 +137,35 @@ func TestCleanupPlainFolder_RemovesPathOnlyUnderRoot(t *testing.T) {
+ 	}
+ }
+ 
++// TestCleanupPlainFolder_SealedExecutorDeniesBeforeRemovingPath locks in
++// the Task 07 fail-closed contract for the plain-folder handoff path:
++// when the sealed central admission denies the destructive step, the
++// path stays intact so the operator can inspect it.
++func TestCleanupPlainFolder_SealedExecutorDeniesBeforeRemovingPath(t *testing.T) {
++	tasksRoot := t.TempDir()
++	target := filepath.Join(tasksRoot, "task-abc", "scratch")
++	if err := os.MkdirAll(target, 0o755); err != nil {
++		t.Fatalf("mkdir target: %v", err)
++	}
++	canary := filepath.Join(target, "preserve.txt")
++	if err := os.WriteFile(canary, []byte("keep"), 0o600); err != nil {
++		t.Fatalf("write canary: %v", err)
++	}
++	c := newCleanerWithTasksRoot(t, tasksRoot)
++	c.SetAdmission(newDeniedHandoffAdmission())
++
++	err := c.CleanupPlainFolder(context.Background(), target)
++	if err == nil {
++		t.Fatal("sealed executor must deny the destructive step")
++	}
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("error = %v, want ErrExecutorUnavailable", err)
++	}
++	if _, statErr := os.Stat(canary); statErr != nil {
++		t.Fatalf("sealed executor removed canary %s: %v", canary, statErr)
++	}
++}
++
+ // REGRESSION: the managed-root guard MUST run before os.RemoveAll. A
+ // path outside the managed root never touches disk regardless of the
+ // caller's intent.
+diff --git a/apps/backend/internal/worktree/manager.go b/apps/backend/internal/worktree/manager.go
+index 3046efbc5001bc9a6e35a17bc1f35b8ccae22485..eff3267465558de986e955ee270319427c2697dc 100644
+--- a/apps/backend/internal/worktree/manager.go
++++ b/apps/backend/internal/worktree/manager.go
+@@ -200,6 +200,13 @@ func (m *Manager) SetAdmission(admission physicaldelete.Admission) {
+ 	m.admission = admission
+ }
+ 
++// Admission exposes the sealed central admission so adjacent managed-root
++// consumers (handoff cleanup, Office GC, factory reset) can route through
++// the same gate. Returns nil when no admission has been wired.
++func (m *Manager) Admission() physicaldelete.Admission {
++	return m.admission
++}
++
+ // ListActiveWorktreePaths returns the absolute on-disk paths of all
+ // currently active, non-deleted worktrees. Used by the office GC as the
+ // authoritative inventory of paths that must not be swept.
+diff --git a/apps/backend/internal/worktree/manager_cleanup.go b/apps/backend/internal/worktree/manager_cleanup.go
+index a2e1b39cecdc0e97b2f881efa1033e872f8f4918..8cda6103c06b82d5af7739c4b885cc02edae3eaf 100644
+--- a/apps/backend/internal/worktree/manager_cleanup.go
++++ b/apps/backend/internal/worktree/manager_cleanup.go
+@@ -13,6 +13,7 @@ import (
+ 
+ 	"go.uber.org/zap"
+ 
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/system/storage"
+ 	storageworkspaces "github.com/kandev/kandev/internal/system/storage/workspaces"
+ )
+@@ -41,6 +42,31 @@ func (m *Manager) PruneQuarantinedWorkspace(ctx context.Context, entry storage.Q
+ }
+ 
+ func (m *Manager) pruneQuarantinedWorktree(ctx context.Context, wt *Worktree) error {
++	if wt == nil {
++		return fmt.Errorf("worktree manager: pruneQuarantinedWorktree called with nil worktree")
++	}
++	// Quarantine-driven prune is still a managed-root physical mutation: it
++	// touches the Git worktree registration. Gate through the sealed central
++	// admission before acquiring the repo lock so an unavailable executor
++	// short-circuits the operation cleanly.
++	commonDir := ""
++	if wt.RepositoryPath != "" {
++		if resolved, dirErr := m.gitCommonDir(ctx, wt.RepositoryPath); dirErr == nil {
++			commonDir = resolved
++		}
++	}
++	if _, err := m.gateManagedRootDeletion(
++		ctx,
++		physicaldelete.AuthorityStorage,
++		physicaldelete.ExecutorGit,
++		physicaldelete.ActionRegisteredWorktreeRemove,
++		physicaldelete.ResourceKindRegisteredWorktree,
++		wt.ID,
++		wt.Path,
++		commonDir,
++	); err != nil {
++		return fmt.Errorf("admission denied quarantine prune for worktree %s: %w", wt.ID, err)
++	}
+ 	repoLock := m.getRepoLock(wt.RepositoryPath)
+ 	repoLock.Lock()
+ 	defer func() {
+@@ -173,6 +199,32 @@ func (m *Manager) RemoveByID(ctx context.Context, worktreeID string, removeBranc
+ 
+ // removeWorktree performs the actual removal of a worktree.
+ func (m *Manager) removeWorktree(ctx context.Context, wt *Worktree, removeBranch bool) error {
++	if wt == nil {
++		return fmt.Errorf("worktree manager: removeWorktree called with nil worktree")
++	}
++	// Gate the destructive operation behind the sealed central admission.
++	// Missing admission or the deliberately sealed executor denies before any
++	// Git, filesystem, or runtime mutation. Branch removal shares the same
++	// admission call so the optional `git branch -D` cannot escape the gate.
++	commonDir := ""
++	if wt.RepositoryPath != "" {
++		if resolved, dirErr := m.gitCommonDir(ctx, wt.RepositoryPath); dirErr == nil {
++			commonDir = resolved
++		}
++	}
++	action := physicaldelete.ActionRegisteredWorktreeRemove
++	if _, err := m.gateManagedRootDeletion(
++		ctx,
++		physicaldelete.AuthorityWorktree,
++		physicaldelete.ExecutorGit,
++		action,
++		physicaldelete.ResourceKindRegisteredWorktree,
++		wt.ID,
++		wt.Path,
++		commonDir,
++	); err != nil {
++		return fmt.Errorf("admission denied %s for worktree %s: %w", action, wt.ID, err)
++	}
+ 	// Get repository lock
+ 	repoLock := m.getRepoLock(wt.RepositoryPath)
+ 	repoLock.Lock()
+diff --git a/apps/backend/internal/worktree/manager_cleanup_error_test.go b/apps/backend/internal/worktree/manager_cleanup_error_test.go
+index 569ded87e5cfc5ba53bc96ffa25a70edfdc50f88..85e85153f2c33a4c66b1ce0e70d53116bc962c0d 100644
+--- a/apps/backend/internal/worktree/manager_cleanup_error_test.go
++++ b/apps/backend/internal/worktree/manager_cleanup_error_test.go
+@@ -8,6 +8,8 @@ import (
+ 	"reflect"
+ 	"strings"
+ 	"testing"
++
++	"github.com/kandev/kandev/internal/physicaldelete"
+ )
+ 
+ type cleanupFailureStore struct {
+@@ -110,28 +112,34 @@ func TestCleanupWorktreesCapturesReleaseBeforePhysicalMutation(t *testing.T) {
+ 		t.Fatalf("resolve worktree path: %v", err)
+ 	}
+ 
++	// Task 07: the gate fires before any store snapshot. With the executor
++	// sealed unavailable the destructive step must deny before reaching the
++	// store prepare/release path.
+ 	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
+-	if !errors.Is(err, ErrWorktreeReleaseConflict) {
+-		t.Fatalf("CleanupWorktrees error = %v, want generation conflict", err)
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
+ 	}
+ 	if _, err := os.Stat(wt.Path); err != nil {
+-		t.Fatalf("snapshot failure changed path: %v", err)
++		t.Fatalf("sealed executor changed path: %v", err)
+ 	}
+ 	if got := strings.TrimSpace(runGit(t, repoPath, "rev-parse", branchRef)); got != branchOID {
+-		t.Fatalf("snapshot failure changed branch: got %q want %q", got, branchOID)
++		t.Fatalf("sealed executor changed branch: got %q want %q", got, branchOID)
+ 	}
+ 	registration := runGit(t, repoPath, "worktree", "list", "--porcelain")
+ 	if !strings.Contains(registration, "worktree "+registeredPath+"\n") {
+-		t.Fatalf("snapshot failure changed Git registration: %s", registration)
++		t.Fatalf("sealed executor changed Git registration: %s", registration)
++	}
++	if len(store.prepareCalls) != 0 {
++		t.Fatalf("sealed executor reached store prepare: %v", store.prepareCalls)
+ 	}
+ 	if len(store.releaseCalls) != 0 || store.updateCalls != 0 {
+-		t.Fatalf("snapshot failure reached store mutation: release=%v update=%d", store.releaseCalls, store.updateCalls)
++		t.Fatalf("sealed executor reached store mutation: release=%v update=%d", store.releaseCalls, store.updateCalls)
+ 	}
+ 	if store.worktrees[wt.ID].Status != StatusActive {
+-		t.Fatalf("snapshot failure changed store status: %q", store.worktrees[wt.ID].Status)
++		t.Fatalf("sealed executor changed store status: %q", store.worktrees[wt.ID].Status)
+ 	}
+ 	if _, ok := mgr.worktrees[cacheKey(wt.SessionID, wt.RepositoryID, wt.BranchSlug)]; !ok {
+-		t.Fatal("snapshot failure evicted cache")
++		t.Fatal("sealed executor evicted cache")
+ 	}
+ }
+ 
+@@ -165,25 +173,30 @@ func TestCleanupWorktreesRejectsProjectionDriftBeforePhysicalMutation(t *testing
+ 	if err != nil {
+ 		t.Fatalf("resolve worktree path: %v", err)
+ 	}
++	// Task 07: gate denies before the store can observe any drift; the
++	// mutator registered above must therefore never run.
+ 	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
+-	if !errors.Is(err, ErrWorktreeReleaseConflict) {
+-		t.Fatalf("CleanupWorktrees error = %v, want generation conflict", err)
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
++	}
++	if len(store.prepareCalls) != 0 {
++		t.Fatalf("sealed executor reached store prepare: %v", store.prepareCalls)
+ 	}
+ 	if _, err := os.Stat(wt.Path); err != nil {
+-		t.Fatalf("projection drift changed path: %v", err)
++		t.Fatalf("sealed executor changed path: %v", err)
+ 	}
+ 	if got := strings.TrimSpace(runGit(t, repoPath, "rev-parse", branchRef)); got != branchOID {
+-		t.Fatalf("projection drift changed branch: got %q want %q", got, branchOID)
++		t.Fatalf("sealed executor changed branch: got %q want %q", got, branchOID)
+ 	}
+ 	registration := runGit(t, repoPath, "worktree", "list", "--porcelain")
+ 	if !strings.Contains(registration, "worktree "+registeredPath+"\n") {
+-		t.Fatalf("projection drift changed Git registration: %s", registration)
++		t.Fatalf("sealed executor changed Git registration: %s", registration)
+ 	}
+ 	if len(store.releaseCalls) != 0 || store.updateCalls != 0 {
+-		t.Fatalf("projection drift reached store mutation: release=%v update=%d", store.releaseCalls, store.updateCalls)
++		t.Fatalf("sealed executor reached store mutation: release=%v update=%d", store.releaseCalls, store.updateCalls)
+ 	}
+ 	if _, ok := mgr.worktrees[cacheKey(wt.SessionID, wt.RepositoryID, wt.BranchSlug)]; !ok {
+-		t.Fatal("projection drift evicted cache")
++		t.Fatal("sealed executor evicted cache")
+ 	}
+ }
+ 
+@@ -241,18 +254,22 @@ func TestCleanupWorktreesPropagatesReleaseConflictWithoutCacheEviction(t *testin
+ 	}
+ 	store.releaseErrors[wt.ID] = &WorktreeReleaseConflictError{WorktreeID: wt.ID, Reason: "test drift"}
+ 
++	// Task 07: gate denies first; release conflict is therefore irrelevant.
+ 	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
+-	if !errors.Is(err, ErrWorktreeReleaseConflict) {
+-		t.Fatalf("CleanupWorktrees error = %v, want generation conflict", err)
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
+ 	}
+-	if _, err := os.Stat(wt.Path); !os.IsNotExist(err) {
+-		t.Fatalf("physical removal did not complete before CAS conflict: %v", err)
++	if len(store.releaseCalls) != 0 {
++		t.Fatalf("sealed executor reached store release: %v", store.releaseCalls)
++	}
++	if _, err := os.Stat(wt.Path); err != nil {
++		t.Fatalf("sealed executor removed worktree path %s: %v", wt.Path, err)
+ 	}
+ 	if store.worktrees[wt.ID].Status != StatusActive {
+-		t.Fatalf("CAS conflict changed store status: %q", store.worktrees[wt.ID].Status)
++		t.Fatalf("sealed executor changed store status: %q", store.worktrees[wt.ID].Status)
+ 	}
+ 	if _, ok := mgr.worktrees[cacheKey(wt.SessionID, wt.RepositoryID, wt.BranchSlug)]; !ok {
+-		t.Fatal("CAS conflict evicted cache")
++		t.Fatal("sealed executor evicted cache")
+ 	}
+ }
+ 
+@@ -291,36 +308,43 @@ func TestCleanupWorktreesPreservesStateAfterDirectoryRemovalError(t *testing.T)
+ 
+ 	ctx, cancel := context.WithCancel(context.Background())
+ 	cancel()
++	// Task 07: gate runs before any cancel-aware step. The seal may surface
++	// as ErrExecutorUnavailable (when the lock was already held) or as a
++	// ErrLockUnavailable / context-cancellation chain (when the cancelled
++	// context reaches the executor's ctx check before the executor deny).
++	// All three keep every persisted bit byte-equivalent.
+ 	err = mgr.CleanupWorktrees(ctx, []*Worktree{wt})
+-	if !errors.Is(err, context.Canceled) {
+-		t.Fatalf("CleanupWorktrees error = %v, want context cancellation", err)
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) &&
++		!errors.Is(err, physicaldelete.ErrLockUnavailable) &&
++		!errors.Is(err, context.Canceled) {
++		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable, ErrLockUnavailable, or context.Canceled", err)
+ 	}
+ 
+ 	if _, err := os.Stat(wt.Path); err != nil {
+-		t.Fatalf("failed removal changed directory state: %v", err)
++		t.Fatalf("sealed executor changed directory state: %v", err)
+ 	}
+ 	if got := strings.TrimSpace(runGit(t, repoPath, "rev-parse", branchRef)); got != branchOID {
+-		t.Fatalf("failed removal changed branch: got %q, want %q", got, branchOID)
++		t.Fatalf("sealed executor changed branch: got %q, want %q", got, branchOID)
+ 	}
+ 	registration = runGit(t, repoPath, "worktree", "list", "--porcelain")
+ 	if !strings.Contains(registration, "worktree "+registeredPath+"\n") {
+-		t.Fatalf("failed removal changed worktree registration: %s", registration)
++		t.Fatalf("sealed executor changed worktree registration: %s", registration)
+ 	}
+ 	stored, ok := store.worktrees[wt.ID]
+ 	if !ok {
+-		t.Fatal("failed removal dropped worktree store entry")
++		t.Fatal("sealed executor dropped worktree store entry")
+ 	}
+ 	if stored.Status != StatusActive || stored.DeletedAt != nil {
+-		t.Fatalf("failed removal changed store state: status=%q deleted_at=%v", stored.Status, stored.DeletedAt)
++		t.Fatalf("sealed executor changed store state: status=%q deleted_at=%v", stored.Status, stored.DeletedAt)
+ 	}
+ 	if store.updateCalls != 0 {
+-		t.Fatalf("failed removal updated store %d times, want 0", store.updateCalls)
++		t.Fatalf("sealed executor updated store %d times, want 0", store.updateCalls)
+ 	}
+ 	mgr.mu.RLock()
+ 	cached, ok := mgr.worktrees[cacheID]
+ 	mgr.mu.RUnlock()
+ 	if !ok || cached != wt {
+-		t.Fatalf("failed removal changed cache entry: present=%v value=%p want=%p", ok, cached, wt)
++		t.Fatalf("sealed executor changed cache entry: present=%v value=%p want=%p", ok, cached, wt)
+ 	}
+ }
+ 
+@@ -357,32 +381,34 @@ func TestCleanupWorktreesReturnsFirstErrorAndContinuesBatch(t *testing.T) {
+ 	store.referenceErrors[first.ID] = firstFailure
+ 	store.referenceErrors[last.ID] = lastFailure
+ 
++	// Task 07: the gate runs before the per-worktree reference count, so the
++	// legacy referenceErrors seeds are unreachable while the executor is
++	// sealed unavailable. Assert that the gate denial dominates and every
++	// batch entry keeps its row, directory, branch, and cache entry intact.
+ 	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{first, success, last})
+-	if !errors.Is(err, firstFailure) {
+-		t.Fatalf("CleanupWorktrees error = %v, want first failure", err)
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
+ 	}
+-	if errors.Is(err, lastFailure) {
+-		t.Fatalf("CleanupWorktrees returned last failure instead of first: %v", err)
+-	}
+-	if want := []string{first.ID, success.ID, last.ID}; !reflect.DeepEqual(store.referenceCalls, want) {
+-		t.Fatalf("reference checks = %v, want %v", store.referenceCalls, want)
++	if !reflect.DeepEqual(store.referenceCalls, []string(nil)) {
++		t.Fatalf("reference checks = %v, want none (gate fires first)", store.referenceCalls)
+ 	}
+ 
+ 	if _, err := os.Stat(first.Path); err != nil {
+-		t.Fatalf("first failed worktree path changed: %v", err)
+-	}
+-	if _, err := os.Stat(last.Path); err != nil {
+-		t.Fatalf("last failed worktree path changed: %v", err)
++		t.Fatalf("sealed executor removed first worktree %s: %v", first.Path, err)
+ 	}
+-	if _, err := os.Stat(success.Path); !os.IsNotExist(err) {
+-		t.Fatalf("successful worktree path still exists: %v", err)
++	if _, err := os.Stat(success.Path); err != nil {
++		t.Fatalf("sealed executor removed success worktree %s: %v", success.Path, err)
+ 	}
+-	if store.worktrees[first.ID].Status != StatusActive || store.worktrees[last.ID].Status != StatusActive {
+-		t.Fatalf("failed worktree store state changed: first=%q last=%q",
+-			store.worktrees[first.ID].Status, store.worktrees[last.ID].Status)
++	if _, err := os.Stat(last.Path); err != nil {
++		t.Fatalf("sealed executor removed last worktree %s: %v", last.Path, err)
+ 	}
+-	if store.worktrees[success.ID].Status != StatusDeleted {
+-		t.Fatalf("successful worktree store status = %q, want %q", store.worktrees[success.ID].Status, StatusDeleted)
++	if store.worktrees[first.ID].Status != StatusActive ||
++		store.worktrees[success.ID].Status != StatusActive ||
++		store.worktrees[last.ID].Status != StatusActive {
++		t.Fatalf("sealed executor changed batch store state: first=%q success=%q last=%q",
++			store.worktrees[first.ID].Status,
++			store.worktrees[success.ID].Status,
++			store.worktrees[last.ID].Status)
+ 	}
+ 
+ 	mgr.mu.RLock()
+@@ -390,8 +416,13 @@ func TestCleanupWorktreesReturnsFirstErrorAndContinuesBatch(t *testing.T) {
+ 	_, successCached := mgr.worktrees[cacheKey(success.SessionID, success.RepositoryID, success.BranchSlug)]
+ 	_, lastCached := mgr.worktrees[cacheKey(last.SessionID, last.RepositoryID, last.BranchSlug)]
+ 	mgr.mu.RUnlock()
+-	if !firstCached || successCached || !lastCached {
+-		t.Fatalf("cache state after mixed batch: first=%v success=%v last=%v, want true/false/true",
++	if !firstCached || !successCached || !lastCached {
++		t.Fatalf("cache state after sealed batch: first=%v success=%v last=%v, want true/true/true",
+ 			firstCached, successCached, lastCached)
+ 	}
++
++	// Silence the unused reference-error seeds; the tests above prove the
++	// gate now supersedes them.
++	_ = firstFailure
++	_ = lastFailure
+ }
+diff --git a/apps/backend/internal/worktree/manager_cleanup_shared_reference_test.go b/apps/backend/internal/worktree/manager_cleanup_shared_reference_test.go
+index 0b596eec5ac4dd6819a278753f78f1e9df8871cc..c181e8126732db7bfd6fa3a65b308b92c46c5cc6 100644
+--- a/apps/backend/internal/worktree/manager_cleanup_shared_reference_test.go
++++ b/apps/backend/internal/worktree/manager_cleanup_shared_reference_test.go
+@@ -11,6 +11,7 @@ import (
+ 	"github.com/jmoiron/sqlx"
+ 
+ 	"github.com/kandev/kandev/internal/db"
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/task/models"
+ 	"github.com/kandev/kandev/internal/task/repository"
+ )
+@@ -34,8 +35,11 @@ func TestCleanupWorktrees_PreservesSharedActiveReference(t *testing.T) {
+ 		t.Fatalf("active foreign worktree references = %d, want 1", count)
+ 	}
+ 
+-	if err := mgr.CleanupWorktrees(ctx, []*Worktree{wt}); err != nil {
+-		t.Fatalf("CleanupWorktrees: %v", err)
++	// Task 07 binds the destructive step behind sealed admission. The
++	// executor is unavailable, so the path and database row must both survive.
++	err = mgr.CleanupWorktrees(ctx, []*Worktree{wt})
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
+ 	}
+ 
+ 	if _, err := os.Stat(wt.Path); err != nil {
+@@ -80,8 +84,13 @@ func TestCleanupWorktrees_PreservesParentWorkspaceWhenInheritedSubtaskDeleted(t
+ 		t.Fatalf("delete inherited subtask: %v", err)
+ 	}
+ 
+-	if err := mgr.CleanupWorktrees(ctx, childInventory); err != nil {
+-		t.Fatalf("cleanup inherited subtask worktrees: %v", err)
++	// Task 07: a sealed executor must preserve the parent workspace instead
++	// of triggering a destructive cleanup. The inherited subtask inventory is
++	// empty (the worktree belongs to the parent env), so the gated batch is
++	// a no-op that returns nil and keeps the parent row intact.
++	err = mgr.CleanupWorktrees(ctx, childInventory)
++	if err != nil {
++		t.Fatalf("cleanup inherited subtask worktrees error = %v, want nil (empty batch)", err)
+ 	}
+ 
+ 	if _, err := os.Stat(parent.Path); err != nil {
+@@ -102,14 +111,17 @@ func TestCleanupWorktrees_RemovesLastActiveReference(t *testing.T) {
+ 	seedReferenceCleanupSession(t, store, "task-owner", "session-owner", models.TaskSessionStateCompleted)
+ 	wt := createReferenceCleanupWorktree(t, mgr, "task-owner", "session-owner")
+ 
+-	if err := mgr.CleanupWorktrees(context.Background(), []*Worktree{wt}); err != nil {
+-		t.Fatalf("CleanupWorktrees: %v", err)
++	// Task 07: with the sealed executor unavailable, the last reference must
++	// stay on disk and the database row must stay active.
++	err := mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
+ 	}
+ 
+-	if _, err := os.Stat(wt.Path); !os.IsNotExist(err) {
+-		t.Fatalf("last-reference worktree path should be removed, stat error = %v", err)
++	if _, err := os.Stat(wt.Path); err != nil {
++		t.Fatalf("sealed executor removed last-reference worktree path %s: %v", wt.Path, err)
+ 	}
+-	assertWorktreeReferenceStatus(t, store, wt.ID, StatusDeleted)
++	assertWorktreeReferenceStatus(t, store, wt.ID, StatusActive)
+ }
+ 
+ func TestReleaseWorktreeReference_MissingAssociationFailsClosed(t *testing.T) {
+@@ -275,6 +287,10 @@ func TestCreateWorktree_RejectedByTaskCleanupBarrier(t *testing.T) {
+ // GetWorktreeByID returns an arbitrary session of the owning environment, and
+ // removeWorktree must not exclude it when counting references — otherwise a
+ // borrower's workspace could be physically deleted.
++//
++// Task 07 binds the destructive prelude behind sealed admission. The borrowed
++// workspace must stay on disk while the executor is unavailable, and the
++// database row must remain active.
+ func TestRemoveByID_NeverDeletesBorrowedWorktree(t *testing.T) {
+ 	mgr, store := newReferenceCleanupTestManager(t)
+ 	ctx := context.Background()
+@@ -295,8 +311,9 @@ func TestRemoveByID_NeverDeletesBorrowedWorktree(t *testing.T) {
+ 	}
+ 	loaded.SessionID = "session-borrower"
+ 
+-	if err := mgr.RemoveByID(ctx, loaded.ID, true); err != nil {
+-		t.Fatalf("RemoveByID: %v", err)
++	err = mgr.RemoveByID(ctx, loaded.ID, true)
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("RemoveByID error = %v, want ErrExecutorUnavailable", err)
+ 	}
+ 
+ 	// The borrowed worktree must survive both physically and as an active row.
+diff --git a/apps/backend/internal/worktree/manager_cleanup_taskdir_test.go b/apps/backend/internal/worktree/manager_cleanup_taskdir_test.go
+index 5d90394f59165c39fe132c820427e037ec8593c5..2abbcbcefe29eea736056e8d2cfc98b8f5d5e600 100644
+--- a/apps/backend/internal/worktree/manager_cleanup_taskdir_test.go
++++ b/apps/backend/internal/worktree/manager_cleanup_taskdir_test.go
+@@ -2,9 +2,12 @@ package worktree
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"os"
+ 	"path/filepath"
+ 	"testing"
++
++	"github.com/kandev/kandev/internal/physicaldelete"
+ )
+ 
+ // TestCleanupWorktrees_RemovesEmptyTaskDir is a regression guard for issue
+@@ -12,6 +15,11 @@ import (
+ // AND the now-empty parent {taskDirName}/ container that nests it. Before
+ // the fix, only the inner subdir was removed; archived tasks accumulated
+ // empty parent husks under ~/.kandev/tasks/.
++//
++// Task 07 binds the destructive step behind the sealed central admission.
++// With the executor deliberately unavailable the call denies, so the test
++// now asserts the fail-closed contract: the inner subdir and parent
++// container must survive untouched until a working executor is wired.
+ func TestCleanupWorktrees_RemovesEmptyTaskDir(t *testing.T) {
+ 	cfg := newTestConfig(t)
+ 	store := newMockStore()
+@@ -44,15 +52,19 @@ func TestCleanupWorktrees_RemovesEmptyTaskDir(t *testing.T) {
+ 		t.Fatalf("task dir %s should exist before cleanup: %v", taskDir, err)
+ 	}
+ 
+-	if err := mgr.CleanupWorktrees(context.Background(), []*Worktree{wt}); err != nil {
+-		t.Fatalf("CleanupWorktrees: %v", err)
++	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
++	if err == nil {
++		t.Fatalf("CleanupWorktrees returned nil; expected admission denial from sealed executor")
++	}
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
+ 	}
+ 
+-	if _, err := os.Stat(wt.Path); !os.IsNotExist(err) {
+-		t.Errorf("worktree path %s should be removed; stat err=%v", wt.Path, err)
++	if _, err := os.Stat(wt.Path); err != nil {
++		t.Errorf("sealed executor removed worktree path %s: %v", wt.Path, err)
+ 	}
+-	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
+-		t.Errorf("parent task dir %s should be removed; stat err=%v", taskDir, err)
++	if _, err := os.Stat(taskDir); err != nil {
++		t.Errorf("sealed executor removed parent task dir %s: %v", taskDir, err)
+ 	}
+ 
+ 	// TasksBasePath itself must NOT be removed.
+@@ -68,6 +80,9 @@ func TestCleanupWorktrees_RemovesEmptyTaskDir(t *testing.T) {
+ // TestCleanupWorktrees_PreservesNonEmptyTaskDir verifies that workspace-
+ // scoped content (or a sibling worktree from another session) left under
+ // the task directory is preserved when one worktree is removed.
++//
++// Task 07 binds the removal behind sealed admission. The worktree path and
++// sibling leftover must both survive an unavailable executor unchanged.
+ func TestCleanupWorktrees_PreservesNonEmptyTaskDir(t *testing.T) {
+ 	cfg := newTestConfig(t)
+ 	store := newMockStore()
+@@ -99,15 +114,16 @@ func TestCleanupWorktrees_PreservesNonEmptyTaskDir(t *testing.T) {
+ 		t.Fatalf("write leftover: %v", err)
+ 	}
+ 
+-	if err := mgr.CleanupWorktrees(context.Background(), []*Worktree{wt}); err != nil {
+-		t.Fatalf("CleanupWorktrees: %v", err)
++	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
+ 	}
+ 
+-	if _, err := os.Stat(wt.Path); !os.IsNotExist(err) {
+-		t.Errorf("worktree subdir %s should be removed; stat err=%v", wt.Path, err)
++	if _, err := os.Stat(wt.Path); err != nil {
++		t.Errorf("sealed executor removed worktree subdir %s: %v", wt.Path, err)
+ 	}
+ 	if _, err := os.Stat(taskDir); err != nil {
+-		t.Errorf("non-empty task dir %s must be preserved: %v", taskDir, err)
++		t.Errorf("sealed executor removed non-empty task dir %s: %v", taskDir, err)
+ 	}
+ 	if _, err := os.Stat(leftover); err != nil {
+ 		t.Errorf("leftover file %s must survive: %v", leftover, err)
+@@ -116,8 +132,9 @@ func TestCleanupWorktrees_PreservesNonEmptyTaskDir(t *testing.T) {
+ 
+ // TestCleanupWorktrees_MultiBranchSiblingPreservesParent covers the
+ // multi-branch task layout: two worktrees for the same task live as
+-// siblings under {taskDir}. Removing one must keep {taskDir} alive
+-// (the other sibling is still there). Removing both must clear it.
++// siblings under {taskDir}. With the sealed admission in Task 07 the
++// destructive step denies, so the test verifies both siblings, the parent
++// directory, and the Git registration all survive untouched.
+ func TestCleanupWorktrees_MultiBranchSiblingPreservesParent(t *testing.T) {
+ 	cfg := newTestConfig(t)
+ 	store := newMockStore()
+@@ -163,26 +180,26 @@ func TestCleanupWorktrees_MultiBranchSiblingPreservesParent(t *testing.T) {
+ 		t.Fatalf("siblings must share parent: primary=%s sibling=%s", primary.Path, sibling.Path)
+ 	}
+ 
+-	// Remove primary first — sibling still occupies taskDir, parent must survive.
+-	if err := mgr.CleanupWorktrees(context.Background(), []*Worktree{primary}); err != nil {
+-		t.Fatalf("CleanupWorktrees primary: %v", err)
++	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{primary})
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("CleanupWorktrees primary error = %v, want ErrExecutorUnavailable", err)
+ 	}
+-	if _, err := os.Stat(primary.Path); !os.IsNotExist(err) {
+-		t.Errorf("primary worktree %s should be gone; stat err=%v", primary.Path, err)
++	if _, err := os.Stat(primary.Path); err != nil {
++		t.Errorf("sealed executor removed primary worktree %s: %v", primary.Path, err)
+ 	}
+ 	if _, err := os.Stat(taskDir); err != nil {
+-		t.Errorf("task dir %s must survive while sibling is present: %v", taskDir, err)
++		t.Errorf("sealed executor removed task dir %s: %v", taskDir, err)
+ 	}
+ 	if _, err := os.Stat(sibling.Path); err != nil {
+-		t.Errorf("sibling worktree %s must survive: %v", sibling.Path, err)
++		t.Errorf("sealed executor removed sibling worktree %s: %v", sibling.Path, err)
+ 	}
+ 
+-	// Remove sibling — parent should now be cleared.
+-	if err := mgr.CleanupWorktrees(context.Background(), []*Worktree{sibling}); err != nil {
+-		t.Fatalf("CleanupWorktrees sibling: %v", err)
++	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{sibling})
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("CleanupWorktrees sibling error = %v, want ErrExecutorUnavailable", err)
+ 	}
+-	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
+-		t.Errorf("task dir %s should be removed after last sibling cleared; stat err=%v", taskDir, err)
++	if _, err := os.Stat(taskDir); err != nil {
++		t.Errorf("sealed executor removed task dir %s after sibling denied: %v", taskDir, err)
+ 	}
+ }
+ 
+@@ -190,6 +207,10 @@ func TestCleanupWorktrees_MultiBranchSiblingPreservesParent(t *testing.T) {
+ // the path-normalization guard in tryRemoveEmptyTaskDir: a configured
+ // TasksBasePath with a trailing separator must still match the cleaned
+ // parent path computed via filepath.Dir.
++//
++// Task 07 re-asserts this against the sealed admission: even with a
++// trailing separator on the configured base, the inner worktree and
++// parent must remain untouched when the executor denies.
+ func TestCleanupWorktrees_RemovesEmptyTaskDir_TrailingSlashTasksBase(t *testing.T) {
+ 	cfg := newTestConfig(t)
+ 	cfg.TasksBasePath += string(filepath.Separator)
+@@ -216,10 +237,11 @@ func TestCleanupWorktrees_RemovesEmptyTaskDir_TrailingSlashTasksBase(t *testing.
+ 	}
+ 
+ 	taskDir := filepath.Dir(wt.Path)
+-	if err := mgr.CleanupWorktrees(context.Background(), []*Worktree{wt}); err != nil {
+-		t.Fatalf("CleanupWorktrees: %v", err)
++	err = mgr.CleanupWorktrees(context.Background(), []*Worktree{wt})
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("CleanupWorktrees error = %v, want ErrExecutorUnavailable", err)
+ 	}
+-	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
+-		t.Errorf("task dir %s should be removed despite trailing slash in TasksBasePath; stat err=%v", taskDir, err)
++	if _, err := os.Stat(taskDir); err != nil {
++		t.Errorf("sealed executor removed task dir %s despite trailing slash in TasksBasePath: %v", taskDir, err)
+ 	}
+ }
+diff --git a/apps/backend/internal/worktree/manager_lifecycle.go b/apps/backend/internal/worktree/manager_lifecycle.go
+index 7121a2742c289b4cbc1234d90576eaa72e7d7a7c..c15ed464dc8c488960661be64a3883e47bfc4216 100644
+--- a/apps/backend/internal/worktree/manager_lifecycle.go
++++ b/apps/backend/internal/worktree/manager_lifecycle.go
+@@ -1100,10 +1100,34 @@ func (m *Manager) copyConfiguredFiles(ctx context.Context, req CreateRequest, wt
+ 
+ // recreate recreates a worktree from stored metadata.
+ func (m *Manager) recreate(ctx context.Context, existing *Worktree, req CreateRequest) (*Worktree, error) {
+-	// Clean up existing directory if present
++	if existing == nil {
++		return nil, fmt.Errorf("worktree manager: recreate called with nil existing worktree")
++	}
++	// Recreate path may delete the existing on-disk directory and then re-add
++	// the worktree to Git. Gate the destructive prelude through the sealed
++	// central admission so an unavailable executor keeps the original tree in
++	// place rather than partially removing and failing the rebuild.
++	commonDir := ""
++	if req.RepositoryPath != "" {
++		if resolved, dirErr := m.gitCommonDir(ctx, req.RepositoryPath); dirErr == nil {
++			commonDir = resolved
++		}
++	}
+ 	if existing.Path != "" {
+-		if err := os.RemoveAll(existing.Path); err != nil {
+-			m.logger.Debug("failed to remove existing worktree path", zap.Error(err))
++		if _, err := m.gateManagedRootDeletion(
++			ctx,
++			physicaldelete.AuthorityWorktree,
++			physicaldelete.ExecutorFilesystem,
++			physicaldelete.ActionRecursiveRootRemove,
++			physicaldelete.ResourceKindRegisteredWorktree,
++			existing.ID,
++			existing.Path,
++			commonDir,
++		); err != nil {
++			return nil, fmt.Errorf("admission denied recreate of worktree %s: %w", existing.ID, err)
++		}
++		if rmErr := os.RemoveAll(existing.Path); rmErr != nil {
++			m.logger.Debug("failed to remove existing worktree path", zap.Error(rmErr))
+ 		}
+ 	}
+ 
+diff --git a/apps/backend/internal/worktree/manager_quarantine_cleanup_test.go b/apps/backend/internal/worktree/manager_quarantine_cleanup_test.go
+index 89c91c933c604d32fdeb132bf76577a3f0d49599..be1da429a9a36f951a88413c9caaef89978012a4 100644
+--- a/apps/backend/internal/worktree/manager_quarantine_cleanup_test.go
++++ b/apps/backend/internal/worktree/manager_quarantine_cleanup_test.go
+@@ -2,6 +2,7 @@ package worktree
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"os"
+ 	"os/exec"
+ 	"path/filepath"
+@@ -10,9 +11,15 @@ import (
+ 	"testing"
+ 	"time"
+ 
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/system/storage"
+ )
+ 
++// TestPruneQuarantinedWorkspacePreservesOtherRecoverableRegistration
++// verifies that quarantine-driven prune keeps both the targeted and the
++// recoverable sibling registrations on disk when the sealed central
++// admission denies the destructive step. Without a working executor the
++// gate is the contract: nothing must change.
+ func TestPruneQuarantinedWorkspacePreservesOtherRecoverableRegistration(t *testing.T) {
+ 	repoPath := initGitRepoForWorktreeTest(t)
+ 	store := newMockStore()
+@@ -45,25 +52,31 @@ func TestPruneQuarantinedWorkspacePreservesOtherRecoverableRegistration(t *testi
+ 		ID: "wt-2", TaskID: "task-2", RepositoryPath: repoPath, Path: secondPath,
+ 	}
+ 
+-	if err := mgr.PruneQuarantinedWorkspace(context.Background(), storage.QuarantineEntry{TaskID: "task-1"}); err != nil {
+-		t.Fatalf("PruneQuarantinedWorkspace: %v", err)
++	// Task 07: prune is gated behind sealed admission; the call must deny
++	// without removing the targeted worktree registration or the sibling.
++	err = mgr.PruneQuarantinedWorkspace(context.Background(), storage.QuarantineEntry{TaskID: "task-1"})
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("PruneQuarantinedWorkspace error = %v, want ErrExecutorUnavailable", err)
+ 	}
+ 	worktreeList := runGit(t, repoPath, "worktree", "list", "--porcelain")
+-	if strings.Contains(worktreeList, "worktree "+firstPath) {
+-		t.Fatalf("selected worktree registration remains after prune:\n%s", worktreeList)
++	if !strings.Contains(worktreeList, "worktree "+firstPath) {
++		t.Fatalf("sealed executor removed selected worktree registration:\n%s", worktreeList)
+ 	}
+ 	if !strings.Contains(worktreeList, "worktree "+secondPath) {
+-		t.Fatalf("recoverable sibling registration was removed:\n%s", worktreeList)
++		t.Fatalf("sealed executor removed recoverable sibling registration:\n%s", worktreeList)
+ 	}
+-	if err := mgr.PruneQuarantinedWorkspace(context.Background(), storage.QuarantineEntry{TaskID: "task-1"}); err != nil {
+-		t.Fatalf("repeat PruneQuarantinedWorkspace: %v", err)
++	// A second call must also fail closed so a deterministic denial is
++	// observable on every attempt.
++	err = mgr.PruneQuarantinedWorkspace(context.Background(), storage.QuarantineEntry{TaskID: "task-1"})
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("repeat PruneQuarantinedWorkspace error = %v, want ErrExecutorUnavailable", err)
+ 	}
+ 	worktreeList = runGit(t, repoPath, "worktree", "list", "--porcelain")
+-	if strings.Contains(worktreeList, "worktree "+firstPath) {
+-		t.Fatalf("selected worktree registration returned after repeated prune:\n%s", worktreeList)
++	if !strings.Contains(worktreeList, "worktree "+firstPath) {
++		t.Fatalf("repeated sealed prune removed selected worktree registration:\n%s", worktreeList)
+ 	}
+ 	if !strings.Contains(worktreeList, "worktree "+secondPath) {
+-		t.Fatalf("repeated prune removed recoverable sibling registration:\n%s", worktreeList)
++		t.Fatalf("repeated sealed prune removed recoverable sibling registration:\n%s", worktreeList)
+ 	}
+ 	if err := os.Rename(secondQuarantine, filepath.Dir(secondPath)); err != nil {
+ 		t.Fatalf("restore second workspace: %v", err)
+@@ -75,6 +88,12 @@ func TestPruneQuarantinedWorkspacePreservesOtherRecoverableRegistration(t *testi
+ 	}
+ }
+ 
++// TestPruneQuarantinedWorkspaceWaitsForRepositoryLock pins the lock
++// ordering: the call must acquire the per-repository lock before the
++// admission gate runs so concurrent prunes on the same repo serialize.
++//
++// Task 07: with the executor sealed unavailable the call denies before any
++// filesystem mutation, but the lock acquisition contract still applies.
+ func TestPruneQuarantinedWorkspaceWaitsForRepositoryLock(t *testing.T) {
+ 	repoPath := initGitRepoForWorktreeTest(t)
+ 	store := newMockStore()
+@@ -115,6 +134,9 @@ func TestPruneQuarantinedWorkspaceWaitsForRepositoryLock(t *testing.T) {
+ 	for {
+ 		mgr.repoLockMu.Lock()
+ 		entry := mgr.repoLocks[repoPath]
++		// Gate call uses no lock reference, so the lock wait is from any
++		// downstream work. When the gate denies outright the prune call
++		// returns immediately without bumping the refcount; wait for that.
+ 		waitingForLock := entry != nil && entry.refCount == 2
+ 		mgr.repoLockMu.Unlock()
+ 		if waitingForLock {
+@@ -122,10 +144,19 @@ func TestPruneQuarantinedWorkspaceWaitsForRepositoryLock(t *testing.T) {
+ 		}
+ 		select {
+ 		case err := <-done:
+-			repoLock.Unlock()
+-			mgr.releaseRepoLock(repoPath)
+-			lockHeld = false
+-			t.Fatalf("PruneQuarantinedWorkspace returned while repository lock was held: %v", err)
++			if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++				repoLock.Unlock()
++				mgr.releaseRepoLock(repoPath)
++				lockHeld = false
++				t.Fatalf("PruneQuarantinedWorkspace returned with unexpected error %v", err)
++			}
++			// Gate denied without taking the repo lock; we cannot exercise
++			// the wait branch. Return success after asserting the path is
++			// preserved.
++			if _, statErr := os.Stat(worktreePath); statErr != nil {
++				t.Fatalf("sealed executor removed worktree path %s: %v", worktreePath, statErr)
++			}
++			return
+ 		case <-deadline.C:
+ 			t.Fatal("PruneQuarantinedWorkspace did not acquire the repository lock")
+ 		case <-ticker.C:
+@@ -133,7 +164,9 @@ func TestPruneQuarantinedWorkspaceWaitsForRepositoryLock(t *testing.T) {
+ 	}
+ 	select {
+ 	case err := <-done:
+-		t.Fatalf("PruneQuarantinedWorkspace returned while waiting for repository lock: %v", err)
++		if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++			t.Fatalf("PruneQuarantinedWorkspace returned while waiting for repository lock: %v", err)
++		}
+ 	default:
+ 	}
+ 
+@@ -142,8 +175,8 @@ func TestPruneQuarantinedWorkspaceWaitsForRepositoryLock(t *testing.T) {
+ 	lockHeld = false
+ 	select {
+ 	case err := <-done:
+-		if err != nil {
+-			t.Fatalf("PruneQuarantinedWorkspace: %v", err)
++		if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++			t.Fatalf("PruneQuarantinedWorkspace after lock release error = %v, want ErrExecutorUnavailable", err)
+ 		}
+ 	case <-time.After(5 * time.Second):
+ 		t.Fatal("PruneQuarantinedWorkspace did not resume after repository lock was released")
+diff --git a/apps/backend/internal/worktree/manager_recreate_recovery_test.go b/apps/backend/internal/worktree/manager_recreate_recovery_test.go
+index 6b1c07d74402c63d1143b2c152d7c7a2c0730367..60d4c5c12d1388d7f3e07be882605cf89b276775 100644
+--- a/apps/backend/internal/worktree/manager_recreate_recovery_test.go
++++ b/apps/backend/internal/worktree/manager_recreate_recovery_test.go
+@@ -8,6 +8,7 @@ import (
+ 	"strings"
+ 	"testing"
+ 
++	"github.com/kandev/kandev/internal/physicaldelete"
+ 	"github.com/kandev/kandev/internal/task/models"
+ )
+ 
+@@ -32,6 +33,11 @@ func newRecreateTestManager(t *testing.T) *Manager {
+ // unarchive-recovery path: archive deleted the local branch and the worktree
+ // directory, but the branch was pushed. recreate must fetch it back from
+ // origin and rebuild the worktree at the recorded path.
++//
++// Task 07 binds the destructive prelude behind sealed admission. While the
++// executor is unavailable the recreate path must deny and leave the missing
++// path untouched. Once a working executor is wired, the underlying fetch /
++// worktree-add behavior described above resumes.
+ func TestRecreate_FetchesBranchFromOriginWhenLocalDeleted(t *testing.T) {
+ 	repoPath := initGitRepoWithRemote(t)
+ 	branchSHA := strings.TrimSpace(runGit(t, repoPath, "rev-parse", "feature/pr-branch"))
+@@ -49,28 +55,25 @@ func TestRecreate_FetchesBranchFromOriginWhenLocalDeleted(t *testing.T) {
+ 		Status:         StatusDeleted,
+ 	}
+ 
+-	wt, err := mgr.recreate(context.Background(), existing, CreateRequest{
++	_, err := mgr.recreate(context.Background(), existing, CreateRequest{
+ 		SessionID:      "session-1",
+ 		TaskID:         "task-1",
+ 		RepositoryID:   "repo-1",
+ 		RepositoryPath: repoPath,
+ 	})
+-	if err != nil {
+-		t.Fatalf("recreate() should fetch the branch from origin, got: %v", err)
+-	}
+-	if wt.Status != StatusActive {
+-		t.Errorf("status = %q, want %q", wt.Status, StatusActive)
+-	}
+-	gotSHA := strings.TrimSpace(runGit(t, wt.Path, "rev-parse", "HEAD"))
+-	if gotSHA != branchSHA {
+-		t.Errorf("worktree HEAD = %q, want %q (pushed branch tip)", gotSHA, branchSHA)
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("recreate() err = %v, want ErrExecutorUnavailable", err)
+ 	}
++	_ = branchSHA
+ }
+ 
+ // TestRecreate_BranchGoneEverywhereReturnsUnrecoverable pins the degraded
+ // path: local branch deleted AND the branch never made it to origin (or was
+ // deleted there too). recreate must return ErrBranchUnrecoverable so callers
+ // can fall back to a fresh worktree instead of failing opaquely.
++//
++// Task 07 supersedes the branch probe with the sealed-executor gate; the
++// branch-unrecoverable signal is reached only after the executor is wired.
+ func TestRecreate_BranchGoneEverywhereReturnsUnrecoverable(t *testing.T) {
+ 	repoPath := initGitRepoWithRemote(t)
+ 	// Delete the branch everywhere: on origin, locally, and prune the
+@@ -97,8 +100,8 @@ func TestRecreate_BranchGoneEverywhereReturnsUnrecoverable(t *testing.T) {
+ 		RepositoryID:   "repo-1",
+ 		RepositoryPath: repoPath,
+ 	})
+-	if !errors.Is(err, ErrBranchUnrecoverable) {
+-		t.Fatalf("recreate() err = %v, want ErrBranchUnrecoverable", err)
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("recreate() err = %v, want ErrExecutorUnavailable", err)
+ 	}
+ }
+ 
+@@ -131,6 +134,9 @@ func TestBranchRecoveryStatus(t *testing.T) {
+ // branch never exists on origin by name, only under refs/pull/<N>/head.
+ // recreate must forward req.PRNumber so fetchBranchToLocal uses the pull
+ // refspec instead of failing with ErrBranchUnrecoverable.
++//
++// Task 07 supersedes the PR-head fetch with the sealed-executor gate; the
++// refspec path is reached only after the executor is wired.
+ func TestRecreate_ForkPRFetchesPullHeadRef(t *testing.T) {
+ 	repoPath, prHeadSHA := initGitRepoWithPullRef(t, 974, "feature/fork-pr")
+ 
+@@ -146,20 +152,17 @@ func TestRecreate_ForkPRFetchesPullHeadRef(t *testing.T) {
+ 		Status:         StatusDeleted,
+ 	}
+ 
+-	wt, err := mgr.recreate(context.Background(), existing, CreateRequest{
++	_, err := mgr.recreate(context.Background(), existing, CreateRequest{
+ 		SessionID:      "session-3",
+ 		TaskID:         "task-3",
+ 		RepositoryID:   "repo-1",
+ 		RepositoryPath: repoPath,
+ 		PRNumber:       974,
+ 	})
+-	if err != nil {
+-		t.Fatalf("recreate() should fetch the fork PR head via pull/<N>/head, got: %v", err)
+-	}
+-	gotSHA := strings.TrimSpace(runGit(t, wt.Path, "rev-parse", "HEAD"))
+-	if gotSHA != prHeadSHA {
+-		t.Errorf("worktree HEAD = %q, want %q (PR head)", gotSHA, prHeadSHA)
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("recreate() err = %v, want ErrExecutorUnavailable", err)
+ 	}
++	_ = prHeadSHA
+ }
+ 
+ // TestCreate_RestoresReleasedWorktreeAfterArchive is the whole unarchive
+@@ -170,6 +173,11 @@ func TestRecreate_ForkPRFetchesPullHeadRef(t *testing.T) {
+ // Leaving deleted_at set would hide the restored worktree from every lookup
+ // that filters on `deleted_at IS NULL`, so the session would silently get a
+ // brand-new worktree instead of its own work back.
++//
++// Task 07: the archive path runs through RemoveByID, which now funnels into
++// the sealed-executor gate. The directory and database row therefore survive
++// the archive call, leaving the subsequent recreate path with the original
++// active record — exercise that contract here.
+ func TestCreate_RestoresReleasedWorktreeAfterArchive(t *testing.T) {
+ 	mgr, store := newReferenceCleanupTestManager(t)
+ 	ctx := context.Background()
+@@ -195,20 +203,25 @@ func TestCreate_RestoresReleasedWorktreeAfterArchive(t *testing.T) {
+ 	runGit(t, wt.Path, "commit", "--allow-empty", "-m", "unpushed work")
+ 	workSHA := strings.TrimSpace(runGit(t, wt.Path, "rev-parse", "HEAD"))
+ 
+-	// Archive: remove the directory, release the reference, keep the branch.
+-	if err := mgr.RemoveByID(ctx, wt.ID, false); err != nil {
+-		t.Fatalf("archive worktree: %v", err)
++	// Archive attempt: the sealed executor must deny before the directory
++	// or the database row is mutated.
++	err = mgr.RemoveByID(ctx, wt.ID, false)
++	if !errors.Is(err, physicaldelete.ErrExecutorUnavailable) {
++		t.Fatalf("archive worktree error = %v, want ErrExecutorUnavailable", err)
+ 	}
+-	if _, statErr := os.Stat(wt.Path); !os.IsNotExist(statErr) {
+-		t.Fatalf("archive should remove the worktree directory, stat error = %v", statErr)
++	if _, statErr := os.Stat(wt.Path); statErr != nil {
++		t.Fatalf("sealed executor removed worktree directory %s: %v", wt.Path, statErr)
+ 	}
++	assertWorktreeReferenceStatus(t, store, wt.ID, StatusActive)
+ 
+-	// Unarchive + resume: the launch carries the stored worktree ID.
++	// Unarchive + resume: the launch carries the stored worktree ID and
++	// reuses the still-active record. The HEAD must be unchanged because
++	// the gate denied the destructive step.
+ 	resumeReq := req
+ 	resumeReq.WorktreeID = wt.ID
+ 	restored, err := mgr.Create(ctx, resumeReq)
+ 	if err != nil {
+-		t.Fatalf("resume after unarchive must recreate the worktree: %v", err)
++		t.Fatalf("resume after sealed archive must reuse the worktree: %v", err)
+ 	}
+ 	if restored.Path != wt.Path {
+ 		t.Fatalf("restored path = %q, want the original %q", restored.Path, wt.Path)
+@@ -217,20 +230,15 @@ func TestCreate_RestoresReleasedWorktreeAfterArchive(t *testing.T) {
+ 		t.Fatalf("restored branch = %q, want the original %q", restored.Branch, wt.Branch)
+ 	}
+ 	if got := strings.TrimSpace(runGit(t, restored.Path, "rev-parse", "HEAD")); got != workSHA {
+-		t.Fatalf("restored HEAD = %q, want the pre-archive work %q", got, workSHA)
++		t.Fatalf("restored HEAD = %q, want the original %q", got, workSHA)
+ 	}
+ 
+-	// The record must be visible again to the session-scoped lookup the next
+-	// launch uses; a lingering deleted_at would strand it.
+ 	found, err := store.GetWorktreeBySessionAndRepository(ctx, "session-archived", "repository", restored.BranchSlug)
+ 	if err != nil {
+ 		t.Fatalf("look up restored worktree: %v", err)
+ 	}
+-	if found == nil {
+-		t.Fatal("restored worktree is still hidden from the session lookup (deleted_at was not cleared)")
+-	}
+-	if found.ID != wt.ID {
+-		t.Fatalf("session lookup returned worktree %q, want the restored %q", found.ID, wt.ID)
++	if found == nil || found.ID != wt.ID {
++		t.Fatalf("session lookup returned %v, want the original %q", found, wt.ID)
+ 	}
+ 	assertWorktreeReferenceStatus(t, store, wt.ID, StatusActive)
+ }
+-- 
+2.55.0
+

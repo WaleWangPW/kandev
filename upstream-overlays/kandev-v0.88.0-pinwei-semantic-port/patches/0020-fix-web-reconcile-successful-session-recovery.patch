@@ -1,0 +1,162 @@
+From d848a7ad30b6c55fb7bf514f602ce952d6c34b3c Mon Sep 17 00:00:00 2001
+From: WaleWangPW <396218656@qq.com>
+Date: Mon, 17 Aug 2026 19:27:27 +0800
+Subject: [PATCH 20/22] fix(web): reconcile successful session recovery
+
+---
+ .../task/chat/chat-input-container.test.ts    | 39 ++++++++++++
+ .../task/chat/chat-input-container.tsx        | 61 ++++++++++++++++---
+ 2 files changed, 90 insertions(+), 10 deletions(-)
+ create mode 100644 apps/web/components/task/chat/chat-input-container.test.ts
+
+diff --git a/apps/web/components/task/chat/chat-input-container.test.ts b/apps/web/components/task/chat/chat-input-container.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c0188935a142088470d1aea8c1b6f241a2ec2ca7
+--- /dev/null
++++ b/apps/web/components/task/chat/chat-input-container.test.ts
+@@ -0,0 +1,39 @@
++import { describe, expect, it } from "vitest";
++import type { TaskSession } from "@/lib/types/http";
++import { recoveredSessionFromResponse } from "./chat-input-container";
++
++const staleSession = {
++  id: "session-1",
++  task_id: "task-1",
++  state: "WAITING_FOR_INPUT",
++  error_message: "old failure",
++  started_at: "2026-08-17T00:00:00Z",
++  updated_at: "2026-08-17T00:00:00Z",
++} as TaskSession;
++
++describe("recoveredSessionFromResponse", () => {
++  it("clears a stale recovery error only for the matching authoritative response", () => {
++    expect(
++      recoveredSessionFromResponse(
++        staleSession,
++        { success: true, task_id: "task-1", session_id: "session-1", state: "WAITING_FOR_INPUT" },
++        "task-1",
++        "session-1",
++      ),
++    ).toMatchObject({ state: "WAITING_FOR_INPUT", error_message: "" });
++
++    expect(
++      recoveredSessionFromResponse(
++        staleSession,
++        {
++          success: true,
++          task_id: "task-other",
++          session_id: "session-1",
++          state: "WAITING_FOR_INPUT",
++        },
++        "task-1",
++        "session-1",
++      ),
++    ).toBeNull();
++  });
++});
+diff --git a/apps/web/components/task/chat/chat-input-container.tsx b/apps/web/components/task/chat/chat-input-container.tsx
+index fbdb4d03ef417a1c33fabe913245c639f53a9a3a..0abb1d8b97fa279a197cd0a397d44ecad802516c 100644
+--- a/apps/web/components/task/chat/chat-input-container.tsx
++++ b/apps/web/components/task/chat/chat-input-container.tsx
+@@ -5,9 +5,10 @@ import { IconAlertTriangle, IconPlayerPlay, IconRefresh } from "@tabler/icons-re
+ import { Button } from "@kandev/ui/button";
+ import { Tooltip, TooltipContent, TooltipTrigger } from "@kandev/ui/tooltip";
+ import { NewSessionDialog } from "@/components/task/new-session-dialog";
+-import { useAppStore } from "@/components/state-provider";
++import { useAppStore, useAppStoreApi } from "@/components/state-provider";
+ import type { ContextFile } from "@/lib/state/context-files-store";
+-import type { ClarificationRequestMetadata, Message } from "@/lib/types/http";
++import type { ClarificationRequestMetadata, Message, TaskSession } from "@/lib/types/http";
++import type { LaunchSessionResponse } from "@/lib/services/session-launch-service";
+ import type { DiffComment } from "@/lib/diff/types";
+ import type { TaskMentionData } from "@/hooks/use-inline-mention";
+ import type { MCPAttachmentHistory } from "@/lib/state/slices/session-runtime/types";
+@@ -118,19 +119,48 @@ async function requestSessionRecover(
+   taskId: string,
+   sessionId: string,
+   action: "resume" | "fresh_start",
+-): Promise<boolean> {
++): Promise<LaunchSessionResponse | null> {
+   const client = getWebSocketClient();
+-  if (!client) return false;
++  if (!client) return null;
+   try {
+-    await client.request(
++    return await client.request<LaunchSessionResponse>(
+       "session.recover",
+       { task_id: taskId, session_id: sessionId, action },
+       30000,
+     );
+-    return true;
+   } catch {
+-    return false;
++    return null;
++  }
++}
++
++const recoverableSessionStates = new Set<TaskSession["state"]>([
++  "CREATED",
++  "STARTING",
++  "RUNNING",
++  "WAITING_FOR_INPUT",
++]);
++
++/** Applies an authoritative successful recovery reply without waiting for a later session event. */
++export function recoveredSessionFromResponse(
++  session: TaskSession | undefined,
++  response: LaunchSessionResponse | null,
++  taskId: string,
++  sessionId: string,
++): TaskSession | null {
++  if (
++    !session ||
++    !response?.success ||
++    response.task_id !== taskId ||
++    response.session_id !== sessionId ||
++    !recoverableSessionStates.has(response.state as TaskSession["state"])
++  ) {
++    return null;
+   }
++  return {
++    ...session,
++    state: response.state as TaskSession["state"],
++    error_message: "",
++  };
+ }
+ 
+ // The recovery banner keeps resume/fresh-start controls together for desktop
+@@ -158,6 +188,7 @@ function FailedSessionBanner({
+   resumingLabel?: string;
+ }) {
+   const { t } = useTranslation();
++  const store = useAppStoreApi();
+   const [isResuming, setIsResuming] = useState(false);
+   const [isStartingFresh, setIsStartingFresh] = useState(false);
+ 
+@@ -175,10 +206,20 @@ function FailedSessionBanner({
+       if (!sessionId || !taskId) return;
+       const setBusy = action === "resume" ? setIsResuming : setIsStartingFresh;
+       setBusy(true);
+-      const ok = await requestSessionRecover(taskId, sessionId, action);
+-      if (!ok) setBusy(false);
++      const response = await requestSessionRecover(taskId, sessionId, action);
++      const recovered = recoveredSessionFromResponse(
++        store.getState().taskSessions.items[sessionId],
++        response,
++        taskId,
++        sessionId,
++      );
++      if (!recovered) {
++        setBusy(false);
++        return;
++      }
++      store.getState().setTaskSession(recovered);
+     },
+-    [sessionId, taskId],
++    [sessionId, store, taskId],
+   );
+ 
+   const handleResume = useCallback(() => handleRecover("resume"), [handleRecover]);
+-- 
+2.55.0
+
