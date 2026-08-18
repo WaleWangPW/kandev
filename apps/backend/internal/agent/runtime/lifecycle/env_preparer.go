@@ -176,6 +176,13 @@ type EnvPrepareResult struct {
 	// Worktrees is the per-repository outcome list when the preparer ran in
 	// multi-repo mode. Empty for single-repo or repo-less results.
 	Worktrees []RepoWorktreeResult `json:"worktrees,omitempty"`
+
+	// Error carries the underlying typed error chain when Success is false.
+	// Populated alongside ErrorMessage so that callers wrapping the result
+	// can use %w to preserve errors.Is/errors.As reachability for sentinels
+	// like worktree.ErrBranchCheckedOut. ErrorMessage remains the canonical
+	// human-readable string; Error is the typed chain for programmatic use.
+	Error error `json:"-"`
 }
 
 // PrepareProgressCallback is called when a preparation step changes status.
