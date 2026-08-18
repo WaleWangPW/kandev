@@ -521,12 +521,12 @@ func TestLocalPreparer_BranchCheckedOutElsewhereFailsClosed(t *testing.T) {
 	indexBefore := readIndexSHA(t, repoDir)
 	branchBefore := currentBranch(t, repoDir)
 
-	// Fake git: fetch fails with the "remote missing ref" text that triggers
-	// the substring match; checkout fails with the real "already checked out
-	// at" message that ClassifyGitError maps to ErrBranchCheckedOut. Pass
-	// through everything else (symbolic-ref, rev-parse, ls-files, worktree,
-	// etc.) by exec'ing the real git at its absolute path — re-resolving via
-	// PATH would loop back to this fake.
+	// Fake only fetch: it supplies the missing-remote-ref text that triggers
+	// the substring match, then lets the real checkout detect the sibling
+	// worktree and emit its "already checked out at" diagnostic. Pass through
+	// everything else (symbolic-ref, rev-parse, ls-files, worktree, etc.) by
+	// exec'ing the real git at its absolute path — re-resolving via PATH would
+	// loop back to this fake.
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatalf("locate real git: %v", err)
@@ -537,10 +537,6 @@ func TestLocalPreparer_BranchCheckedOutElsewhereFailsClosed(t *testing.T) {
 case "$1" in
 fetch)
   echo "fatal: couldn't find remote ref feature/shared" >&2
-  exit 128
-  ;;
-checkout)
-  echo "fatal: 'feature/shared' is already checked out at '` + sibling + `'" >&2
   exit 128
   ;;
 esac
@@ -571,6 +567,10 @@ exec "` + realGit + `" "$@"
 	// sentinel is what prevents the misclassification.
 	if !strings.Contains(err.Error(), "couldn't find remote ref") {
 		t.Fatalf("expected fetch stderr to be preserved in error chain, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "already checked out at") &&
+		!strings.Contains(err.Error(), "already used by worktree at") {
+		t.Fatalf("expected real checkout stderr to be preserved in error chain, got %v", err)
 	}
 
 	if got := currentBranch(t, repoDir); got != branchBefore {

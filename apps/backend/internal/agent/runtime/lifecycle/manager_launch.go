@@ -892,10 +892,15 @@ func (m *Manager) runEnvironmentPreparerWithProgress(
 			zap.String("task_id", req.TaskID),
 			zap.String("preparer", preparer.Name()),
 			zap.Error(err))
-		return &EnvPrepareResult{
-			Success:      false,
-			ErrorMessage: err.Error(),
+		if result == nil {
+			result = &EnvPrepareResult{}
 		}
+		result.Success = false
+		result.Error = err
+		// Keep the existing lifecycle error text stable while retaining the
+		// original error separately for errors.Is/errors.As callers.
+		result.ErrorMessage = err.Error()
+		return result
 	}
 
 	return result
@@ -985,6 +990,9 @@ func (m *Manager) launchApplyPrepareResult(
 			ErrorMessage: result.ErrorMessage,
 			Steps:        result.Steps,
 		})
+		if result.Error != nil {
+			return fmt.Errorf("environment preparation failed: %w", result.Error)
+		}
 		return fmt.Errorf("environment preparation failed: %s", result.ErrorMessage)
 	}
 	if result.WorkspacePath != "" {

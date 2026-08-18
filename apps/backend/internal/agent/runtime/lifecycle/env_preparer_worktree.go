@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -76,14 +77,27 @@ func (p *WorktreePreparer) Prepare(ctx context.Context, req *EnvPrepareRequest, 
 	// Step 1: Validate repository path
 	steps, ok := p.validateWorktreeRequest(req, stepIdx, totalSteps, onProgress, steps)
 	if !ok {
-		return &EnvPrepareResult{Success: false, Steps: steps, ErrorMessage: steps[len(steps)-1].Error, Duration: time.Since(start)}, nil
+		msg := steps[len(steps)-1].Error
+		return &EnvPrepareResult{
+			Success:      false,
+			Steps:        steps,
+			ErrorMessage: msg,
+			Duration:     time.Since(start),
+			Error:        errors.New(msg),
+		}, nil
 	}
 	stepIdx++
 
 	// Steps 2 (and optional sync): Create worktree (with optional pre-sync).
 	wt, steps, stepIdx, err := p.createWorktreeWithSync(ctx, req, stepIdx, totalSteps, onProgress, steps)
 	if err != nil {
-		return &EnvPrepareResult{Success: false, Steps: steps, ErrorMessage: err.Error(), Duration: time.Since(start)}, nil
+		return &EnvPrepareResult{
+			Success:      false,
+			Steps:        steps,
+			ErrorMessage: err.Error(),
+			Duration:     time.Since(start),
+			Error:        err,
+		}, nil
 	}
 
 	if len(wt.CopiedFiles) > 0 || len(wt.CopyFilesWarnings) > 0 {
@@ -404,6 +418,7 @@ func (p *WorktreePreparer) prepareMultiRepo(
 				Steps:        steps,
 				ErrorMessage: err.Error(),
 				Duration:     time.Since(start),
+				Error:        err,
 			}, nil
 		}
 		if spec.WorktreeID == "" || wt.ID != spec.WorktreeID {
