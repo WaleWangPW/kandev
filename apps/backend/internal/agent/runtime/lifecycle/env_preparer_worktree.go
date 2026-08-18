@@ -78,26 +78,14 @@ func (p *WorktreePreparer) Prepare(ctx context.Context, req *EnvPrepareRequest, 
 	steps, ok := p.validateWorktreeRequest(req, stepIdx, totalSteps, onProgress, steps)
 	if !ok {
 		msg := steps[len(steps)-1].Error
-		return &EnvPrepareResult{
-			Success:      false,
-			Steps:        steps,
-			ErrorMessage: msg,
-			Duration:     time.Since(start),
-			Error:        errors.New(msg),
-		}, nil
+		return &EnvPrepareResult{Success: false, Steps: steps, ErrorMessage: msg, Error: errors.New(msg), Duration: time.Since(start)}, nil
 	}
 	stepIdx++
 
 	// Steps 2 (and optional sync): Create worktree (with optional pre-sync).
 	wt, steps, stepIdx, err := p.createWorktreeWithSync(ctx, req, stepIdx, totalSteps, onProgress, steps)
 	if err != nil {
-		return &EnvPrepareResult{
-			Success:      false,
-			Steps:        steps,
-			ErrorMessage: err.Error(),
-			Duration:     time.Since(start),
-			Error:        err,
-		}, nil
+		return &EnvPrepareResult{Success: false, Steps: steps, ErrorMessage: err.Error(), Error: err, Duration: time.Since(start)}, nil
 	}
 
 	if len(wt.CopiedFiles) > 0 || len(wt.CopyFilesWarnings) > 0 {
@@ -382,6 +370,7 @@ func (p *WorktreePreparer) prepareMultiRepo(
 			Success:      false,
 			Steps:        steps,
 			ErrorMessage: step.Error,
+			Error:        errors.New(step.Error),
 			Duration:     time.Since(start),
 		}, nil
 	}
@@ -417,8 +406,8 @@ func (p *WorktreePreparer) prepareMultiRepo(
 				Success:      false,
 				Steps:        steps,
 				ErrorMessage: err.Error(),
-				Duration:     time.Since(start),
 				Error:        err,
+				Duration:     time.Since(start),
 			}, nil
 		}
 		if spec.WorktreeID == "" || wt.ID != spec.WorktreeID {

@@ -892,15 +892,11 @@ func (m *Manager) runEnvironmentPreparerWithProgress(
 			zap.String("task_id", req.TaskID),
 			zap.String("preparer", preparer.Name()),
 			zap.Error(err))
-		if result == nil {
-			result = &EnvPrepareResult{}
+		return &EnvPrepareResult{
+			Success:      false,
+			ErrorMessage: err.Error(),
+			Error:        err,
 		}
-		result.Success = false
-		result.Error = err
-		// Keep the existing lifecycle error text stable while retaining the
-		// original error separately for errors.Is/errors.As callers.
-		result.ErrorMessage = err.Error()
-		return result
 	}
 
 	return result
@@ -990,8 +986,19 @@ func (m *Manager) launchApplyPrepareResult(
 			ErrorMessage: result.ErrorMessage,
 			Steps:        result.Steps,
 		})
+		// Prefer the typed chain on result.Error so errors.Is/errors.As reach
+		// the underlying sentinel (worktree.ErrBranchCheckedOut, etc.). Fall
+		// back to the textual ErrorMessage when the preparer did not supply a
+		// typed error. The formatted message is identical in both cases.
 		if result.Error != nil {
-			return fmt.Errorf("environment preparation failed: %w", result.Error)
+			displayMessage := result.ErrorMessage
+			if displayMessage == "" {
+				displayMessage = result.Error.Error()
+			}
+			return fmt.Errorf("environment preparation failed: %w", &prepareResultError{
+				message: displayMessage,
+				cause:   result.Error,
+			})
 		}
 		return fmt.Errorf("environment preparation failed: %s", result.ErrorMessage)
 	}

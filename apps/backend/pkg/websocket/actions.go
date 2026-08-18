@@ -27,6 +27,13 @@ const (
 	ActionRepositoryUpdate = "repository.update"
 	ActionRepositoryDelete = "repository.delete"
 
+	// Repository Set actions
+	ActionRepositorySetList   = "repository_set.list"
+	ActionRepositorySetCreate = "repository_set.create"
+	ActionRepositorySetGet    = "repository_set.get"
+	ActionRepositorySetUpdate = "repository_set.update"
+	ActionRepositorySetDelete = "repository_set.delete"
+
 	// Repository Script actions
 	ActionRepositoryScriptList   = "repository.script.list"
 	ActionRepositoryScriptCreate = "repository.script.create"
@@ -233,6 +240,9 @@ const (
 	ActionRepositoryCreated            = "repository.created"
 	ActionRepositoryUpdated            = "repository.updated"
 	ActionRepositoryDeleted            = "repository.deleted"
+	ActionRepositorySetCreated         = "repository_set.created"
+	ActionRepositorySetUpdated         = "repository_set.updated"
+	ActionRepositorySetDeleted         = "repository_set.deleted"
 	ActionRepositoryScriptCreated      = "repository.script.created"
 	ActionRepositoryScriptUpdated      = "repository.script.updated"
 	ActionRepositoryScriptDeleted      = "repository.script.deleted"
