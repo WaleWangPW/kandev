@@ -991,7 +991,14 @@ func (m *Manager) launchApplyPrepareResult(
 		// back to the textual ErrorMessage when the preparer did not supply a
 		// typed error. The formatted message is identical in both cases.
 		if result.Error != nil {
-			return fmt.Errorf("environment preparation failed: %w", result.Error)
+			displayMessage := result.ErrorMessage
+			if displayMessage == "" {
+				displayMessage = result.Error.Error()
+			}
+			return fmt.Errorf("environment preparation failed: %w", &prepareResultError{
+				message: displayMessage,
+				cause:   result.Error,
+			})
 		}
 		return fmt.Errorf("environment preparation failed: %s", result.ErrorMessage)
 	}

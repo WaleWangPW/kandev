@@ -185,6 +185,17 @@ type EnvPrepareResult struct {
 	Error error `json:"-"`
 }
 
+// prepareResultError keeps the display message separate from the typed cause.
+// The display message can be sanitized while errors.Is/errors.As still reach
+// the original cause through Unwrap.
+type prepareResultError struct {
+	message string
+	cause   error
+}
+
+func (e *prepareResultError) Error() string { return e.message }
+func (e *prepareResultError) Unwrap() error { return e.cause }
+
 // PrepareProgressCallback is called when a preparation step changes status.
 type PrepareProgressCallback func(step PrepareStep, stepIndex int, totalSteps int)
 

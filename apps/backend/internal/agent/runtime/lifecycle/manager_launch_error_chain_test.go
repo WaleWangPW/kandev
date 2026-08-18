@@ -28,6 +28,15 @@ func (p *errorChainPreparer) Prepare(_ context.Context, _ *EnvPrepareRequest, _ 
 	}, nil
 }
 
+type directErrorPreparer struct {
+	err error
+}
+
+func (p *directErrorPreparer) Name() string { return "direct-error" }
+func (p *directErrorPreparer) Prepare(_ context.Context, _ *EnvPrepareRequest, _ PrepareProgressCallback) (*EnvPrepareResult, error) {
+	return nil, p.err
+}
+
 // newErrorChainTestManager builds a Manager just rich enough to call
 // launchApplyPrepareResult. Only the eventPublisher field is exercised.
 func newErrorChainTestManager(t *testing.T) *Manager {
@@ -90,6 +99,27 @@ func TestLaunchApplyPrepareResult_FallsBackToErrorMessageWhenErrorNil(t *testing
 	require.Equal(t, "environment preparation failed: no repository path provided", err.Error())
 }
 
+func TestLaunchApplyPrepareResult_UsesDisplayMessageAndPreservesCause(t *testing.T) {
+	mgr := newErrorChainTestManager(t)
+	cleanupManagerStopCh(t, mgr)
+
+	cause := errors.New("raw cause contains internal detail")
+	var workspacePath, mainRepoGitDir, worktreeID, worktreeBranch string
+	err := mgr.launchApplyPrepareResult(
+		&LaunchRequest{TaskID: "task-2b", SessionID: "session-2b"},
+		&EnvPrepareResult{
+			Success:      false,
+			ErrorMessage: "safe display message",
+			Error:        cause,
+		},
+		&workspacePath, &mainRepoGitDir, &worktreeID, &worktreeBranch,
+	)
+
+	require.Error(t, err)
+	require.Equal(t, "environment preparation failed: safe display message", err.Error())
+	require.ErrorIs(t, err, cause)
+}
+
 func TestRunEnvironmentPreparerWithProgress_PropagatesTypedErrorChain(t *testing.T) {
 	mgr := newErrorChainTestManager(t)
 	cleanupManagerStopCh(t, mgr)
@@ -131,4 +161,49 @@ func TestRunEnvironmentPreparerWithProgress_PropagatesTypedErrorChain(t *testing
 	require.Error(t, wrapped)
 	require.True(t, errors.Is(wrapped, worktree.ErrBranchCheckedOut),
 		"wrapped launch error must still expose worktree.ErrBranchCheckedOut")
+}
+
+func TestRunEnvironmentPreparerWithProgress_PreservesDirectErrorChain(t *testing.T) {
+	mgr := newErrorChainTestManager(t)
+	cleanupManagerStopCh(t, mgr)
+
+	registry := NewPreparerRegistry(mgr.logger)
+	registry.Register("worktree", &directErrorPreparer{
+		err: worktree.ClassifyGitError(
+			"fatal: 'feature/direct' is already used by worktree at '/tmp/repo/.git/worktrees/other'",
+			nil,
+		),
+	})
+	mgr.preparerRegistry = registry
+
+	result := mgr.runEnvironmentPreparerWithProgress(
+		context.Background(),
+		&LaunchRequest{
+			TaskID:         "task-4",
+			SessionID:      "session-4",
+			ExecutorType:   "worktree",
+			RepositoryPath: "/tmp/repo",
+		},
+		"",
+		func(PrepareStep, int, int) {},
+	)
+
+	require.NotNil(t, result)
+	require.False(t, result.Success)
+	require.ErrorIs(t, result.Error, worktree.ErrBranchCheckedOut)
+}
+
+func TestWorktreePreparerMultiRepoFailureCarriesError(t *testing.T) {
+	preparer := NewWorktreePreparer(nil, newTestLocalLogger())
+	result, err := preparer.Prepare(context.Background(), &EnvPrepareRequest{
+		Repositories: []RepoPrepareSpec{
+			{RepositoryID: "repo-a", RepositoryPath: "/tmp/repo-a"},
+			{RepositoryID: "repo-b", RepositoryPath: "/tmp/repo-b"},
+		},
+	}, nil)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.Success)
+	require.Error(t, result.Error)
 }

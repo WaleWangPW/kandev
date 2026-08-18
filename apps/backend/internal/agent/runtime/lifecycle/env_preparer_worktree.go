@@ -370,6 +370,7 @@ func (p *WorktreePreparer) prepareMultiRepo(
 			Success:      false,
 			Steps:        steps,
 			ErrorMessage: step.Error,
+			Error:        errors.New(step.Error),
 			Duration:     time.Since(start),
 		}, nil
 	}
