@@ -894,8 +894,6 @@
   "planHistory": "Histórico do plano",
   "planIsEmpty": "O plano está vazio",
   "planMode": "Modo de plano",
-  "planModeMessageRecorded": "Mensagem do modo de plano registada",
-  "planModeMessageRecordedDescription": "A mensagem foi guardada sem iniciar um novo turno de execução. O modo de plano está ativo.",
   "planRestoredToV": "Plano restaurado para a v{{revisionnumber}}",
   "planYourImplementation": "Planeie a sua implementação",
   "pleaseTryAgain": "Tente novamente.",

@@ -164,38 +164,9 @@ function usePanelMessageHandler(panelState: ChatPanelState) {
     prompts,
   });
 }
-function showPlanModeRecordedToast(toast: ReturnType<typeof useToast>["toast"]) {
-  toast({
-    title: t("task:planModeMessageRecorded"),
-    description: t("task:planModeMessageRecordedDescription"),
-  });
-}
-
-async function dispatchMessage(args: {
-  payload: ChatSubmitPayload;
-  finalMessage: string;
-  onSend?: (payload: ChatSubmitPayload) => ChatSubmitResult;
-  pendingClarification: ChatPanelState["pendingClarification"];
-  inlineTaskMentions: ChatSubmitPayload["inlineTaskMentions"];
-  storeApi: ReturnType<typeof useAppStoreApi>;
-  handleSendMessage: ReturnType<typeof usePanelMessageHandler>["handleSendMessage"];
-}) {
-  const { payload, finalMessage, onSend, pendingClarification, storeApi, handleSendMessage } = args;
-  const outbound = { ...payload, message: finalMessage };
-  if (onSend && !pendingClarification) {
-    // Expand task mentions because onSend bypasses useMessageHandler.buildFinalMessage.
-    const taskCtx = args.inlineTaskMentions?.length
-      ? buildTaskMentionsContext(args.inlineTaskMentions, storeApi.getState())
-      : "";
-    await onSend({ ...outbound, message: finalMessage + taskCtx });
-    return;
-  }
-  await handleSendMessage(outbound);
-}
 
 /** Builds the composer's submit handler, tracking in-flight sends and
- *  routing errors to a toast.
- */
+ *  routing errors to a toast. */
 export function useSubmitHandler(
   panelState: ChatPanelState,
   onSend?: (payload: ChatSubmitPayload) => ChatSubmitResult,
@@ -233,23 +204,15 @@ export function useSubmitHandler(
           walkthroughComments,
           messageComments,
         });
-        if (planModeEnabled) {
-          // Plan-mode sends skip both the preview onSend path and the real
-          // execution handleSendMessage path: the backend records the user
-          // message but does not start a coder/writer/server-action turn.
-          // A plan-mode session produces its assistant reply through the
-          // existing plan-mode callback chain, not via dispatchPromptAsync.
-          showPlanModeRecordedToast(toast);
+        const outbound = { ...payload, message: finalMessage };
+        if (onSend && !pendingClarification) {
+          // Expand task mentions because onSend bypasses useMessageHandler.buildFinalMessage.
+          const taskCtx = payload.inlineTaskMentions?.length
+            ? buildTaskMentionsContext(payload.inlineTaskMentions, storeApi.getState())
+            : "";
+          await onSend({ ...outbound, message: finalMessage + taskCtx });
         } else {
-          await dispatchMessage({
-            payload,
-            finalMessage,
-            onSend,
-            pendingClarification,
-            inlineTaskMentions: payload.inlineTaskMentions,
-            storeApi,
-            handleSendMessage,
-          });
+          await handleSendMessage(outbound);
         }
         if (payload.reviewComments && payload.reviewComments.length > 0)
           markCommentsSent(payload.reviewComments.map((c) => c.id));

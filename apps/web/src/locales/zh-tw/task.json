@@ -893,8 +893,6 @@
   "planHistory": "計劃歷史",
   "planIsEmpty": "計劃為空",
   "planMode": "計劃模式",
-  "planModeMessageRecorded": "已記錄計劃模式訊息",
-  "planModeMessageRecordedDescription": "訊息已儲存，不會啟動新的執行輪次。計劃模式已開啟。",
   "planRestoredToV": "計劃已恢復到 v{{revisionnumber}}",
   "planYourImplementation": "規劃你的實現",
   "pleaseTryAgain": "請重試。",
