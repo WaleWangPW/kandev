@@ -174,3 +174,104 @@ func (s *Service) repairDeadRowLiveness(ctx context.Context, running *models.Exe
 			zap.Error(err))
 	}
 }
+
+// idleReclaimDisposition captures why a session is or is not eligible for the
+// idle-session reclaim path. Mirrors startupCleanupDisposition's role: keep
+// every decision logged and observable without leaking resume tokens.
+type idleReclaimDisposition string
+
+const (
+	idleReclaimDispositionReclaimed    idleReclaimDisposition = "reclaimed"
+	idleReclaimDispositionSkippedState idleReclaimDisposition = "skipped_state"
+	idleReclaimDispositionSkippedLive  idleReclaimDisposition = "skipped_live_runtime"
+	idleReclaimDispositionSkippedTurn  idleReclaimDisposition = "skipped_active_turn"
+)
+
+// classifyIdleReclaim is the single decision matrix for the idle-session
+// reclaim primitive. Reclaim is fail-closed: only sessions in an idle-yet-
+// resumable shape AND without a live runtime AND without an active turn
+// proceed. Any uncertain signal falls into a skipped disposition and the
+// caller leaves the row untouched.
+func classifyIdleReclaim(sessionState models.TaskSessionState, agentRunning bool, hasActiveTurn bool) idleReclaimDisposition {
+	if sessionState != models.TaskSessionStateWaitingForInput && sessionState != models.TaskSessionStateIdle {
+		return idleReclaimDispositionSkippedState
+	}
+	if agentRunning {
+		return idleReclaimDispositionSkippedLive
+	}
+	if hasActiveTurn {
+		return idleReclaimDispositionSkippedTurn
+	}
+	return idleReclaimDispositionReclaimed
+}
+
+// reclaimIdleSession releases the provider-runtime reservation backing an
+// idle-yet-resumable session (state in {WaitingForInput, Idle}) when no live
+// agent process and no active turn can be observed. Resume token and worktree
+// path are preserved so a later resume can re-attach the session without
+// losing context. Never touches a running executor; never called from a
+// periodic reaper (a runtime auto-convergence tick is a pre-existing design
+// gap handled by an independent task, see plan docs).
+//
+// Idempotent: a session with no in-memory execution entry returns nil from
+// CleanupStaleExecutionBySessionID, and a missing executor row is not an
+// error for repairDeadRowLiveness.
+func (s *Service) reclaimIdleSession(ctx context.Context, sessionID string) error {
+	if sessionID == "" {
+		return nil
+	}
+	session, err := s.repo.GetTaskSession(ctx, sessionID)
+	if err != nil {
+		if isTaskSessionNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("load session for idle reclaim: %w", err)
+	}
+	running, err := s.repo.GetExecutorRunningBySessionID(ctx, sessionID)
+	if err != nil {
+		// A missing executor row means there is nothing to release; skip.
+		if errors.Is(err, models.ErrExecutorRunningNotFound) {
+			return nil
+		}
+		return fmt.Errorf("load executor row for idle reclaim: %w", err)
+	}
+	agentRunning := s.agentManager.IsAgentRunningForSession(ctx, sessionID)
+	hasActiveTurn := s.sessionHasActiveTurn(ctx, sessionID)
+	decision := classifyIdleReclaim(session.State, agentRunning, hasActiveTurn)
+	if decision != idleReclaimDispositionReclaimed {
+		s.logger.Debug("idle reclaim skipped",
+			zap.String("session_id", sessionID),
+			zap.String("disposition", string(decision)),
+			zap.String("session_state", string(session.State)),
+			zap.Bool("agent_running", agentRunning),
+			zap.Bool("has_active_turn", hasActiveTurn))
+		return nil
+	}
+	if err := s.agentManager.CleanupStaleExecutionBySessionID(ctx, sessionID); err != nil {
+		s.logger.Warn("idle reclaim: cleanup failed; row preserved",
+			zap.String("session_id", sessionID),
+			zap.Error(err))
+		return nil
+	}
+	s.repairDeadRowLiveness(ctx, running)
+	s.logger.Info("idle reclaim: provider runtime released; row preserved for resume",
+		zap.String("session_id", sessionID),
+		zap.String("task_id", running.TaskID),
+		zap.Bool("has_resume_token", running.ResumeToken != ""),
+		zap.Bool("has_worktree", running.WorktreePath != ""))
+	return nil
+}
+
+// sessionHasActiveTurn reports whether the orchestrator has any in-flight
+// turn bound to the session. Conservative default (true on lookup error)
+// keeps reclaim fail-closed.
+func (s *Service) sessionHasActiveTurn(ctx context.Context, sessionID string) bool {
+	if s.turnService == nil {
+		return true
+	}
+	turn, err := s.turnService.GetActiveTurn(ctx, sessionID)
+	if err != nil {
+		return true
+	}
+	return turn != nil
+}
