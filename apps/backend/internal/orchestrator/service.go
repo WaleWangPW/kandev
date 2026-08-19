@@ -693,6 +693,13 @@ type Service struct {
 	// manager simply keeps every run's checkout. Set via SetWorktreeManager.
 	worktreeReaper automationWorktreeReaper
 
+	// idleReaper is the periodic background loop that calls
+	// reclaimIdleSession on rows older than idleReaperMinIdle. Nil-safe:
+	// callers that don't need the reaper (most tests, ephemeral
+	// orchestrator instances) leave it nil and startIdleSessionReaper
+	// / stopIdleSessionReaper no-op. See idle_session_reaper.go.
+	idleReaper *idleSessionReaper
+
 	// unreclaimedWorkspaces holds the automation runs whose workspace removal
 	// was attempted and did not actually free the directory. Retention selects
 	// candidates by "still has a live worktree row", and a failed removal can
@@ -1008,6 +1015,7 @@ func NewService(
 		reservedPromptCallbacks:      newReservedPromptCallbackOwner(),
 		sendNowCtx:                   sendNowCtx,
 		sendNowCancel:                sendNowCancel,
+		idleReaper:                   newIdleSessionReaper(),
 	}
 	// Always publish queue-status after a task-scoped queue purge so the
 	// status-summary projector zeros queued_prompt_count. Unlike the
@@ -2150,6 +2158,14 @@ func (s *Service) Start(ctx context.Context) error {
 	// Reconcile queued tasks when WIP limits or feeder settings change.
 	s.subscribeWorkflowQueueEvents()
 
+	// Start the idle-session reaper last. It depends on s.repo
+	// (already wired), s.agentManager (already wired), and the
+	// turnService-cleared reconciler so a turnService == nil error
+	// would already have aborted Start above. After this returns the
+	// background goroutine owns the reclaim tick; Service.Stop joins it
+	// before tearing down repo / agentManager.
+	s.startIdleSessionReaper(ctx)
+
 	s.logger.Info("orchestrator service started successfully")
 	return nil
 }
@@ -2183,6 +2199,7 @@ func (s *Service) Stop() error {
 	s.cancelAllClarificationWatchdogs()
 	s.cancelAllTransientRetries()
 	s.stopSendNowWorkers()
+	s.stopIdleSessionReaper()
 
 	if len(errs) > 0 {
 		return errs[0]
