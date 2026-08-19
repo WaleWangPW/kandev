@@ -182,8 +182,7 @@ describe("useSubmitHandler", () => {
     expect(handleSendMessageMock).not.toHaveBeenCalled();
     expect(toastMock).toHaveBeenCalledWith({
       title: "Plan mode message recorded",
-      description:
-        "The message was saved without starting a new execution turn. Plan mode is on.",
+      description: "The message was saved without starting a new execution turn. Plan mode is on.",
     });
   });
 
