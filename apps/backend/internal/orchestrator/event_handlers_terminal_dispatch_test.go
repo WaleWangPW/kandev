@@ -253,13 +253,6 @@ func TestHandleTaskStateChanged_NonTerminalChildReceiptDoesNotFireParents(t *tes
 	}
 }
 
-// resetTaskRepo re-seeds a fresh task into the in-memory task repo so a
-// test can fire two transitions on the same row without tripping the
-// mock's "task exists" guard.
-func resetTaskRepo(taskRepo *mockTaskRepo, task *v1.Task) {
-	taskRepo.tasks[task.ID] = task
-}
-
 func ptrToTaskStateCompleted() *v1.TaskState {
 	s := v1.TaskStateCompleted
 	return &s
