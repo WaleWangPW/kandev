@@ -942,7 +942,13 @@ func (h *TaskHandlers) httpCreateTask(c *gin.Context) {
 		deferredLaunch = map[string]interface{}{
 			"intent": intent, "agent_profile_id": body.AgentProfileID, "executor_id": body.ExecutorID,
 			"executor_profile_id": body.ExecutorProfileID, "prompt": description,
-			"plan_mode": body.PlanMode, "attachments": body.Attachments,
+			// Mirror the !StartAgent guard on the task row below (line 963):
+			// plan_mode=true must not survive into a StartAgent deferred launch.
+			// Otherwise the deferred consumer would re-launch the agent with
+			// plan_mode=true and route it through the execution path (PR #2811
+			// review: plan_mode and execution launch are mutually exclusive).
+			"plan_mode":   body.PlanMode && !body.StartAgent,
+			"attachments": body.Attachments,
 		}
 	}
 
@@ -1510,8 +1516,14 @@ func (h *TaskHandlers) dispatchTaskSession(taskID, description string, body http
 			AgentProfileID:    body.AgentProfileID,
 			Prompt:            description,
 			SkipMessageRecord: false,
-			PlanMode:          body.PlanMode,
-			Attachments:       body.Attachments,
+			// Mirror the !StartAgent guard on the task row (line 970) and
+			// on the deferredLaunch metadata: this dispatch only runs when
+			// StartAgent=true, so the gate is always false here, but the
+			// explicit AND keeps the three sites consistent and prevents a
+			// future refactor from re-introducing the leak (PR #2811 review:
+			// plan_mode and execution launch are mutually exclusive).
+			PlanMode:    body.PlanMode && !body.StartAgent,
+			Attachments: body.Attachments,
 		})
 		if err != nil {
 			h.logger.Error("failed to start agent for task (async)", zap.Error(err), zap.String("task_id", taskID), zap.String("session_id", sessionID))

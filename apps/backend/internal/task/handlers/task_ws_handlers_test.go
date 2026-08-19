@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/kandev/kandev/internal/auth/authn"
@@ -422,4 +423,40 @@ func TestWSListTasksSurfacesUnknownWorkflow(t *testing.T) {
 	payload := wsWorkflowError(t, resp)
 	require.Equal(t, string(ws.ErrorCodeInternalError), payload.Code)
 	require.Equal(t, "Failed to list tasks", payload.Message)
+}
+
+// TestWSCreateTask_PlanModeStartAgentStripsPlanMode pins the path-D fix
+// for PR #2811 review on the WS handler. A task.create with both
+// plan_mode=true and start_agent=true must persist a deferred_launch
+// intent whose plan_mode flag is false (mirroring the !StartAgent
+// guard on the task row). Otherwise the deferred consumer
+// (launchDeferredTask → LaunchSession) would re-launch the agent
+// under plan-mode execution semantics.
+func TestWSCreateTask_PlanModeStartAgentStripsPlanMode(t *testing.T) {
+	repo := &wsTaskRepo{}
+	h := newWSTaskHandlers(t, repo)
+
+	resp, err := h.wsCreateTask(context.Background(), wsWorkflowRequest(t, ws.ActionTaskCreate, map[string]any{
+		"workspace_id":     "ws-b",
+		"workflow_id":      "wf-b",
+		"title":            "Plan then boot",
+		"agent_profile_id": "profile-1",
+		"start_agent":      true,
+		"plan_mode":        true,
+	}))
+
+	require.NoError(t, err)
+	require.Equal(t, ws.MessageTypeResponse, resp.Type, "body: %s", resp.Payload)
+	require.Len(t, repo.created, 1, "task.create must persist the task")
+	captured := repo.created[0]
+	require.NotNil(t, captured.Metadata, "task metadata must hold the deferred intent")
+
+	deferredRaw, ok := captured.Metadata[models.MetaKeyDeferredLaunch]
+	require.True(t, ok, "start_agent=true must persist a deferred_launch intent")
+	deferred, ok := deferredRaw.(map[string]interface{})
+	require.True(t, ok, "deferred_launch intent must be a map[string]interface{}")
+	pmFlag, present := deferred["plan_mode"]
+	require.True(t, present, "the deferred intent must carry the plan_mode key (to assert the !StartAgent guard)")
+	assert.Equal(t, false, pmFlag,
+		"plan_mode=true + start_agent=true must persist plan_mode=false in the deferred intent (path-D fix)")
 }
