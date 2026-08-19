@@ -18,20 +18,18 @@ import (
 	ws "github.com/kandev/kandev/pkg/websocket"
 )
 
-// TestWSAddMessage_PlanModePersistsButSkipsDispatch proves that a user
-// message sent with plan_mode=true is recorded on the task (CreateMessage
-// runs unconditionally) but the dispatch path that would otherwise start a
-// coder/writer/server-action turn (PromptTask, SteerTask, StartCreatedSession)
-// is never invoked. Default plan_mode=false (or omitted) keeps dispatching.
-func TestWSAddMessage_PlanModePersistsButSkipsDispatch(t *testing.T) {
+// TestWSAddMessage_PlanModePersistsAndDispatches proves that a user message
+// sent with plan_mode=true is recorded on the task and still enters the
+// normal dispatch path. Plan mode changes the execution prompt; it does not
+// turn message.add into a record-only operation.
+func TestWSAddMessage_PlanModePersistsAndDispatches(t *testing.T) {
 	tests := []struct {
 		name            string
 		planMode        bool
 		wantMessageRows int
-		wantDispatched  bool
 	}{
-		{name: "plan_mode true persists and skips dispatch", planMode: true, wantMessageRows: 1, wantDispatched: false},
-		{name: "plan_mode false dispatches normally", planMode: false, wantMessageRows: 1, wantDispatched: true},
+		{name: "plan_mode true persists and dispatches", planMode: true, wantMessageRows: 1},
+		{name: "plan_mode false dispatches normally", planMode: false, wantMessageRows: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -70,14 +68,9 @@ func TestWSAddMessage_PlanModePersistsButSkipsDispatch(t *testing.T) {
 			assert.Equal(t, tt.wantMessageRows, repo.messageCount(),
 				"the user message must be persisted regardless of plan_mode")
 
-			if tt.wantDispatched {
-				require.Eventually(t, func() bool { return orch.dispatchCalls() > 0 },
-					time.Second, 5*time.Millisecond,
-					"default plan_mode=false must dispatch via SteerTask or PromptTask")
-			} else {
-				assert.Equal(t, int32(0), orch.dispatchCalls(),
-					"plan_mode=true must skip SteerTask/PromptTask/StartCreatedSession dispatch")
-			}
+			require.Eventually(t, func() bool { return orch.dispatchCalls() > 0 },
+				time.Second, 5*time.Millisecond,
+				"message.add must dispatch via SteerTask or PromptTask")
 		})
 	}
 }

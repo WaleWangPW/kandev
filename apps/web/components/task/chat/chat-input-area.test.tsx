@@ -172,14 +172,7 @@ describe("useSubmitHandler routing", () => {
 });
 
 describe("useSubmitHandler plan mode", () => {
-  it("forwards plan-mode messages through the normal send path (no frontend gate)", async () => {
-    // The frontend used to swallow plan-mode sends behind a "recorded" toast
-    // (8743b0bcd). That over-aggressive gate broke E2E contracts that
-    // expect plan-mode messages to flow through normally with plan_mode
-    // metadata attached. The router-level gate lives in the backend
-    // (message_handlers.go: wsAddMessage skips dispatchPromptAsync on
-    // plan_mode=true); the frontend must still send so the user message
-    // is persisted with its plan_mode metadata.
+  it("uses the normal send path in plan mode", async () => {
     const onSend = vi.fn();
     const { result } = renderHook(() =>
       useSubmitHandler(panelState({ planModeEnabled: true }), onSend),
@@ -189,11 +182,9 @@ describe("useSubmitHandler plan mode", () => {
       await result.current.handleSubmit({ message: "plan-mode instruction" });
     });
 
-    expect(onSend).toHaveBeenCalledTimes(1);
-    expect(onSend).toHaveBeenCalledWith(
-      expect.objectContaining({ message: "plan-mode instruction" }),
-    );
+    expect(onSend).toHaveBeenCalledWith({ message: "plan-mode instruction" });
     expect(handleSendMessageMock).not.toHaveBeenCalled();
+    expect(toastMock).not.toHaveBeenCalled();
   });
 });
 

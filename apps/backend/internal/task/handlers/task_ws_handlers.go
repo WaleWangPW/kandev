@@ -167,12 +167,7 @@ func (h *TaskHandlers) wsCreateTask(ctx context.Context, msg *ws.Message) (*ws.M
 		deferredLaunch = map[string]interface{}{
 			"intent": "start", "agent_profile_id": req.AgentProfileID, "executor_id": req.ExecutorID,
 			"executor_profile_id": req.ExecutorProfileID, "prompt": description,
-			// Mirror the !StartAgent guard on the task row below: plan_mode
-			// must not survive into a StartAgent deferred launch. Otherwise
-			// the deferred consumer would re-launch the agent with plan_mode=true
-			// and route it through the execution path (PR #2811 review:
-			// plan_mode and execution launch are mutually exclusive).
-			"plan_mode":   req.PlanMode && !req.StartAgent,
+			"plan_mode":   req.PlanMode,
 			"attachments": req.Attachments,
 		}
 	}
@@ -190,7 +185,7 @@ func (h *TaskHandlers) wsCreateTask(ctx context.Context, msg *ws.Message) (*ws.M
 		Position:       req.Position,
 		Metadata:       req.Metadata,
 		DeferredLaunch: deferredLaunch,
-		PlanMode:       req.PlanMode && !req.StartAgent,
+		PlanMode:       req.PlanMode,
 		ParentID:       req.ParentID,
 	})
 	if err != nil {

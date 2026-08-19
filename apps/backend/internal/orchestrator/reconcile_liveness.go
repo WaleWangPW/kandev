@@ -24,6 +24,13 @@ type rowLivenessProber interface {
 	RowLiveness(row *models.ExecutorRunning) models.ProcessLiveness
 }
 
+// agentRunningProber preserves runtime probe errors so reclaim can fail
+// closed. The legacy boolean method remains the fallback for test doubles and
+// adapters that do not expose the richer probe yet.
+type agentRunningProber interface {
+	ProbeAgentRunningForSession(ctx context.Context, sessionID string) (bool, error)
+}
+
 type startupCleanupDisposition string
 
 const (
@@ -166,13 +173,24 @@ func (s *Service) pruneOrRepairExecutorRow(ctx context.Context, running *models.
 // process — status=stopped, local_pid cleared, resume_token/worktree preserved —
 // satisfying #1597's "never leave a row claiming a dead process" expected
 // behavior. Best-effort; a missing row is not an error.
-func (s *Service) repairDeadRowLiveness(ctx context.Context, running *models.ExecutorRunning) {
-	if err := s.repo.RepairExecutorRunningDead(ctx, running.SessionID); err != nil &&
-		!errors.Is(err, models.ErrExecutorRunningNotFound) {
+func (s *Service) repairDeadRowLiveness(ctx context.Context, running *models.ExecutorRunning) error {
+	err := s.repo.RepairExecutorRunningDead(ctx, running.SessionID)
+	if err != nil && !errors.Is(err, models.ErrExecutorRunningNotFound) {
 		s.logger.Warn("failed to repair executor row liveness during reconciliation",
 			zap.String("session_id", running.SessionID),
 			zap.Error(err))
 	}
+	if errors.Is(err, models.ErrExecutorRunningNotFound) {
+		return nil
+	}
+	return err
+}
+
+func (s *Service) probeAgentRunning(ctx context.Context, sessionID string) (bool, error) {
+	if prober, ok := s.agentManager.(agentRunningProber); ok && prober != nil {
+		return prober.ProbeAgentRunningForSession(ctx, sessionID)
+	}
+	return s.agentManager.IsAgentRunningForSession(ctx, sessionID), nil
 }
 
 // idleReclaimDisposition captures why a session is or is not eligible for the
@@ -240,6 +258,8 @@ func (s *Service) reclaimIdleSession(ctx context.Context, sessionID string) erro
 	if sessionID == "" {
 		return nil
 	}
+	releaseLifecycleLock := s.acquireSessionLifecycleLock(sessionID)
+	defer releaseLifecycleLock()
 	session, err := s.repo.GetTaskSession(ctx, sessionID)
 	if err != nil {
 		if isTaskSessionNotFound(err) {
@@ -255,7 +275,13 @@ func (s *Service) reclaimIdleSession(ctx context.Context, sessionID string) erro
 		}
 		return fmt.Errorf("load executor row for idle reclaim: %w", err)
 	}
-	agentRunning := s.agentManager.IsAgentRunningForSession(ctx, sessionID)
+	agentRunning, probeErr := s.probeAgentRunning(ctx, sessionID)
+	if probeErr != nil {
+		s.logger.Warn("idle reclaim skipped; agent liveness probe failed",
+			zap.String("session_id", sessionID),
+			zap.Error(probeErr))
+		return nil
+	}
 	hasActiveTurn := s.sessionHasActiveTurn(ctx, sessionID)
 	decision := classifyIdleReclaim(session.State, agentRunning, hasActiveTurn)
 	if decision != idleReclaimDispositionReclaimed {
@@ -273,7 +299,9 @@ func (s *Service) reclaimIdleSession(ctx context.Context, sessionID string) erro
 			zap.Error(err))
 		return nil
 	}
-	s.repairDeadRowLiveness(ctx, running)
+	if err := s.repairDeadRowLiveness(ctx, running); err != nil {
+		return fmt.Errorf("repair executor row after idle reclaim: %w", err)
+	}
 	s.logger.Info("idle reclaim: provider runtime released; row preserved for resume",
 		zap.String("session_id", sessionID),
 		zap.String("task_id", running.TaskID),

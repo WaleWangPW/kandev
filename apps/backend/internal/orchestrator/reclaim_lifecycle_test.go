@@ -232,6 +232,44 @@ func TestReclaimIdleSessionRefusesLiveRuntime(t *testing.T) {
 	}
 }
 
+type failingAgentLivenessProbe struct {
+	*mockAgentManager
+}
+
+func (m *failingAgentLivenessProbe) ProbeAgentRunningForSession(context.Context, string) (bool, error) {
+	return false, errors.New("agent status unavailable")
+}
+
+func TestReclaimIdleSessionFailsClosedOnLivenessProbeError(t *testing.T) {
+	repo := setupTestRepo(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	seedTaskAndSession(t, repo, "task-probe", "session-probe", models.TaskSessionStateWaitingForInput)
+	if err := repo.UpsertExecutorRunning(ctx, &models.ExecutorRunning{
+		ID: "session-probe", SessionID: "session-probe", TaskID: "task-probe",
+		AgentExecutionID: "exec-probe", Runtime: agentruntime.RuntimeStandalone,
+		Status: models.ExecutorRunningStatusRunning, LocalPID: 99,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("upsert probe row: %v", err)
+	}
+
+	base := &mockAgentManager{isAgentRunning: false}
+	svc := createTestServiceWithAgent(repo, newMockStepGetter(), newMockTaskRepo(), &failingAgentLivenessProbe{mockAgentManager: base})
+	svc.turnService = &inactiveTurnService{}
+
+	if err := svc.reclaimIdleSession(ctx, "session-probe"); err != nil {
+		t.Fatalf("reclaimIdleSession: %v", err)
+	}
+	row, err := repo.GetExecutorRunningBySessionID(ctx, "session-probe")
+	if err != nil {
+		t.Fatalf("row missing after uncertain probe: %v", err)
+	}
+	if row.Status != models.ExecutorRunningStatusRunning || row.LocalPID != 99 {
+		t.Fatalf("uncertain liveness must leave row untouched, got status=%q pid=%d", row.Status, row.LocalPID)
+	}
+}
+
 // TestReclaimIdleSessionRefusesWrongState proves non-idle non-terminal
 // states are never reclaimed: a RUNNING or STARTING session that happens
 // to have no live runtime must wait for explicit completion, not get

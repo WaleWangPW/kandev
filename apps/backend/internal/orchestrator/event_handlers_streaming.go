@@ -1872,59 +1872,55 @@ func (s *Service) setSessionWaitingForInput(ctx context.Context, taskID, session
 	s.writeTaskReviewState(ctx, taskID, sessionID)
 }
 
-// isSubtaskOf reports whether the session's task is a child of another
-// task. The child-terminal guard uses this to decide whether a terminal
-// receipt is allowed to leave the session in WAITING_FOR_INPUT. Sibling
-// sessions (same task, no ParentID) keep the original affordance so a
-// legitimate "one session done, sibling still working" UI signal is
-// preserved.
-func (s *Service) isSubtaskOf(ctx context.Context, taskID string) bool {
-	if taskID == "" {
-		return false
-	}
-	task, err := s.repo.GetTask(ctx, taskID)
-	if err != nil || task == nil {
-		return false
-	}
-	return task.ParentID != ""
-}
-
+// Child terminal receipts use the task's parent relationship and durable
+// clarification projection to decide whether a session can collapse to
+// COMPLETED. Root-task sibling sessions keep the original WAITING affordance.
 // setSessionWaitingForInputIfRequested is the terminal-receipt variant
 // of setSessionWaitingForInput. It only applies to subtasks (task.ParentID
 // non-empty) because the symptom it guards — "child WAITING_FOR_INPUT
-// after the agent's last assistant turn never asked anything" — only
-// arises for child tasks whose terminal step is meant to converge on a
-// finished child, not to surface a UI prompt. Sibling sessions on a
-// root task keep the original affordance so a finishing session on a
-// multi-session task still flips to WAITING_FOR_INPUT.
+// after the agent's last turn had no active clarification" — only
+// arises for child tasks whose task or workflow step is terminal, not to
+// surface a UI prompt. Sibling sessions on a root task keep the original
+// affordance so a finishing session on a multi-session task still flips to
+// WAITING_FOR_INPUT.
 //
-// When the guard refuses a subtask WAITING write, the child's session
-// would otherwise stay in RUNNING forever. Collapse the session to
-// COMPLETED so the child row does not leak in a stuck active state —
-// markTaskCompletedForTerminalStep flips the *task* state but does
-// not write the session, so a terminal subtask agent exit must do
-// the session-side cleanup here.
+// When a terminal task has no input request, collapse the session to
+// COMPLETED so the child row does not leak in a stuck active state. A clean
+// turn on a non-terminal child is not enough evidence for that collapse, so
+// it remains WAITING_FOR_INPUT.
 func (s *Service) setSessionWaitingForInputIfRequested(
 	ctx context.Context,
 	taskID, sessionID string,
 	preloadedSession ...*models.TaskSession,
 ) {
-	if !s.isSubtaskOf(ctx, taskID) {
+	task, taskErr := s.repo.GetTask(ctx, taskID)
+	if taskErr != nil || task == nil {
+		// A task lookup failure is not evidence that a child reached a terminal
+		// state. Preserve the promptable session instead of leaving it RUNNING.
+		s.logger.Warn("failed to load task before terminal receipt; preserving WAITING state",
+			zap.String("task_id", taskID),
+			zap.String("session_id", sessionID),
+			zap.Error(taskErr))
 		s.setSessionWaitingForInput(ctx, taskID, sessionID, preloadedSession...)
 		return
 	}
-	requestsInput, err := s.repo.GetLastAgentMessageRequestsInput(ctx, sessionID)
+	if task.ParentID == "" {
+		s.setSessionWaitingForInput(ctx, taskID, sessionID, preloadedSession...)
+		return
+	}
+	activeClarifications, err := s.repo.FindActiveClarificationMessagesBySessionID(ctx, sessionID)
 	if err != nil {
-		// A transient reader error must not silently re-introduce the
-		// bug by falling back to the unconditional write. Treat the
-		// child-terminal path as conservatively-skip on read failure.
-		s.logger.Warn("failed to read last agent message requests_input; skipping subtask WAITING write",
+		// A transient reader error is not evidence that the child completed.
+		// Preserve the promptable state and avoid leaving the session RUNNING.
+		s.logger.Warn("failed to read active clarifications; preserving WAITING state",
 			zap.String("task_id", taskID),
 			zap.String("session_id", sessionID),
 			zap.Error(err))
+		s.setSessionWaitingForInput(ctx, taskID, sessionID, preloadedSession...)
 		return
 	}
-	if !requestsInput {
+	taskTerminal := models.IsTerminalTaskState(task.State) || s.workflowStepIsTerminal(ctx, task.WorkflowStepID)
+	if len(activeClarifications) == 0 && taskTerminal {
 		s.logger.Debug("subtask terminal: skipping WAITING write; collapsing session to COMPLETED",
 			zap.String("task_id", taskID),
 			zap.String("session_id", sessionID))
@@ -1940,6 +1936,12 @@ func (s *Service) setSessionWaitingForInputIfRequested(
 				zap.Error(err))
 		}
 		return
+	}
+	if len(activeClarifications) == 0 {
+		s.logger.Debug("subtask turn completed before terminal task state; preserving WAITING state",
+			zap.String("task_id", taskID),
+			zap.String("session_id", sessionID),
+			zap.String("task_state", string(task.State)))
 	}
 	s.setSessionWaitingForInput(ctx, taskID, sessionID, preloadedSession...)
 }

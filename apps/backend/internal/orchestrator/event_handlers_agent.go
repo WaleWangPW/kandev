@@ -1268,7 +1268,7 @@ func (s *Service) handleAgentCompletedLocked(ctx context.Context, data watcher.A
 	// collapsed to COMPLETED inside setSessionWaitingForInputIfRequested
 	// reclaimed earlier; this call covers sibling/office flows whose
 	// settled shape has no live runtime.
-	if err := s.reclaimIdleSession(ctx, data.SessionID); err != nil {
+	if err := s.reclaimIdleSession(context.WithoutCancel(ctx), data.SessionID); err != nil {
 		s.logger.Warn("agent.completed settle: reclaim failed; row preserved",
 			zap.String("task_id", data.TaskID),
 			zap.String("session_id", data.SessionID),

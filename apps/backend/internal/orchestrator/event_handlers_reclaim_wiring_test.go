@@ -57,6 +57,12 @@ func (m *reclaimTrackingAgentManager) wasCalledFor(sessionID string) bool {
 	return false
 }
 
+func (m *reclaimTrackingAgentManager) callsSnapshot() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.calls...)
+}
+
 // TestSubtaskTerminalCollapse_ReclaimsProviderRuntime is the canonical
 // end-to-end wiring test: a child task whose last agent message did not
 // request input collapses to COMPLETED inside
@@ -72,7 +78,7 @@ func TestSubtaskTerminalCollapse_ReclaimsProviderRuntime(t *testing.T) {
 	seedSession(t, repo, "child-task", "s-child", "")
 	if err := repo.UpdateTask(ctx, &models.Task{
 		ID: "child-task", WorkspaceID: "ws1", Title: "child",
-		State: v1.TaskStateInProgress, ParentID: "parent",
+		State: v1.TaskStateCompleted, ParentID: "parent",
 		UpdatedAt: now,
 	}); err != nil {
 		t.Fatalf("set child-task ParentID: %v", err)
@@ -121,7 +127,7 @@ func TestSubtaskTerminalCollapse_ReclaimsProviderRuntime(t *testing.T) {
 
 	// 2. reclaim fired exactly once for this session.
 	if !agentMgr.wasCalledFor("s-child") {
-		t.Fatalf("reclaim must fire on subtask terminal settle; calls=%v", agentMgr.calls)
+		t.Fatalf("reclaim must fire on subtask terminal settle; calls=%v", agentMgr.callsSnapshot())
 	}
 
 	// 3. Row preserved (resume_token/worktree intact) with status=stopped.
@@ -156,7 +162,7 @@ func TestSubtaskTerminalCollapse_LiveAgentBlocksReclaim(t *testing.T) {
 	seedSession(t, repo, "child-live", "s-child-live", "")
 	if err := repo.UpdateTask(ctx, &models.Task{
 		ID: "child-live", WorkspaceID: "ws1", Title: "child live",
-		State: v1.TaskStateInProgress, ParentID: "parent",
+		State: v1.TaskStateCompleted, ParentID: "parent",
 		UpdatedAt: now,
 	}); err != nil {
 		t.Fatalf("set child-live ParentID: %v", err)
@@ -186,7 +192,7 @@ func TestSubtaskTerminalCollapse_LiveAgentBlocksReclaim(t *testing.T) {
 	waitForStopCall(t, inner)
 
 	if agentMgr.wasCalledFor("s-child-live") {
-		t.Fatalf("reclaim must be blocked while the agent is alive; calls=%v", agentMgr.calls)
+		t.Fatalf("reclaim must be blocked while the agent is alive; calls=%v", agentMgr.callsSnapshot())
 	}
 	row, err := repo.GetExecutorRunningBySessionID(ctx, "s-child-live")
 	if err != nil {
@@ -245,7 +251,7 @@ func TestSiblingSession_AgentCompletedDoesNotReclaim(t *testing.T) {
 	}
 	// Reclaim must NOT fire — the live agent is still answering.
 	if agentMgr.wasCalledFor("s-finishing") {
-		t.Fatalf("reclaim must not fire while a live agent is waiting for user input; calls=%v", agentMgr.calls)
+		t.Fatalf("reclaim must not fire while a live agent is waiting for user input; calls=%v", agentMgr.callsSnapshot())
 	}
 }
 
@@ -269,7 +275,7 @@ func TestSubtaskTerminalCollapse_ReclaimIsIdempotent(t *testing.T) {
 	seedSession(t, repo, "child-idem", "s-idem", "")
 	if err := repo.UpdateTask(ctx, &models.Task{
 		ID: "child-idem", WorkspaceID: "ws1", Title: "child idem",
-		State: v1.TaskStateInProgress, ParentID: "parent",
+		State: v1.TaskStateCompleted, ParentID: "parent",
 		UpdatedAt: now,
 	}); err != nil {
 		t.Fatalf("set ParentID: %v", err)
@@ -303,7 +309,7 @@ func TestSubtaskTerminalCollapse_ReclaimIsIdempotent(t *testing.T) {
 	svc.handleAgentCompleted(ctx, watcherAgentCompletedData("child-idem", "s-idem", "exec-idem"))
 	waitForStopCall(t, inner)
 	if agentMgr.callCount() < 1 {
-		t.Fatalf("first completion must reclaim at least once; calls=%v", agentMgr.calls)
+		t.Fatalf("first completion must reclaim at least once; calls=%v", agentMgr.callsSnapshot())
 	}
 	assertReclaimedRowInvariants(t, ctx, repo, "s-idem", "rt-idem")
 
@@ -361,7 +367,7 @@ func TestReclaimPreservesRowForResumeTaskSession(t *testing.T) {
 	seedSession(t, repo, "task-resume", "s-resume", "")
 	if err := repo.UpdateTask(ctx, &models.Task{
 		ID: "task-resume", WorkspaceID: "ws1", Title: "resume compat",
-		State: v1.TaskStateInProgress, ParentID: "parent",
+		State: v1.TaskStateFailed, ParentID: "parent",
 		UpdatedAt: now,
 	}); err != nil {
 		t.Fatalf("set ParentID: %v", err)

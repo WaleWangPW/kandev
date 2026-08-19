@@ -425,14 +425,10 @@ func TestWSListTasksSurfacesUnknownWorkflow(t *testing.T) {
 	require.Equal(t, "Failed to list tasks", payload.Message)
 }
 
-// TestWSCreateTask_PlanModeStartAgentStripsPlanMode pins the path-D fix
-// for PR #2811 review on the WS handler. A task.create with both
-// plan_mode=true and start_agent=true must persist a deferred_launch
-// intent whose plan_mode flag is false (mirroring the !StartAgent
-// guard on the task row). Otherwise the deferred consumer
-// (launchDeferredTask → LaunchSession) would re-launch the agent
-// under plan-mode execution semantics.
-func TestWSCreateTask_PlanModeStartAgentStripsPlanMode(t *testing.T) {
+// TestWSCreateTask_PlanModeStartAgentPreservesPlanMode pins the task.create
+// contract on the WS handler. plan_mode describes the execution prompt and
+// must survive task persistence and the deferred launch intent.
+func TestWSCreateTask_PlanModeStartAgentPreservesPlanMode(t *testing.T) {
 	repo := &wsTaskRepo{}
 	h := newWSTaskHandlers(t, repo)
 
@@ -457,6 +453,6 @@ func TestWSCreateTask_PlanModeStartAgentStripsPlanMode(t *testing.T) {
 	require.True(t, ok, "deferred_launch intent must be a map[string]interface{}")
 	pmFlag, present := deferred["plan_mode"]
 	require.True(t, present, "the deferred intent must carry the plan_mode key (to assert the !StartAgent guard)")
-	assert.Equal(t, false, pmFlag,
-		"plan_mode=true + start_agent=true must persist plan_mode=false in the deferred intent (path-D fix)")
+	assert.Equal(t, true, pmFlag,
+		"plan_mode=true must remain true in the deferred launch intent")
 }

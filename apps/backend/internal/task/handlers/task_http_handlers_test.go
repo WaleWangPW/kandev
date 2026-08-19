@@ -997,15 +997,11 @@ func TestHTTPCreateTask_StartAgentKeepsCreatedStateWhenSchedulingUpdateFails(t *
 	requireStartCreatedLaunch(t, startCreatedCalled)
 }
 
-// TestHTTPCreateTask_PlanModeStartAgentStripsPlanMode pins the path-D fix
-// for PR #2811 review: a task.create request with both plan_mode=true and
-// start_agent=true must not persist a deferred_launch metadata whose
-// plan_mode flag would re-launch the agent under plan-mode execution
-// semantics. The deferred intent stored on the task row carries
-// plan_mode=false (mirroring the !StartAgent guard on the task row),
-// so the deferred consumer (launchDeferredTask → LaunchSession) cannot
-// route a plan-mode prompt through the execution path.
-func TestHTTPCreateTask_PlanModeStartAgentStripsPlanMode(t *testing.T) {
+// TestHTTPCreateTask_PlanModeStartAgentPreservesPlanMode pins the task.create
+// contract: plan_mode describes the execution prompt and must survive both
+// task persistence and the deferred launch intent, even when start_agent is
+// true.
+func TestHTTPCreateTask_PlanModeStartAgentPreservesPlanMode(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	log := newTestLogger(t)
 
@@ -1047,8 +1043,8 @@ func TestHTTPCreateTask_PlanModeStartAgentStripsPlanMode(t *testing.T) {
 	require.True(t, ok, "deferred_launch intent must be a map[string]interface{}")
 	pmFlag, present := deferred["plan_mode"]
 	require.True(t, present, "the deferred intent must carry the plan_mode key (to assert the !StartAgent guard)")
-	assert.Equal(t, false, pmFlag,
-		"plan_mode=true + start_agent=true must persist plan_mode=false in the deferred intent (path-D fix)")
+	assert.Equal(t, true, pmFlag,
+		"plan_mode=true must remain true in the deferred launch intent")
 }
 
 // TestHTTPCreateTask_PlanModePrepareSessionKeepsPlanMode pins the

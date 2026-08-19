@@ -272,12 +272,6 @@ type sessionExecutorStore interface {
 	UpdateTaskSessionState(ctx context.Context, id string, state models.TaskSessionState, errorMessage string) error
 	ClaimPromptableTaskSessionIfActive(ctx context.Context, id string) (models.PromptableTaskSessionClaim, error)
 	UpdateTaskSessionBaseCommit(ctx context.Context, id string, baseCommitSHA string) error
-	// GetLastAgentMessageRequestsInput reports whether the most recent
-	// agent-authored message on the session carries the clarification
-	// `requests_input` flag. The orchestrator uses it to decide whether
-	// a terminal receipt is allowed to leave the session in
-	// WAITING_FOR_INPUT.
-	GetLastAgentMessageRequestsInput(ctx context.Context, sessionID string) (bool, error)
 	GetTaskSessionByTaskAndAgent(ctx context.Context, taskID, agentInstanceID string) (*models.TaskSession, error)
 	UpdateTaskSessionWorktreeBranch(ctx context.Context, sessionID, branch string) error
 	UpdateSessionReviewStatus(ctx context.Context, sessionID string, status string) error
