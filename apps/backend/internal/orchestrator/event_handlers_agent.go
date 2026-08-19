@@ -1236,7 +1236,16 @@ func (s *Service) handleAgentCompletedLocked(ctx context.Context, data watcher.A
 		zap.Bool("workflow_transitioned", transitioned))
 
 	if !transitioned && session.State != models.TaskSessionStateWaitingForInput {
-		s.setSessionWaitingForInput(ctx, data.TaskID, data.SessionID, session)
+		// Terminal-receipt path. Only flip the session to WAITING_FOR_INPUT
+		// when the most recent agent-authored message actually asked the
+		// user for input. Sibling sessions (root task, ParentID empty)
+		// keep the original affordance so a finishing session on a
+		// multi-session task still flips to WAITING — only subtasks
+		// (ParentID non-empty) get the guard. setSessionWaitingForInputIfRequested
+		// itself inspects the task row to pick the path; for sibling
+		// sessions the call is a no-op pass-through to the unconditional
+		// helper, preserving the pre-fix behavior.
+		s.setSessionWaitingForInputIfRequested(ctx, data.TaskID, data.SessionID, session)
 	}
 
 	// Capture a git status snapshot before cleanup so it can be served

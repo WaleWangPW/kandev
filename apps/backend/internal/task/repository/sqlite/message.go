@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -134,6 +136,33 @@ func (r *Repository) ListMessages(ctx context.Context, sessionID string) ([]*mod
 	defer func() { _ = rows.Close() }()
 	msgs, _, err := scanMessageRows(rows, 0)
 	return msgs, err
+}
+
+// GetLastAgentMessageRequestsInput reports the `requests_input` flag of the
+// most recent agent-authored message on the session. A session with no
+// agent messages yet (a brand-new launch that produced no output) returns
+// false, which lets the orchestrator treat that case the same as a normal
+// terminal — neither value should leave the session in WAITING_FOR_INPUT
+// when the agent did not actually ask for user input. Only the
+// agent->user clarification path is expected to set requests_input=true.
+//
+// Ordering is by created_at desc with id desc as a tie-breaker so the
+// helper is deterministic when the producer writes multiple messages at
+// the same RFC3339Nano timestamp (which the in-process writer does).
+func (r *Repository) GetLastAgentMessageRequestsInput(ctx context.Context, sessionID string) (bool, error) {
+	var requestsInput bool
+	err := r.ro.QueryRowContext(ctx, r.ro.Rebind(`
+		SELECT requests_input FROM task_session_messages
+		WHERE task_session_id = ? AND author_type = ?
+		ORDER BY created_at DESC, id DESC LIMIT 1
+	`), sessionID, models.MessageAuthorAgent).Scan(&requestsInput)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return requestsInput, nil
 }
 
 // ListMessagesByTurnID returns all messages for a single turn ordered by

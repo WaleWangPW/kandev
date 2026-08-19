@@ -1872,6 +1872,68 @@ func (s *Service) setSessionWaitingForInput(ctx context.Context, taskID, session
 	s.writeTaskReviewState(ctx, taskID, sessionID)
 }
 
+// isSubtaskOf reports whether the session's task is a child of another
+// task. The child-terminal guard uses this to decide whether a terminal
+// receipt is allowed to leave the session in WAITING_FOR_INPUT. Sibling
+// sessions (same task, no ParentID) keep the original affordance so a
+// legitimate "one session done, sibling still working" UI signal is
+// preserved.
+func (s *Service) isSubtaskOf(ctx context.Context, taskID string) bool {
+	if taskID == "" {
+		return false
+	}
+	task, err := s.repo.GetTask(ctx, taskID)
+	if err != nil || task == nil {
+		return false
+	}
+	return task.ParentID != ""
+}
+
+// setSessionWaitingForInputIfRequested is the terminal-receipt variant
+// of setSessionWaitingForInput. It only applies to subtasks (task.ParentID
+// non-empty) because the symptom it guards — "child WAITING_FOR_INPUT
+// after the agent's last assistant turn never asked anything" — only
+// arises for child tasks whose terminal step is meant to converge on a
+// finished child, not to surface a UI prompt. Sibling sessions on a
+// root task keep the original affordance so a finishing session on a
+// multi-session task still flips to WAITING_FOR_INPUT.
+//
+// When the guard refuses a subtask WAITING write, the child's session
+// would otherwise stay in RUNNING forever. Collapse the session to
+// COMPLETED so the child row does not leak in a stuck active state —
+// markTaskCompletedForTerminalStep flips the *task* state but does
+// not write the session, so a terminal subtask agent exit must do
+// the session-side cleanup here.
+func (s *Service) setSessionWaitingForInputIfRequested(
+	ctx context.Context,
+	taskID, sessionID string,
+	preloadedSession ...*models.TaskSession,
+) {
+	if !s.isSubtaskOf(ctx, taskID) {
+		s.setSessionWaitingForInput(ctx, taskID, sessionID, preloadedSession...)
+		return
+	}
+	requestsInput, err := s.repo.GetLastAgentMessageRequestsInput(ctx, sessionID)
+	if err != nil {
+		// A transient reader error must not silently re-introduce the
+		// bug by falling back to the unconditional write. Treat the
+		// child-terminal path as conservatively-skip on read failure.
+		s.logger.Warn("failed to read last agent message requests_input; skipping subtask WAITING write",
+			zap.String("task_id", taskID),
+			zap.String("session_id", sessionID),
+			zap.Error(err))
+		return
+	}
+	if !requestsInput {
+		s.logger.Debug("subtask terminal: skipping WAITING write; collapsing session to COMPLETED",
+			zap.String("task_id", taskID),
+			zap.String("session_id", sessionID))
+		s.updateTaskSessionState(ctx, taskID, sessionID, models.TaskSessionStateCompleted, "", false)
+		return
+	}
+	s.setSessionWaitingForInput(ctx, taskID, sessionID, preloadedSession...)
+}
+
 // taskArchived reports whether a task row has been archived. Runtime-state
 // writes (IN_PROGRESS on session start, REVIEW on turn completion/cancel/
 // startup reconciliation) must never resurrect an archived task's state —
@@ -2336,7 +2398,13 @@ func (s *Service) handleCompleteStreamEvent(ctx context.Context, payload *lifecy
 		zap.String("task_id", payload.TaskID),
 		zap.String("session_id", payload.SessionID),
 		zap.String("prev_state", sessionStateString(session)))
-	s.setSessionWaitingForInput(ctx, payload.TaskID, payload.SessionID, session)
+	// Terminal-receipt path. Only flip the session to WAITING_FOR_INPUT
+	// when the most recent agent-authored message actually asked the
+	// user for input. Sibling sessions (root task, ParentID empty) keep
+	// the original affordance so a finishing session on a multi-session
+	// task still flips to WAITING — only subtasks (ParentID non-empty)
+	// get the guard.
+	s.setSessionWaitingForInputIfRequested(ctx, payload.TaskID, payload.SessionID, session)
 }
 
 func (s *Service) detachClarificationWaiters(ctx context.Context, sessionID string) {
