@@ -31,6 +31,27 @@ type Repository interface {
 	// SQLite implementations make that check and queue mutation one transaction.
 	InsertOrReplaceLifecycleByCoalesceKey(ctx context.Context, msg *QueuedMessage, coalesceKey string, maxPerSession int, allowInsert bool) (*QueuedMessage, bool, error)
 
+	// RequeuePreservingFIFO re-enqueues an entry, preserving both FIFO order
+	// across the supersede→requeue cycle AND coalesce-replace semantics on
+	// the original retry. Used by Service.requeueMessage when a queued
+	// dispatch was superseded by a newer dispatch before it could be
+	// claimed — without this hook the requeue landed at MAX+1 (tail) and a
+	// busy session could starve the original message indefinitely.
+	//
+	// Decision under the lock:
+	//   - existing entry with same (session_id, queued_by, coalesce_key)
+	//     → replace in place (preserves position; coalesce semantics
+	//       expected by lifecycle / CI-feedback retries)
+	//   - empty queue                → msg.Position = 1, msg.ID assigned
+	//   - non-empty queue, no match  → msg.Position = MIN(position) - 1
+	//
+	// The MIN-1 rule is bounded: even under a runaway supersede chain the
+	// position counter just walks negative, never reaches zero, and is
+	// reset when the queue is fully drained (DeleteAllBySession clears
+	// nextPosition). Repeated requeue of the same entry across cycles still
+	// beats any newly arriving entry, because new entries use MAX+1.
+	RequeuePreservingFIFO(ctx context.Context, msg *QueuedMessage) error
+
 	// LifecycleGeneration returns the current archive/delete generation for a
 	// task. Lifecycle insertion verifies this generation atomically.
 	LifecycleGeneration(ctx context.Context, taskID string) (int64, error)

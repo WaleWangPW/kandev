@@ -262,6 +262,146 @@ func (r *sqliteRepository) Insert(ctx context.Context, msg *QueuedMessage, maxPe
 	return tx.Commit()
 }
 
+// RequeuePreservingFIFO re-enqueues an entry, preserving both FIFO order
+// across the supersede→requeue cycle AND coalesce-replace semantics on
+// the original retry. Used by Service.requeueMessage when a queued
+// dispatch was superseded by a newer dispatch before it could be
+// claimed — without this hook the requeue landed at MAX+1 (tail) and a
+// busy session could starve the original message indefinitely.
+//
+// Decision under the session tx lock:
+//   - existing entry with same (session_id, queued_by, coalesce_key)
+//     → UPDATE in place (preserves position; coalesce semantics
+//     expected by lifecycle / CI-feedback retries)
+//   - empty queue                → INSERT at position 1
+//   - non-empty queue, no match  → INSERT at position MIN(position) - 1
+//
+// Walk direction is bounded by session lifecycle: a fully drained queue
+// clears the rows but the position sequence is reset on the next Insert
+// (which re-derives from MAX). Repeated requeue of the same entry across
+// cycles just walks the counter negative — never reaches zero, never
+// overlaps new MAX+1 inserts. The monotonic-ascending invariant tested
+// in repository_sqlite_test.go is preserved: MIN-1 < every existing
+// position, and any future MAX+1 stays above.
+func (r *sqliteRepository) RequeuePreservingFIFO(ctx context.Context, msg *QueuedMessage) error {
+	tx, err := r.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin requeue-fifo tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := r.guardActiveTaskTx(ctx, tx, msg.TaskID); err != nil {
+		return err
+	}
+	if err := r.lockSessionTx(ctx, tx, msg.SessionID); err != nil {
+		return err
+	}
+
+	coalesceKey := metadataString(msg.Metadata, MetadataCoalesceKey)
+	var existingID string
+	var existingPosition int64
+	// Coalesce-replace: only when caller supplied a coalesce key.
+	// Matches the original RequeueMessage's branching (coalesceKey !=
+	// "" takes the coalesce-replace path; empty coalesceKey takes the
+	// tail-append path). A bare requeue with no coalesce key must NOT
+	// collapse onto an unrelated same-sender entry.
+	if coalesceKey != "" {
+		err = tx.GetContext(ctx, &existingID, r.db.Rebind(`
+			SELECT id FROM queued_messages
+			WHERE session_id = ? AND queued_by = ? AND json_extract(metadata_json, '$.coalesce_key') = ?
+			LIMIT 1
+		`), msg.SessionID, msg.QueuedBy, coalesceKey)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("lookup coalesce target: %w", err)
+		}
+	}
+
+	if existingID != "" {
+		// Coalesce hit: replace in place. The retry keeps the existing
+		// entry's position, which by construction is the most head-of-
+		// queue position for this coalesce key — supersede→requeue of
+		// the same content stays FIFO at the same slot.
+		attachmentsJSON, err := marshalAttachments(msg.Attachments)
+		if err != nil {
+			return err
+		}
+		metadataJSON, err := marshalMetadata(msg.Metadata)
+		if err != nil {
+			return err
+		}
+		if msg.QueuedAt.IsZero() {
+			msg.QueuedAt = time.Now().UTC()
+		}
+		res, err := tx.ExecContext(ctx, r.db.Rebind(`
+			UPDATE queued_messages
+			SET task_id = ?, content = ?, model = ?, plan_mode = ?, attachments_json = ?, metadata_json = ?, queued_at = ?
+			WHERE id = ?
+		`),
+			msg.TaskID, msg.Content, msg.Model, boolToInt(msg.PlanMode),
+			attachmentsJSON, metadataJSON, msg.QueuedAt, existingID,
+		)
+		if err != nil {
+			return fmt.Errorf("update coalesced entry: %w", err)
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("rows affected: %w", err)
+		}
+		if rows == 0 {
+			return fmt.Errorf("coalesce hit vanished: %s", existingID)
+		}
+		// Caller wants the canonical position back on the msg so it can
+		// log it; re-read so we return the actual stored value.
+		if err := tx.GetContext(ctx, &existingPosition,
+			r.db.Rebind(`SELECT position FROM queued_messages WHERE id = ?`), existingID,
+		); err != nil {
+			return fmt.Errorf("re-read coalesced position: %w", err)
+		}
+		msg.ID = existingID
+		msg.Position = existingPosition
+		return tx.Commit()
+	}
+
+	var minPos sql.NullInt64
+	if err := tx.GetContext(ctx, &minPos,
+		r.db.Rebind(`SELECT MIN(position) FROM queued_messages WHERE session_id = ?`),
+		msg.SessionID,
+	); err != nil {
+		return fmt.Errorf("min position: %w", err)
+	}
+	if minPos.Valid {
+		msg.Position = minPos.Int64 - 1
+	} else {
+		msg.Position = 1
+	}
+	if msg.ID == "" {
+		msg.ID = uuid.New().String()
+	}
+	if msg.QueuedAt.IsZero() {
+		msg.QueuedAt = time.Now().UTC()
+	}
+
+	attachmentsJSON, err := marshalAttachments(msg.Attachments)
+	if err != nil {
+		return err
+	}
+	metadataJSON, err := marshalMetadata(msg.Metadata)
+	if err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, r.db.Rebind(`
+		INSERT INTO queued_messages
+			(id, session_id, task_id, position, content, model, plan_mode, attachments_json, metadata_json, queued_at, queued_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`),
+		msg.ID, msg.SessionID, msg.TaskID, msg.Position, msg.Content, msg.Model,
+		boolToInt(msg.PlanMode), attachmentsJSON, metadataJSON, msg.QueuedAt, msg.QueuedBy,
+	); err != nil {
+		return fmt.Errorf("insert queued_messages (requeue-fifo): %w", err)
+	}
+	return tx.Commit()
+}
+
 // Restore reinserts a previously dequeued entry at its original FIFO position.
 func (r *sqliteRepository) Restore(ctx context.Context, msg *QueuedMessage, maxPerSession int) error {
 	tx, err := r.db.BeginTxx(ctx, nil)

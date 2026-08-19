@@ -141,6 +141,100 @@ func (r *memoryRepository) insertLocked(msg *QueuedMessage, maxPerSession int) e
 	return nil
 }
 
+// RequeuePreservingFIFO inserts the entry at a position strictly lower than
+// the current session head, so a superseded entry beats any new entry that
+// arrives after the supersede was issued. Without this hook, the requeue
+// landed at MAX+1 and a busy session starved the original message
+// indefinitely — every turn-end drained the head, the superseded entry
+// fell to the tail, and the next incoming message outranked it again.
+//
+// Decision under r.mu (caller must already hold it):
+//   - existing entry with same (session_id, queued_by, coalesce_key)
+//     → replace in place; preserve the existing entry's position and ID
+//   - empty queue                → position = 1, fresh ID
+//   - non-empty queue, no match  → position = MIN(head.position) - 1
+//
+// Walk direction is bounded by session lifecycle: a fully drained queue
+// (DeleteAllBySession) clears nextPosition, so repeated requeue of the
+// same entry across cycles just walks the counter negative — never reaches
+// zero, never overlaps new MAX+1 inserts. The monotonic-ascending invariant
+// tested in repository_sqlite_test.go is preserved: MIN-1 < every existing
+// position, and any future MAX+1 stays above.
+func (r *memoryRepository) RequeuePreservingFIFO(_ context.Context, msg *QueuedMessage) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	list := r.entries[msg.SessionID]
+	coalesceKey := metadataString(msg.Metadata, MetadataCoalesceKey)
+	// Coalesce-replace: only when caller supplied a coalesce key. This
+	// matches the original RequeueMessage's branching (coalesceKey != ""
+	// takes the coalesce-replace path; empty coalesceKey takes the
+	// tail-append path). A bare requeue of a message with no coalesce
+	// key must NOT collapse onto an unrelated same-sender entry.
+	if coalesceKey != "" {
+		for _, existing := range list {
+			if existing.QueuedBy != msg.QueuedBy {
+				continue
+			}
+			if metadataString(existing.Metadata, MetadataCoalesceKey) != coalesceKey {
+				continue
+			}
+			// Coalesce hit: replace in place. The retry keeps the existing
+			// entry's position, which by construction is the most head-of-
+			// queue position for this coalesce key — supersede→requeue of
+			// the same content stays FIFO at the same slot.
+			existing.TaskID = msg.TaskID
+			existing.Content = msg.Content
+			existing.Model = msg.Model
+			existing.PlanMode = msg.PlanMode
+			existing.Attachments = msg.Attachments
+			existing.Metadata = msg.Metadata
+			if msg.QueuedAt.IsZero() {
+				existing.QueuedAt = time.Now().UTC()
+			} else {
+				existing.QueuedAt = msg.QueuedAt
+			}
+			msg.ID = existing.ID
+			msg.Position = existing.Position
+			return nil
+		}
+	}
+	if len(list) == 0 {
+		if msg.ID == "" {
+			msg.ID = uuid.New().String()
+		}
+		if msg.QueuedAt.IsZero() {
+			msg.QueuedAt = time.Now().UTC()
+		}
+		r.nextPosition[msg.SessionID] = 1
+		msg.Position = 1
+		clone := *msg
+		r.entries[msg.SessionID] = append(r.entries[msg.SessionID], &clone)
+		return nil
+	}
+	minPos := list[0].Position
+	for _, e := range list[1:] {
+		if e.Position < minPos {
+			minPos = e.Position
+		}
+	}
+	if msg.ID == "" {
+		msg.ID = uuid.New().String()
+	}
+	if msg.QueuedAt.IsZero() {
+		msg.QueuedAt = time.Now().UTC()
+	}
+	msg.Position = minPos - 1
+	clone := *msg
+	newList := make([]*QueuedMessage, 0, len(list)+1)
+	newList = append(newList, &clone)
+	newList = append(newList, list...)
+	if msg.Position > r.nextPosition[msg.SessionID] {
+		r.nextPosition[msg.SessionID] = msg.Position
+	}
+	r.entries[msg.SessionID] = newList
+	return nil
+}
+
 // AppendOrInsertTail must hold the lock for the entire check-then-insert path
 // so two concurrent same-sender callers can't both observe "no matching tail"
 // and race to insert separate entries (which would violate the
