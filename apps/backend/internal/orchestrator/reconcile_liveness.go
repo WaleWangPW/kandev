@@ -189,11 +189,23 @@ const (
 
 // classifyIdleReclaim is the single decision matrix for the idle-session
 // reclaim primitive. Reclaim is fail-closed: only sessions in an idle-yet-
-// resumable shape AND without a live runtime AND without an active turn
-// proceed. Any uncertain signal falls into a skipped disposition and the
-// caller leaves the row untouched.
+// resumable OR terminal shape AND without a live runtime AND without an
+// active turn proceed. Any uncertain signal falls into a skipped
+// disposition and the caller leaves the row untouched.
+//
+// Why include Completed in the allowed set: the subtask terminal collapse
+// in setSessionWaitingForInputIfRequested writes session.state=Completed
+// when the agent's last turn did not request input, and the parent task
+// has no further use for the provider-runtime reservation. Failed and
+// Cancelled are deliberately excluded — those have separate cancellation
+// cleanup paths (handleTerminalSessionOnStartup and the cancel pipelines)
+// that already reconcile executor rows.
 func classifyIdleReclaim(sessionState models.TaskSessionState, agentRunning bool, hasActiveTurn bool) idleReclaimDisposition {
-	if sessionState != models.TaskSessionStateWaitingForInput && sessionState != models.TaskSessionStateIdle {
+	switch sessionState {
+	case models.TaskSessionStateWaitingForInput,
+		models.TaskSessionStateIdle,
+		models.TaskSessionStateCompleted:
+	default:
 		return idleReclaimDispositionSkippedState
 	}
 	if agentRunning {
@@ -206,12 +218,20 @@ func classifyIdleReclaim(sessionState models.TaskSessionState, agentRunning bool
 }
 
 // reclaimIdleSession releases the provider-runtime reservation backing an
-// idle-yet-resumable session (state in {WaitingForInput, Idle}) when no live
-// agent process and no active turn can be observed. Resume token and worktree
-// path are preserved so a later resume can re-attach the session without
-// losing context. Never touches a running executor; never called from a
-// periodic reaper (a runtime auto-convergence tick is a pre-existing design
-// gap handled by an independent task, see plan docs).
+// idle-yet-resumable or terminal session (state in {WaitingForInput, Idle,
+// Completed}) when no live agent process and no active turn can be
+// observed. Resume token and worktree path are preserved so a later resume
+// can re-attach the session without losing context. Never touches a
+// running executor; never called from a periodic reaper (a runtime
+// auto-convergence tick is a pre-existing design gap handled by an
+// independent task, see plan docs).
+//
+// Synchronous call sites so far:
+//   - setSessionWaitingForInputIfRequested: subtask terminal collapse to
+//     Completed when the last agent message did not request input. The
+//     child has no further use for the provider runtime.
+//   - handleAgentCompleted: after completeTurnForSession, when the
+//     session has settled into a non-active terminal/idle state.
 //
 // Idempotent: a session with no in-memory execution entry returns nil from
 // CleanupStaleExecutionBySessionID, and a missing executor row is not an

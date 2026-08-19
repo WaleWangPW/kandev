@@ -94,11 +94,11 @@ func TestClassifyIdleReclaimDisposition(t *testing.T) {
 			want:          idleReclaimDispositionSkippedState,
 		},
 		{
-			name:          "completed session is never reclaimed",
+			name:          "completed session with no live runtime reclaims",
 			state:         models.TaskSessionStateCompleted,
 			agentRunning:  false,
 			hasActiveTurn: false,
-			want:          idleReclaimDispositionSkippedState,
+			want:          idleReclaimDispositionReclaimed,
 		},
 		{
 			name:          "failed session is never reclaimed",
@@ -232,10 +232,12 @@ func TestReclaimIdleSessionRefusesLiveRuntime(t *testing.T) {
 	}
 }
 
-// TestReclaimIdleSessionRefusesWrongState proves terminal states and
-// never-started states are never reclaimed: a RUNNING session that happens
+// TestReclaimIdleSessionRefusesWrongState proves non-idle non-terminal
+// states are never reclaimed: a RUNNING or STARTING session that happens
 // to have no live runtime must wait for explicit completion, not get
-// reaped by idle reclaim.
+// reaped by idle reclaim. Failed and Cancelled have dedicated cancellation
+// cleanup paths (handleTerminalSessionOnStartup, the cancel pipelines)
+// and are deliberately excluded from the reclaim predicate.
 func TestReclaimIdleSessionRefusesWrongState(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -243,8 +245,8 @@ func TestReclaimIdleSessionRefusesWrongState(t *testing.T) {
 	}{
 		{name: "running", state: models.TaskSessionStateRunning},
 		{name: "starting", state: models.TaskSessionStateStarting},
-		{name: "completed", state: models.TaskSessionStateCompleted},
 		{name: "failed", state: models.TaskSessionStateFailed},
+		{name: "cancelled", state: models.TaskSessionStateCancelled},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

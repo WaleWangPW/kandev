@@ -1929,6 +1929,16 @@ func (s *Service) setSessionWaitingForInputIfRequested(
 			zap.String("task_id", taskID),
 			zap.String("session_id", sessionID))
 		s.updateTaskSessionState(ctx, taskID, sessionID, models.TaskSessionStateCompleted, "", false)
+		// The child has no further use for the provider-runtime reservation.
+		// reclaimIdleSession is fail-closed (only proceeds when there is no
+		// live agent and no active turn) and best-effort: a reclaim failure
+		// logs and returns without affecting the terminal collapse.
+		if err := s.reclaimIdleSession(ctx, sessionID); err != nil {
+			s.logger.Warn("subtask terminal: reclaim failed; row preserved",
+				zap.String("task_id", taskID),
+				zap.String("session_id", sessionID),
+				zap.Error(err))
+		}
 		return
 	}
 	s.setSessionWaitingForInput(ctx, taskID, sessionID, preloadedSession...)

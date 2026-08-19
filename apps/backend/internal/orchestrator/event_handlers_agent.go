@@ -1258,6 +1258,22 @@ func (s *Service) handleAgentCompletedLocked(ctx context.Context, data watcher.A
 	// Finalize the automation run: mark status=succeeded so the automation's
 	// concurrency slot is released. The worktree stays.
 	s.finalizeAutomationRun(ctx, data.TaskID, true, "")
+
+	// Settle point: turn has been completed and the session state has been
+	// reconciled. reclaimIdleSession is the synchronous equivalent of the
+	// (intentionally-not-built) runtime auto-convergence tick. It only
+	// proceeds when no live agent process and no active turn are observed,
+	// so the typical WAITING_FOR_INPUT case (live agent waiting for the
+	// user) is a no-op pass-through. Subtask terminals that already
+	// collapsed to COMPLETED inside setSessionWaitingForInputIfRequested
+	// reclaimed earlier; this call covers sibling/office flows whose
+	// settled shape has no live runtime.
+	if err := s.reclaimIdleSession(ctx, data.SessionID); err != nil {
+		s.logger.Warn("agent.completed settle: reclaim failed; row preserved",
+			zap.String("task_id", data.TaskID),
+			zap.String("session_id", data.SessionID),
+			zap.Error(err))
+	}
 }
 
 // handleAgentFailed handles agent failure events
