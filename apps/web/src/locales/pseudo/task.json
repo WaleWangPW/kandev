@@ -931,6 +931,8 @@
   "planHistory": "Ƥĺàń ĥĩśţōŕŷ",
   "planIsEmpty": "Ƥĺàń ĩś ēḿƥţŷ",
   "planMode": "Ƥĺàń ḿōďē",
+  "planModeMessageRecorded": "Ƥĺàń ḿōďē ḿēśśàĝē ŕēćōŕďēď",
+  "planModeMessageRecordedDescription": "Ţĥē ḿēśśàĝē ŵàś śàvēď ŵĩţĥōũţ śţàŕţĩńĝ à ńēŵ ēxēćũţĩōń ţũŕń. Ƥĺàń ḿōďē ĩś ōń.",
   "planRestoredToV": "Ƥĺàń ŕēśţōŕēď ţō v{{revisionnumber}}",
   "planYourImplementation": "Ƥĺàń ŷōũŕ ĩḿƥĺēḿēńţàţĩōń",
   "pleaseTryAgain": "Ƥĺēàśē ţŕŷ àĝàĩń.",

@@ -931,6 +931,8 @@
   "planHistory": "Plan history",
   "planIsEmpty": "Plan is empty",
   "planMode": "Plan mode",
+  "planModeMessageRecorded": "Plan mode message recorded",
+  "planModeMessageRecordedDescription": "The message was saved without starting a new execution turn. Plan mode is on.",
   "planRestoredToV": "Plan restored to v{{revisionnumber}}",
   "planYourImplementation": "Plan your implementation",
   "pleaseTryAgain": "Please try again.",

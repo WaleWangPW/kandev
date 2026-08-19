@@ -168,6 +168,25 @@ describe("useSubmitHandler", () => {
     expect(handleSendMessageMock).not.toHaveBeenCalled();
   });
 
+  it("skips both onSend and handleSendMessage in plan mode and shows a recorded toast", async () => {
+    const onSend = vi.fn();
+    const { result } = renderHook(() =>
+      useSubmitHandler(panelState({ planModeEnabled: true }), onSend),
+    );
+
+    await act(async () => {
+      await result.current.handleSubmit({ message: "plan-mode instruction" });
+    });
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(handleSendMessageMock).not.toHaveBeenCalled();
+    expect(toastMock).toHaveBeenCalledWith({
+      title: "Plan mode message recorded",
+      description:
+        "The message was saved without starting a new execution turn. Plan mode is on.",
+    });
+  });
+
   it.each([
     ["connection-unavailable", "Connection unavailable. Reconnect and try again."],
     ["session-unavailable", "The selected session is not available for input."],

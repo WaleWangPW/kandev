@@ -510,7 +510,11 @@ func (h *MessageHandlers) wsAddMessage(ctx context.Context, msg *ws.Message) (*w
 	// Auto-forward message as prompt to running agent if orchestrator is available.
 	// This runs async so the WS request can respond immediately.
 	// Use context.WithoutCancel so the prompt continues even if the WebSocket client disconnects.
-	if h.orchestrator != nil && !turnStartResult.Queued {
+	// Plan-mode messages skip dispatch: the user message is already persisted above
+	// (service.CreateMessage) and the plan-mode-aware session produces its assistant
+	// reply through the existing plan-mode callback chain, not via PromptTask or
+	// SteerTask. Default (plan_mode=false) and unset paths continue to execute.
+	if h.orchestrator != nil && !turnStartResult.Queued && !req.PlanMode {
 		h.dispatchPromptAsync(ctx, req, sessionResp.Session.AgentProfileID, startCreatedSession, steer)
 	}
 
