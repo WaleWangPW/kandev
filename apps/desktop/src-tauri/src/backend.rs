@@ -371,15 +371,10 @@ pub fn desktop_environment(
         !key.to_string_lossy()
             .eq_ignore_ascii_case(DESKTOP_NATIVE_NOTIFICATIONS_ENV)
     });
-    // KANDEV_SERVER_HOST is conditionally injected: a caller (CI smoke harness,
-    // integration test) that already set it must see the value pass through
-    // unchanged. Only the un-set case falls back to the loopback default.
-    if !env.contains_key(OsStr::new("KANDEV_SERVER_HOST")) {
-        env.insert(
-            OsString::from("KANDEV_SERVER_HOST"),
-            OsString::from(LOOPBACK_HOST),
-        );
-    }
+    env.insert(
+        OsString::from("KANDEV_SERVER_HOST"),
+        OsString::from(LOOPBACK_HOST),
+    );
     env.insert(
         OsString::from("KANDEV_BUNDLE_DIR"),
         runtime_dir.as_os_str().to_os_string(),
@@ -855,10 +850,8 @@ mod tests {
     }
 
     #[test]
-    fn desktop_environment_preserves_inherited_server_host() {
-        // CI smoke harness / integration tests can pre-set KANDEV_SERVER_HOST
-        // to point at a non-loopback backend. desktop_environment must pass
-        // the value through unchanged.
+    fn desktop_environment_overrides_inherited_server_host_with_loopback() {
+        // Desktop launches must keep the embedded backend on the loopback host.
         let mut inherited = BTreeMap::new();
         inherited.insert(
             OsString::from("KANDEV_SERVER_HOST"),
@@ -869,8 +862,8 @@ mod tests {
 
         assert_eq!(
             env.get(OsStr::new("KANDEV_SERVER_HOST")),
-            Some(&OsString::from("10.0.0.42")),
-            "inherited KANDEV_SERVER_HOST must pass through desktop_environment",
+            Some(&OsString::from(LOOPBACK_HOST)),
+            "desktop_environment must force the loopback server host",
         );
     }
 
