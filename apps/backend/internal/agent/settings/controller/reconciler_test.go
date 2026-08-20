@@ -570,6 +570,42 @@ func TestProfileReconciler_PreservesUserModifiedCustomRouteOutsideAgentCatalog(t
 	}
 }
 
+func TestProfileReconciler_LeavesUserModifiedEmptyRouteUnchanged(t *testing.T) {
+	st := newFakeStore()
+	dbAgent := &models.Agent{Name: "claude-acp"}
+	_ = st.CreateAgent(context.Background(), dbAgent)
+	existing := &models.AgentProfile{
+		AgentID:      dbAgent.ID,
+		Name:         "Use provider default",
+		UserModified: true,
+	}
+	_ = st.CreateAgentProfile(context.Background(), existing)
+	st.created = nil
+
+	ag := &mockInferenceAgent{id: "claude-acp", displayName: "Claude", enabled: true}
+	caps := &fakeCapReader{caps: map[string]hostutility.AgentCapabilities{
+		"claude-acp": {
+			AgentType:      "claude-acp",
+			Models:         []hostutility.Model{{ID: "claude-sonnet", Name: "Sonnet"}},
+			CurrentModelID: "claude-sonnet",
+			Modes:          []hostutility.Mode{{ID: "default", Name: "Default"}},
+			CurrentModeID:  "default",
+			Status:         hostutility.StatusOK,
+		},
+	}}
+
+	r := newReconciler(t, st, caps, ag)
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(st.updated) != 0 {
+		t.Fatalf("user-modified empty route was rewritten: %+v", st.updated)
+	}
+	if existing.Model != "" || existing.Mode != "" {
+		t.Fatalf("empty route changed to model=%q mode=%q", existing.Model, existing.Mode)
+	}
+}
+
 func TestProfileReconciler_PreservesOfficeAgentName(t *testing.T) {
 	profile := &models.AgentProfile{
 		Name:             "Researcher",
