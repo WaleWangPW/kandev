@@ -128,16 +128,24 @@ func TestRequeuePreservingFIFO_PreservesCoalesceReplace(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, coalesced.ID, dequeued.ID)
 
-	// Requeue with the same coalesce key — must replace in place.
+	// Recreate a pending entry with the same coalesce key. Requeue must replace
+	// this entry in place instead of taking the head-insert path.
+	replacement, _, err := svc.QueueMessageWithCoalesceKey(
+		ctx, "s", "t", "replacement", "", QueuedByWorkflow, false, nil, nil,
+		"ci-key", true,
+	)
+	require.NoError(t, err)
+	replacementPosition := replacement.Position
+
 	require.NoError(t, svc.RequeueAtHead(ctx, dequeued))
 
 	status := svc.GetStatus(ctx, "s")
 	require.Equal(t, 2, status.Count, "requeue must replace the existing coalesced entry, not append")
-	require.Equal(t, "first", status.Entries[0].Content)
-	require.Equal(t, "noise", status.Entries[1].Content,
-		"a non-coalesce sibling must keep its position; requeue must not insert above it")
-	// The coalesced replacement keeps the same ID (coalesce hit).
-	require.Equal(t, coalesced.ID, status.Entries[0].ID)
+	require.Equal(t, "noise", status.Entries[0].Content)
+	require.Equal(t, "first", status.Entries[1].Content,
+		"the coalesced replacement must keep its pending position")
+	require.Equal(t, replacement.ID, status.Entries[1].ID)
+	require.Equal(t, replacementPosition, status.Entries[1].Position)
 }
 
 // TestRequeuePreservingFIFO_DistinctMessageDoesNotCoalesce verifies

@@ -274,15 +274,11 @@ func (r *sqliteRepository) Insert(ctx context.Context, msg *QueuedMessage, maxPe
 //     → UPDATE in place (preserves position; coalesce semantics
 //     expected by lifecycle / CI-feedback retries)
 //   - empty queue                → INSERT at position 1
-//   - non-empty queue, no match  → INSERT at position MIN(position) - 1
+//   - non-empty queue, no match  → INSERT before the current head
 //
-// Walk direction is bounded by session lifecycle: a fully drained queue
-// clears the rows but the position sequence is reset on the next Insert
-// (which re-derives from MAX). Repeated requeue of the same entry across
-// cycles just walks the counter negative — never reaches zero, never
-// overlaps new MAX+1 inserts. The monotonic-ascending invariant tested
-// in repository_sqlite_test.go is preserved: MIN-1 < every existing
-// position, and any future MAX+1 stays above.
+// When MIN-1 is not positive, existing positions are shifted up before the
+// insert. This keeps positions positive for TransferSession and future queue
+// mutations while preserving the current order.
 func (r *sqliteRepository) RequeuePreservingFIFO(ctx context.Context, msg *QueuedMessage) error {
 	tx, err := r.db.BeginTxx(ctx, nil)
 	if err != nil {
@@ -304,31 +300,18 @@ func (r *sqliteRepository) RequeuePreservingFIFO(ctx context.Context, msg *Queue
 	coalesceKey := metadataString(msg.Metadata, MetadataCoalesceKey)
 	var existingID string
 	if coalesceKey != "" {
-		existingID, err = r.lookupCoalesceTargetTx(ctx, tx, msg, coalesceKey)
-		if err != nil {
-			return err
+		existing, findErr := r.findCoalesced(ctx, tx, msg.SessionID, msg.QueuedBy, coalesceKey)
+		if findErr != nil {
+			return findErr
+		}
+		if existing != nil {
+			existingID = existing.ID
 		}
 	}
 	if existingID != "" {
 		return r.applyCoalesceReplaceTx(ctx, tx, msg, existingID)
 	}
 	return r.applyHeadInsertTx(ctx, tx, msg)
-}
-
-// lookupCoalesceTargetTx scans for an existing entry with the same
-// (session_id, queued_by, coalesce_key) and returns its id. Returns
-// ("", nil) when no match exists. Caller owns the tx.
-func (r *sqliteRepository) lookupCoalesceTargetTx(ctx context.Context, tx *sqlx.Tx, msg *QueuedMessage, coalesceKey string) (string, error) {
-	var id string
-	err := tx.GetContext(ctx, &id, r.db.Rebind(`
-		SELECT id FROM queued_messages
-		WHERE session_id = ? AND queued_by = ? AND json_extract(metadata_json, '$.coalesce_key') = ?
-		LIMIT 1
-	`), msg.SessionID, msg.QueuedBy, coalesceKey)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("lookup coalesce target: %w", err)
-	}
-	return id, nil
 }
 
 // applyCoalesceReplaceTx UPDATEs the existing entry in place,
@@ -377,8 +360,8 @@ func (r *sqliteRepository) applyCoalesceReplaceTx(ctx context.Context, tx *sqlx.
 	return tx.Commit()
 }
 
-// applyHeadInsertTx INSERTs the entry at position MIN(head) - 1 (or 1
-// for an empty queue). Caller owns the tx.
+// applyHeadInsertTx inserts the entry before the current head (or at position
+// 1 for an empty queue). Caller owns the tx.
 func (r *sqliteRepository) applyHeadInsertTx(ctx context.Context, tx *sqlx.Tx, msg *QueuedMessage) error {
 	var minPos sql.NullInt64
 	if err := tx.GetContext(ctx, &minPos,
@@ -389,6 +372,17 @@ func (r *sqliteRepository) applyHeadInsertTx(ctx context.Context, tx *sqlx.Tx, m
 	}
 	if minPos.Valid {
 		msg.Position = minPos.Int64 - 1
+		if msg.Position <= 0 {
+			shift := 1 - msg.Position
+			if _, err := tx.ExecContext(ctx, r.db.Rebind(`
+				UPDATE queued_messages
+				SET position = position + ?
+				WHERE session_id = ?
+			`), shift, msg.SessionID); err != nil {
+				return fmt.Errorf("shift queued positions for requeue-fifo: %w", err)
+			}
+			msg.Position = 1
+		}
 	} else {
 		msg.Position = 1
 	}

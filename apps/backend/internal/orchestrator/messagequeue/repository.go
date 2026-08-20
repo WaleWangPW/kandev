@@ -43,13 +43,11 @@ type Repository interface {
 	//     → replace in place (preserves position; coalesce semantics
 	//       expected by lifecycle / CI-feedback retries)
 	//   - empty queue                → msg.Position = 1, msg.ID assigned
-	//   - non-empty queue, no match  → msg.Position = MIN(position) - 1
+	//   - non-empty queue, no match  → insert before the current head
 	//
-	// The MIN-1 rule is bounded: even under a runaway supersede chain the
-	// position counter just walks negative, never reaches zero, and is
-	// reset when the queue is fully drained (DeleteAllBySession clears
-	// nextPosition). Repeated requeue of the same entry across cycles still
-	// beats any newly arriving entry, because new entries use MAX+1.
+	// If the head position is already 1, implementations shift the existing
+	// positions up before inserting. Queue positions stay positive so session
+	// transfer and later queue mutations keep their ordering invariants.
 	RequeuePreservingFIFO(ctx context.Context, msg *QueuedMessage) error
 
 	// LifecycleGeneration returns the current archive/delete generation for a

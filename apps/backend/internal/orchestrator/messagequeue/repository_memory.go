@@ -152,14 +152,11 @@ func (r *memoryRepository) insertLocked(msg *QueuedMessage, maxPerSession int) e
 //   - existing entry with same (session_id, queued_by, coalesce_key)
 //     → replace in place; preserve the existing entry's position and ID
 //   - empty queue                → position = 1, fresh ID
-//   - non-empty queue, no match  → position = MIN(head.position) - 1
+//   - non-empty queue, no match  → position before the current head
 //
-// Walk direction is bounded by session lifecycle: a fully drained queue
-// (DeleteAllBySession) clears nextPosition, so repeated requeue of the
-// same entry across cycles just walks the counter negative — never reaches
-// zero, never overlaps new MAX+1 inserts. The monotonic-ascending invariant
-// tested in repository_sqlite_test.go is preserved: MIN-1 < every existing
-// position, and any future MAX+1 stays above.
+// When MIN-1 is not positive, existing positions are shifted up before the
+// insert. This keeps positions positive for TransferSession and future queue
+// mutations while preserving the current order.
 func (r *memoryRepository) RequeuePreservingFIFO(_ context.Context, msg *QueuedMessage) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -198,41 +195,45 @@ func (r *memoryRepository) RequeuePreservingFIFO(_ context.Context, msg *QueuedM
 			return nil
 		}
 	}
-	if len(list) == 0 {
-		if msg.ID == "" {
-			msg.ID = uuid.New().String()
-		}
-		if msg.QueuedAt.IsZero() {
-			msg.QueuedAt = time.Now().UTC()
-		}
-		r.nextPosition[msg.SessionID] = 1
-		msg.Position = 1
-		clone := *msg
-		r.entries[msg.SessionID] = append(r.entries[msg.SessionID], &clone)
-		return nil
-	}
-	minPos := list[0].Position
-	for _, e := range list[1:] {
-		if e.Position < minPos {
-			minPos = e.Position
-		}
-	}
 	if msg.ID == "" {
 		msg.ID = uuid.New().String()
 	}
 	if msg.QueuedAt.IsZero() {
 		msg.QueuedAt = time.Now().UTC()
 	}
-	msg.Position = minPos - 1
+	msg.Position = r.nextRequeuePositionLocked(msg.SessionID, list)
 	clone := *msg
 	newList := make([]*QueuedMessage, 0, len(list)+1)
 	newList = append(newList, &clone)
 	newList = append(newList, list...)
-	if msg.Position > r.nextPosition[msg.SessionID] {
-		r.nextPosition[msg.SessionID] = msg.Position
-	}
 	r.entries[msg.SessionID] = newList
 	return nil
+}
+
+func (r *memoryRepository) nextRequeuePositionLocked(sessionID string, list []*QueuedMessage) int64 {
+	if len(list) == 0 {
+		r.nextPosition[sessionID] = 1
+		return 1
+	}
+	minPos := list[0].Position
+	for _, entry := range list[1:] {
+		if entry.Position < minPos {
+			minPos = entry.Position
+		}
+	}
+	position := minPos - 1
+	if position <= 0 {
+		shift := 1 - position
+		for _, entry := range list {
+			entry.Position += shift
+		}
+		position = 1
+		r.nextPosition[sessionID] += shift
+	}
+	if position > r.nextPosition[sessionID] {
+		r.nextPosition[sessionID] = position
+	}
+	return position
 }
 
 // AppendOrInsertTail must hold the lock for the entire check-then-insert path
