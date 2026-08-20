@@ -1133,7 +1133,7 @@ func (m *Manager) markAgentStartPending(execution *AgentExecution) {
 // dedicated singleflight key so they don't race on the shared AgentExecution
 // pointer.
 func (m *Manager) promoteWorkspaceExecution(ctx context.Context, execution *AgentExecution, req *LaunchRequest) error {
-	_, err := m.doCoalescedExecution(ctx, "promote:"+req.SessionID, func(sharedCtx context.Context) (interface{}, error) {
+	_, err := m.doCoalescedExecution(ctx, req.SessionID, func(sharedCtx context.Context) (interface{}, error) {
 		activityLease, acquireErr := m.acquireActivity(sharedCtx, activity.KindExecutionPreparing)
 		if acquireErr != nil {
 			return nil, acquireErr

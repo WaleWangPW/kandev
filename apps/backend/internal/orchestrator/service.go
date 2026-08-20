@@ -2184,6 +2184,7 @@ func (s *Service) Stop() error {
 
 	// Stop components in reverse order
 	var errs []error
+	s.stopIdleSessionReaper()
 	s.stopReservedPromptCallbacks()
 
 	if err := s.scheduler.Stop(); err != nil {
@@ -2199,7 +2200,6 @@ func (s *Service) Stop() error {
 	s.cancelAllClarificationWatchdogs()
 	s.cancelAllTransientRetries()
 	s.stopSendNowWorkers()
-	s.stopIdleSessionReaper()
 
 	if len(errs) > 0 {
 		return errs[0]

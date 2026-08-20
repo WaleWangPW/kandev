@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/kandev/kandev/internal/task/models"
 )
 
 // Idle-session reaper.
@@ -87,19 +89,22 @@ func newIdleSessionReaper() *idleSessionReaper {
 // Idempotent: a second call on a running reaper is a no-op. Tests
 // inject a custom tick to observe invocation count; production
 // wires Service.reclaimIdleSessionsOnce as the tick.
-func (r *idleSessionReaper) start(parent context.Context, tick func(ctx context.Context)) {
+func (r *idleSessionReaper) start(parent context.Context, tick func(ctx context.Context)) bool {
 	if r == nil {
-		return
+		return false
 	}
 	if tick == nil {
-		return
+		return false
+	}
+	if parent == nil {
+		parent = context.Background()
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.started {
-		return
+		return false
 	}
-	loopCtx, cancel := context.WithCancel(context.Background())
+	loopCtx, cancel := context.WithCancel(parent)
 	r.cancel = cancel
 	r.started = true
 	r.workers.Add(1)
@@ -107,7 +112,7 @@ func (r *idleSessionReaper) start(parent context.Context, tick func(ctx context.
 		defer r.workers.Done()
 		r.runLoop(loopCtx, tick)
 	}()
-	_ = parent // reserved for future cancellation inheritance; kept to document the lifecycle contract
+	return true
 }
 
 // stop signals the reaper to exit and waits for it. Safe to call on
@@ -124,6 +129,10 @@ func (r *idleSessionReaper) stop() {
 	}
 	r.mu.Unlock()
 	r.workers.Wait()
+	r.mu.Lock()
+	r.cancel = nil
+	r.started = false
+	r.mu.Unlock()
 }
 
 // runLoop selects on the ticker + the loop context. Tick callback runs
@@ -152,9 +161,11 @@ func (s *Service) startIdleSessionReaper(ctx context.Context) {
 	if s.idleReaper == nil {
 		return
 	}
-	s.idleReaper.start(ctx, func(tickCtx context.Context) {
+	if !s.idleReaper.start(ctx, func(tickCtx context.Context) {
 		s.reclaimIdleSessionsOnce(tickCtx)
-	})
+	}) {
+		return
+	}
 	s.logger.Info("idle-session reaper started",
 		zap.Duration("interval", s.idleReaper.interval),
 		zap.Duration("min_idle", s.idleReaper.minIdle))
@@ -181,7 +192,17 @@ func (s *Service) stopIdleSessionReaper() {
 // skipped. The next tick will retry. The scan never aborts the loop
 // on a single-row error.
 func (s *Service) reclaimIdleSessionsOnce(ctx context.Context) {
-	rows, err := s.repo.ListExecutorsRunning(ctx)
+	now := time.Now().UTC()
+	cutoff := now.Add(-s.idleReaper.minIdle)
+	var (
+		rows []*models.ExecutorRunning
+		err  error
+	)
+	if candidates, ok := s.repo.(idleExecutorCandidateLister); ok {
+		rows, err = candidates.ListExecutorsRunningIdle(ctx, cutoff)
+	} else {
+		rows, err = s.repo.ListExecutorsRunning(ctx)
+	}
 	if err != nil {
 		s.logger.Warn("idle reaper: list executors_running failed; tick skipped",
 			zap.Error(err))
@@ -190,9 +211,11 @@ func (s *Service) reclaimIdleSessionsOnce(ctx context.Context) {
 	if len(rows) == 0 {
 		return
 	}
-	now := time.Now().UTC()
 	for _, row := range rows {
 		if row == nil {
+			continue
+		}
+		if row.Status == models.ExecutorRunningStatusStopped {
 			continue
 		}
 		sessionID := row.SessionID
@@ -204,7 +227,7 @@ func (s *Service) reclaimIdleSessionsOnce(ctx context.Context) {
 		if row.UpdatedAt.IsZero() {
 			continue
 		}
-		if now.Sub(row.UpdatedAt) < s.idleReaper.minIdle {
+		if row.UpdatedAt.After(now) || now.Sub(row.UpdatedAt) < s.idleReaper.minIdle {
 			continue
 		}
 		// Delegate to the fail-closed primitive. It reads the session,
@@ -217,4 +240,11 @@ func (s *Service) reclaimIdleSessionsOnce(ctx context.Context) {
 				zap.Error(err))
 		}
 	}
+}
+
+// idleExecutorCandidateLister is implemented by the durable repository. The
+// fallback to ListExecutorsRunning keeps lightweight test doubles compatible,
+// while production can filter stopped and young rows in SQL.
+type idleExecutorCandidateLister interface {
+	ListExecutorsRunningIdle(ctx context.Context, cutoff time.Time) ([]*models.ExecutorRunning, error)
 }

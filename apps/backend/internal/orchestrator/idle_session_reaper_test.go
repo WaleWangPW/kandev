@@ -4,288 +4,319 @@ import (
 	"context"
 	"sync/atomic"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/kandev/kandev/internal/agentruntime"
+	"github.com/kandev/kandev/internal/orchestrator/executor"
 	"github.com/kandev/kandev/internal/task/models"
+	taskrepo "github.com/kandev/kandev/internal/task/repository/sqlite"
+	v1 "github.com/kandev/kandev/pkg/api/v1"
 )
 
-// TestIdleReaper_TickSkipsRowsBelowMinIdle verifies the age filter:
-// a row whose UpdatedAt is within idleReaperMinIdle is never reaped,
-// regardless of its session state. The tick records what it touched
-// via a channel; assert the channel stays empty for two ticks, then
-// drop a second row whose age crosses the threshold and assert the
-// second row is reaped.
-//
-// synctest advances time instantly, so the entire sequence runs
-// without time.Sleep.
-func TestIdleReaper_TickSkipsRowsBelowMinIdle(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		repo := setupTestRepo(t)
-		ctx := context.Background()
+func seedIdleReaperRow(
+	t *testing.T,
+	repo interface {
+		UpsertExecutorRunning(context.Context, *models.ExecutorRunning) error
+	},
+	taskID, sessionID string,
+	state models.TaskSessionState,
+	status string,
+) {
+	t.Helper()
+	if sqliteRepo, ok := repo.(interface {
+		CreateTask(context.Context, *models.Task) error
+		CreateTaskSession(context.Context, *models.TaskSession) error
+	}); ok {
 		now := time.Now().UTC()
-		seedTaskAndSession(t, repo, "task-recent", "s-recent",
-			models.TaskSessionStateWaitingForInput)
-		// Recent row: UpdatedAt = now, age = 0 < minIdle.
-		if err := repo.UpsertExecutorRunning(ctx, &models.ExecutorRunning{
-			ID: "s-recent", SessionID: "s-recent", TaskID: "task-recent",
-			Runtime:   agentruntime.RuntimeStandalone,
-			Status:    models.ExecutorRunningStatusRunning,
-			CreatedAt: now, UpdatedAt: now,
+		if err := sqliteRepo.CreateTask(context.Background(), &models.Task{
+			ID: taskID, Title: taskID, State: v1.TaskStateInProgress, CreatedAt: now, UpdatedAt: now,
 		}); err != nil {
-			t.Fatalf("upsert recent: %v", err)
+			t.Fatalf("create task: %v", err)
 		}
-
-		svc := createTestServiceWithAgent(repo, newMockStepGetter(), newMockTaskRepo(),
-			&mockAgentManager{isAgentRunning: false})
-		svc.turnService = &inactiveTurnService{}
-		svc.idleReaper = newIdleSessionReaper()
-		svc.idleReaper.minIdle = 100 * time.Millisecond
-		svc.idleReaper.interval = 50 * time.Millisecond
-
-		// Two ticks: both should skip (age < minIdle).
-		svc.reclaimIdleSessionsOnce(ctx)
-		svc.reclaimIdleSessionsOnce(ctx)
-
-		row, err := repo.GetExecutorRunningBySessionID(ctx, "s-recent")
-		if err != nil {
-			t.Fatalf("recent row missing: %v", err)
+		if err := sqliteRepo.CreateTaskSession(context.Background(), &models.TaskSession{
+			ID: sessionID, TaskID: taskID, State: state, StartedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("create session: %v", err)
 		}
-		if row.Status != models.ExecutorRunningStatusRunning {
-			t.Fatalf("recent row reclaimed prematurely; status=%q", row.Status)
-		}
-
-		// Advance time past minIdle. A fresh tick should now reclaim.
-		time.Sleep(150 * time.Millisecond) // synctest virtual time
-		svc.reclaimIdleSessionsOnce(ctx)
-
-		row, err = repo.GetExecutorRunningBySessionID(ctx, "s-recent")
-		if err != nil {
-			t.Fatalf("recent row missing after tick: %v", err)
-		}
-		if row.Status != models.ExecutorRunningStatusStopped {
-			t.Fatalf("old row not reclaimed after tick; status=%q", row.Status)
-		}
-		if row.LocalPID != 0 {
-			t.Fatalf("LocalPID not cleared; got %d", row.LocalPID)
-		}
-	})
+	}
+	if err := repo.UpsertExecutorRunning(context.Background(), &models.ExecutorRunning{
+		ID:               sessionID,
+		SessionID:        sessionID,
+		TaskID:           taskID,
+		AgentExecutionID: "exec-" + sessionID,
+		Runtime:          agentruntime.RuntimeStandalone,
+		Status:           status,
+	}); err != nil {
+		t.Fatalf("upsert executor row: %v", err)
+	}
 }
 
-// TestIdleReaper_TickSkipsLiveRuntime asserts the live-runtime guard:
-// a row whose IsAgentRunningForSession returns true is never reaped,
-// even past the idle threshold. This is the most load-bearing invariant
-// — the reaper must NEVER touch a running executor.
+func TestIdleReaper_TickFiltersRowsAndStopsPreservedRows(t *testing.T) {
+	repo := setupTestRepo(t)
+	ctx := context.Background()
+	seedIdleReaperRow(t, repo, "task-recent", "s-recent", models.TaskSessionStateWaitingForInput, models.ExecutorRunningStatusRunning)
+	seedIdleReaperRow(t, repo, "task-zero", "s-zero", models.TaskSessionStateWaitingForInput, models.ExecutorRunningStatusRunning)
+	seedIdleReaperRow(t, repo, "task-future", "s-future", models.TaskSessionStateWaitingForInput, models.ExecutorRunningStatusRunning)
+	seedIdleReaperRow(t, repo, "task-stopped", "s-stopped", models.TaskSessionStateWaitingForInput, models.ExecutorRunningStatusStopped)
+	seedIdleReaperRow(t, repo, "task-old", "s-old", models.TaskSessionStateWaitingForInput, models.ExecutorRunningStatusRunning)
+
+	now := time.Now().UTC()
+	for sessionID, updatedAt := range map[string]time.Time{
+		"s-recent":  now,
+		"s-zero":    time.Time{},
+		"s-future":  now.Add(time.Hour),
+		"s-stopped": now.Add(-time.Hour),
+		"s-old":     now.Add(-time.Hour),
+	} {
+		if _, err := repo.DB().ExecContext(ctx, `UPDATE executors_running SET updated_at = ? WHERE session_id = ?`, updatedAt, sessionID); err != nil {
+			t.Fatalf("set updated_at for %s: %v", sessionID, err)
+		}
+	}
+
+	svc := createTestServiceWithAgent(repo, newMockStepGetter(), newMockTaskRepo(), &mockAgentManager{isAgentRunning: false})
+	svc.turnService = &inactiveTurnService{}
+	svc.idleReaper = newIdleSessionReaper()
+	svc.idleReaper.minIdle = 100 * time.Millisecond
+
+	svc.reclaimIdleSessionsOnce(ctx)
+	for sessionID, wantStatus := range map[string]string{
+		"s-recent":  models.ExecutorRunningStatusRunning,
+		"s-zero":    models.ExecutorRunningStatusRunning,
+		"s-future":  models.ExecutorRunningStatusRunning,
+		"s-stopped": models.ExecutorRunningStatusStopped,
+		"s-old":     models.ExecutorRunningStatusStopped,
+	} {
+		row, err := repo.GetExecutorRunningBySessionID(ctx, sessionID)
+		if err != nil {
+			t.Fatalf("load %s: %v", sessionID, err)
+		}
+		if row.Status != wantStatus {
+			t.Fatalf("%s status = %q, want %q", sessionID, row.Status, wantStatus)
+		}
+	}
+	// A preserved stopped row must not be reconsidered on the next tick.
+	svc.reclaimIdleSessionsOnce(ctx)
+	row, err := repo.GetExecutorRunningBySessionID(ctx, "s-old")
+	if err != nil || row.Status != models.ExecutorRunningStatusStopped {
+		t.Fatalf("old row changed after second tick: row=%+v err=%v", row, err)
+	}
+}
+
 func TestIdleReaper_TickSkipsLiveRuntime(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		repo := setupTestRepo(t)
-		ctx := context.Background()
-		now := time.Now().UTC().Add(-1 * time.Hour) // well past minIdle
-		seedTaskAndSession(t, repo, "task-live", "s-live",
-			models.TaskSessionStateWaitingForInput)
-		if err := repo.UpsertExecutorRunning(ctx, &models.ExecutorRunning{
-			ID: "s-live", SessionID: "s-live", TaskID: "task-live",
-			Runtime:   agentruntime.RuntimeStandalone,
-			Status:    models.ExecutorRunningStatusRunning,
-			LocalPID:  9999,
-			CreatedAt: now, UpdatedAt: now,
-		}); err != nil {
-			t.Fatalf("upsert live: %v", err)
-		}
+	repo := setupTestRepo(t)
+	ctx := context.Background()
+	seedIdleReaperRow(t, repo, "task-live", "s-live", models.TaskSessionStateWaitingForInput, models.ExecutorRunningStatusRunning)
+	if _, err := repo.DB().ExecContext(ctx, `UPDATE executors_running SET updated_at = ?, local_pid = ? WHERE session_id = ?`, time.Now().UTC().Add(-time.Hour), 9999, "s-live"); err != nil {
+		t.Fatal(err)
+	}
+	svc := createTestServiceWithAgent(repo, newMockStepGetter(), newMockTaskRepo(), &mockAgentManager{isAgentRunning: true})
+	svc.turnService = &inactiveTurnService{}
+	svc.idleReaper = newIdleSessionReaper()
+	svc.idleReaper.minIdle = 0
 
-		svc := createTestServiceWithAgent(repo, newMockStepGetter(), newMockTaskRepo(),
-			&mockAgentManager{isAgentRunning: true}) // critical: agent is alive
-		svc.turnService = &inactiveTurnService{}
-		svc.idleReaper = newIdleSessionReaper()
-		svc.idleReaper.minIdle = 0 // age filter doesn't matter — runtime guard wins
-
-		svc.reclaimIdleSessionsOnce(ctx)
-
-		row, err := repo.GetExecutorRunningBySessionID(ctx, "s-live")
-		if err != nil {
-			t.Fatalf("live row missing: %v", err)
-		}
-		if row.Status != models.ExecutorRunningStatusRunning {
-			t.Fatalf("live runtime must not be reclaimed; status=%q", row.Status)
-		}
-		if row.LocalPID != 9999 {
-			t.Fatalf("live runtime must keep its LocalPID; got %d", row.LocalPID)
-		}
-	})
+	svc.reclaimIdleSessionsOnce(ctx)
+	row, err := repo.GetExecutorRunningBySessionID(ctx, "s-live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != models.ExecutorRunningStatusRunning || row.LocalPID != 9999 {
+		t.Fatalf("live row changed: status=%q local_pid=%d", row.Status, row.LocalPID)
+	}
 }
 
-// TestIdleReaper_TickSkipsActiveTurn asserts the active-turn guard:
-// a session with a non-nil active turn is never reaped, even past the
-// idle threshold. This protects in-flight turns from being reaped
-// mid-stream.
 func TestIdleReaper_TickSkipsActiveTurn(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		repo := setupTestRepo(t)
-		ctx := context.Background()
-		now := time.Now().UTC().Add(-1 * time.Hour)
-		seedTaskAndSession(t, repo, "task-turn", "s-turn",
-			models.TaskSessionStateWaitingForInput)
-		if err := repo.UpsertExecutorRunning(ctx, &models.ExecutorRunning{
-			ID: "s-turn", SessionID: "s-turn", TaskID: "task-turn",
-			Runtime:   agentruntime.RuntimeStandalone,
-			Status:    models.ExecutorRunningStatusRunning,
-			LocalPID:  4242,
-			CreatedAt: now, UpdatedAt: now,
-		}); err != nil {
-			t.Fatalf("upsert turn row: %v", err)
-		}
+	repo := setupTestRepo(t)
+	ctx := context.Background()
+	seedIdleReaperRow(t, repo, "task-turn", "s-turn", models.TaskSessionStateWaitingForInput, models.ExecutorRunningStatusRunning)
+	if _, err := repo.DB().ExecContext(ctx, `UPDATE executors_running SET updated_at = ? WHERE session_id = ?`, time.Now().UTC().Add(-time.Hour), "s-turn"); err != nil {
+		t.Fatal(err)
+	}
+	svc := createTestServiceWithAgent(repo, newMockStepGetter(), newMockTaskRepo(), &mockAgentManager{isAgentRunning: false})
+	svc.turnService = &alwaysActiveTurnService{}
+	svc.idleReaper = newIdleSessionReaper()
+	svc.idleReaper.minIdle = 0
 
-		svc := createTestServiceWithAgent(repo, newMockStepGetter(), newMockTaskRepo(),
-			&mockAgentManager{isAgentRunning: false})
-		// Inject a turn service that reports an active turn.
-		svc.turnService = &alwaysActiveTurnService{}
-		svc.idleReaper = newIdleSessionReaper()
-		svc.idleReaper.minIdle = 0
-
-		svc.reclaimIdleSessionsOnce(ctx)
-
-		row, err := repo.GetExecutorRunningBySessionID(ctx, "s-turn")
-		if err != nil {
-			t.Fatalf("turn row missing: %v", err)
-		}
-		if row.Status != models.ExecutorRunningStatusRunning {
-			t.Fatalf("active turn must block reclaim; status=%q", row.Status)
-		}
-		if row.LocalPID != 4242 {
-			t.Fatalf("active turn row must keep LocalPID; got %d", row.LocalPID)
-		}
-	})
+	svc.reclaimIdleSessionsOnce(ctx)
+	row, err := repo.GetExecutorRunningBySessionID(ctx, "s-turn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != models.ExecutorRunningStatusRunning {
+		t.Fatalf("active-turn row status = %q, want running", row.Status)
+	}
 }
 
-// alwaysActiveTurnService reports a non-nil turn for any session —
-// used to prove the active-turn guard is consulted by the reaper.
+func TestIdleReaper_TickSkipsWrongState(t *testing.T) {
+	repo := setupTestRepo(t)
+	ctx := context.Background()
+	seedIdleReaperRow(t, repo, "task-running", "s-running", models.TaskSessionStateRunning, models.ExecutorRunningStatusRunning)
+	if _, err := repo.DB().ExecContext(ctx, `UPDATE executors_running SET updated_at = ? WHERE session_id = ?`, time.Now().UTC().Add(-time.Hour), "s-running"); err != nil {
+		t.Fatal(err)
+	}
+	svc := createTestServiceWithAgent(repo, newMockStepGetter(), newMockTaskRepo(), &mockAgentManager{isAgentRunning: false})
+	svc.turnService = &inactiveTurnService{}
+	svc.idleReaper = newIdleSessionReaper()
+	svc.idleReaper.minIdle = 0
+
+	svc.reclaimIdleSessionsOnce(ctx)
+	row, err := repo.GetExecutorRunningBySessionID(ctx, "s-running")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != models.ExecutorRunningStatusRunning {
+		t.Fatalf("running session status = %q, want running", row.Status)
+	}
+}
+
+func TestIdleReaper_DoesNotRepairAReplacedExecution(t *testing.T) {
+	repo := setupTestRepo(t)
+	ctx := context.Background()
+	seedIdleReaperRow(t, repo, "task-rotate", "s-rotate", models.TaskSessionStateWaitingForInput, models.ExecutorRunningStatusRunning)
+	if _, err := repo.DB().ExecContext(ctx, `UPDATE executors_running SET updated_at = ? WHERE session_id = ?`, time.Now().UTC().Add(-time.Hour), "s-rotate"); err != nil {
+		t.Fatal(err)
+	}
+
+	base := &mockAgentManager{isAgentRunning: false}
+	agent := &rotatingReaperAgentManager{AgentManagerClient: base, repo: repo}
+	svc := createTestServiceWithAgent(repo, newMockStepGetter(), newMockTaskRepo(), agent)
+	svc.turnService = &inactiveTurnService{}
+	svc.idleReaper = newIdleSessionReaper()
+	svc.idleReaper.minIdle = 0
+
+	svc.reclaimIdleSessionsOnce(ctx)
+	row, err := repo.GetExecutorRunningBySessionID(ctx, "s-rotate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.AgentExecutionID != "execution-new" || row.Status != models.ExecutorRunningStatusRunning {
+		t.Fatalf("successor row was repaired: execution=%q status=%q", row.AgentExecutionID, row.Status)
+	}
+}
+
+type rotatingReaperAgentManager struct {
+	executor.AgentManagerClient
+	repo *taskrepo.Repository
+}
+
+func (m *rotatingReaperAgentManager) IsAgentRunningForSession(context.Context, string) bool {
+	return false
+}
+
+func (m *rotatingReaperAgentManager) CleanupStaleExecutionBySessionIDIfCurrent(
+	ctx context.Context,
+	sessionID, _ string,
+	_ time.Time,
+) error {
+	_, err := m.repo.DB().ExecContext(ctx, `
+		UPDATE executors_running
+		SET agent_execution_id = ?, status = ?, updated_at = ?
+		WHERE session_id = ?
+	`, "execution-new", models.ExecutorRunningStatusRunning, time.Now().UTC(), sessionID)
+	return err
+}
+
+func TestIdleReaper_LoopInheritsParentCancellation(t *testing.T) {
+	r := newIdleSessionReaper()
+	r.interval = 5 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var ticks atomic.Int32
+	if !r.start(ctx, func(context.Context) { ticks.Add(1) }) {
+		t.Fatal("start returned false")
+	}
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for ticks.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if ticks.Load() == 0 {
+		t.Fatal("reaper did not tick")
+	}
+	cancel()
+	count := ticks.Load()
+	time.Sleep(30 * time.Millisecond)
+	if ticks.Load() != count {
+		t.Fatalf("ticks after parent cancellation = %d, want %d", ticks.Load(), count)
+	}
+	r.stop()
+}
+
+func TestIdleReaper_StopStartRestartsLoop(t *testing.T) {
+	r := newIdleSessionReaper()
+	r.interval = 5 * time.Millisecond
+	ctx := context.Background()
+	var ticks atomic.Int32
+	if !r.start(ctx, func(context.Context) { ticks.Add(1) }) {
+		t.Fatal("first start returned false")
+	}
+	r.stop()
+	if r.started {
+		t.Fatal("reaper remains started after stop")
+	}
+	firstCount := ticks.Load()
+	if !r.start(ctx, func(context.Context) { ticks.Add(1) }) {
+		t.Fatal("second start returned false")
+	}
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for ticks.Load() == firstCount && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if ticks.Load() == firstCount {
+		t.Fatal("reaper did not tick after restart")
+	}
+	r.stop()
+}
+
+func TestIdleReaper_StopPreventsFurtherTicks(t *testing.T) {
+	r := newIdleSessionReaper()
+	r.interval = 5 * time.Millisecond
+	var ticks atomic.Int32
+	if !r.start(context.Background(), func(context.Context) { ticks.Add(1) }) {
+		t.Fatal("start returned false")
+	}
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for ticks.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if ticks.Load() < 2 {
+		t.Fatalf("ticks before stop = %d, want at least 2", ticks.Load())
+	}
+	r.stop()
+	afterStop := ticks.Load()
+	time.Sleep(30 * time.Millisecond)
+	if ticks.Load() != afterStop {
+		t.Fatalf("ticks after stop = %d, want %d", ticks.Load(), afterStop)
+	}
+}
+
 type alwaysActiveTurnService struct{}
 
-func (*alwaysActiveTurnService) GetActiveTurn(_ context.Context, _ string) (*models.Turn, error) {
+func (*alwaysActiveTurnService) GetActiveTurn(context.Context, string) (*models.Turn, error) {
 	return &models.Turn{ID: "turn-always"}, nil
 }
 func (*alwaysActiveTurnService) StartTurn(context.Context, string) (*models.Turn, error) {
-	panic("alwaysActiveTurnService: StartTurn should not be called by reaper tests")
+	panic("alwaysActiveTurnService: StartTurn should not be called")
 }
 func (*alwaysActiveTurnService) ReserveTurn(context.Context, string, *models.PromptDispatchRecovery) (*models.Turn, error) {
-	panic("alwaysActiveTurnService: ReserveTurn should not be called by reaper tests")
+	panic("alwaysActiveTurnService: ReserveTurn should not be called")
 }
 func (*alwaysActiveTurnService) MarkReservedTurnDispatchAttempted(context.Context, *models.Turn) error {
-	panic("alwaysActiveTurnService: MarkReservedTurnDispatchAttempted should not be called by reaper tests")
+	panic("alwaysActiveTurnService: MarkReservedTurnDispatchAttempted should not be called")
 }
 func (*alwaysActiveTurnService) PublishReservedTurn(context.Context, *models.Turn) error {
-	panic("alwaysActiveTurnService: PublishReservedTurn should not be called by reaper tests")
+	panic("alwaysActiveTurnService: PublishReservedTurn should not be called")
 }
 func (*alwaysActiveTurnService) RollbackReservedTurn(context.Context, string, string) (bool, error) {
-	panic("alwaysActiveTurnService: RollbackReservedTurn should not be called by reaper tests")
+	panic("alwaysActiveTurnService: RollbackReservedTurn should not be called")
 }
 func (*alwaysActiveTurnService) ReconcileUnpublishedPromptTurns(context.Context) (int, error) {
 	return 0, nil
 }
-func (*alwaysActiveTurnService) CompleteTurn(context.Context, string) error {
-	return nil
-}
+func (*alwaysActiveTurnService) CompleteTurn(context.Context, string) error { return nil }
 func (*alwaysActiveTurnService) GetTurn(context.Context, string) (*models.Turn, error) {
 	return nil, nil
 }
-func (*alwaysActiveTurnService) UpdateTurn(context.Context, *models.Turn) error {
-	return nil
-}
+func (*alwaysActiveTurnService) UpdateTurn(context.Context, *models.Turn) error { return nil }
 func (*alwaysActiveTurnService) PatchTurnMetadata(context.Context, string, string, map[string]interface{}) error {
 	return nil
 }
-func (*alwaysActiveTurnService) AbandonOpenTurns(context.Context, string) error {
-	return nil
-}
-
-// TestIdleReaper_TickSkipsWrongState verifies the session-state guard:
-// rows whose session state is not in WaitingForInput/Idle/Completed
-// are never reaped, regardless of age. The reaper delegates the
-// state check to reclaimIdleSession which fails closed.
-func TestIdleReaper_TickSkipsWrongState(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		repo := setupTestRepo(t)
-		ctx := context.Background()
-		now := time.Now().UTC().Add(-1 * time.Hour)
-		seedTaskAndSession(t, repo, "task-running", "s-running",
-			models.TaskSessionStateRunning)
-		if err := repo.UpsertExecutorRunning(ctx, &models.ExecutorRunning{
-			ID: "s-running", SessionID: "s-running", TaskID: "task-running",
-			Runtime:   agentruntime.RuntimeStandalone,
-			Status:    models.ExecutorRunningStatusRunning,
-			CreatedAt: now, UpdatedAt: now,
-		}); err != nil {
-			t.Fatalf("upsert running: %v", err)
-		}
-
-		svc := createTestServiceWithAgent(repo, newMockStepGetter(), newMockTaskRepo(),
-			&mockAgentManager{isAgentRunning: false})
-		svc.turnService = &inactiveTurnService{}
-		svc.idleReaper = newIdleSessionReaper()
-		svc.idleReaper.minIdle = 0
-
-		svc.reclaimIdleSessionsOnce(ctx)
-
-		row, err := repo.GetExecutorRunningBySessionID(ctx, "s-running")
-		if err != nil {
-			t.Fatalf("running row missing: %v", err)
-		}
-		if row.Status != models.ExecutorRunningStatusRunning {
-			t.Fatalf("running session must not be reaped; status=%q", row.Status)
-		}
-	})
-}
-
-// TestIdleReaper_LoopStartStopLifecycle verifies the goroutine
-// ownership contract: start launches a goroutine, the loop fires
-// ticks at the configured interval, and stop cancels + joins
-// cleanly. Uses an atomic counter (channel races were intermittent
-// under -race; the counter is race-free and bounded by stop()).
-func TestIdleReaper_LoopStartStopLifecycle(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		repo := setupTestRepo(t)
-		ctx := context.Background()
-		seedTaskAndSession(t, repo, "task-loop", "s-loop",
-			models.TaskSessionStateWaitingForInput)
-		now := time.Now().UTC().Add(-1 * time.Hour)
-		if err := repo.UpsertExecutorRunning(ctx, &models.ExecutorRunning{
-			ID: "s-loop", SessionID: "s-loop", TaskID: "task-loop",
-			Runtime:   agentruntime.RuntimeStandalone,
-			Status:    models.ExecutorRunningStatusRunning,
-			CreatedAt: now, UpdatedAt: now,
-		}); err != nil {
-			t.Fatalf("upsert: %v", err)
-		}
-
-		svc := createTestServiceWithAgent(repo, newMockStepGetter(), newMockTaskRepo(),
-			&mockAgentManager{isAgentRunning: false})
-		svc.turnService = &inactiveTurnService{}
-		svc.idleReaper = newIdleSessionReaper()
-		svc.idleReaper.minIdle = 0
-		svc.idleReaper.interval = 5 * time.Millisecond
-
-		var ticks int32
-		svc.idleReaper.start(ctx, func(tickCtx context.Context) {
-			atomic.AddInt32(&ticks, 1)
-		})
-
-		// Let virtual time run for a few ticks.
-		time.Sleep(20 * time.Millisecond)
-		beforeStop := atomic.LoadInt32(&ticks)
-		if beforeStop < 2 {
-			t.Fatalf("expected >=2 ticks before stop; got %d", beforeStop)
-		}
-
-		// Stop must cancel + join cleanly; counter is monotone after.
-		svc.stopIdleSessionReaper()
-		time.Sleep(10 * time.Millisecond)
-		afterStop := atomic.LoadInt32(&ticks)
-		if afterStop < beforeStop {
-			t.Fatalf("counter regressed after stop: before=%d after=%d", beforeStop, afterStop)
-		}
-	})
-}
-
-// seedTaskAndSession is defined in task_operations_test.go with the same
-// signature (taskID, sessionID, sessionState). The reaper tests reuse it.
+func (*alwaysActiveTurnService) AbandonOpenTurns(context.Context, string) error { return nil }

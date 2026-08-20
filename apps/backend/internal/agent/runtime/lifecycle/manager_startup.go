@@ -84,7 +84,21 @@ func (m *Manager) routePassthrough(ctx context.Context, execution *AgentExecutio
 // StartAgentProcess configures and starts the agent subprocess for an execution.
 // This must be called after Launch() to actually start the agent (e.g., auggie, codex).
 // The command is built internally based on the execution's agent profile.
-func (m *Manager) StartAgentProcess(ctx context.Context, executionID string) (retErr error) {
+func (m *Manager) StartAgentProcess(ctx context.Context, executionID string) error {
+	execution, exists := m.executionStore.Get(executionID)
+	if !exists {
+		return fmt.Errorf("execution %q not found", executionID)
+	}
+	if execution.SessionID == "" {
+		return m.startAgentProcess(ctx, executionID)
+	}
+	_, err := m.doCoalescedExecution(ctx, execution.SessionID, func(sharedCtx context.Context) (interface{}, error) {
+		return nil, m.startAgentProcess(sharedCtx, executionID)
+	})
+	return err
+}
+
+func (m *Manager) startAgentProcess(ctx context.Context, executionID string) (retErr error) {
 	execution, exists := m.executionStore.Get(executionID)
 	if !exists {
 		return fmt.Errorf("execution %q not found", executionID)
