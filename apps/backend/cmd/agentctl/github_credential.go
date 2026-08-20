@@ -19,7 +19,7 @@ import (
 
 type githubBrokerResolveRequest struct {
 	Lease             string `json:"lease,omitempty"`
-	ReissueCapability string `json:"capability,omitempty"`
+	ReissueCapability string `json:"reissue_capability,omitempty"`
 	TaskID            string `json:"task_id"`
 	SessionID         string `json:"session_id"`
 	RepositoryID      string `json:"repository_id"`
@@ -203,7 +203,8 @@ func isReissuableLeaseError(err error) bool {
 		return false
 	}
 	switch brokerErr.code {
-	case "github_credential_lease_invalid", "github_credential_lease_expired", "github_credential_lease_revoked":
+	case "github_credential_lease_invalid", "github_credential_lease_expired", "github_credential_lease_revoked",
+		"git_credential_lease_invalid", "git_credential_lease_expired", "git_credential_lease_revoked":
 		return true
 	default:
 		return false

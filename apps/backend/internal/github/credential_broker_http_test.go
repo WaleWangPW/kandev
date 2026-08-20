@@ -163,6 +163,53 @@ func TestCredentialBrokerRoutesPassRealAuthMiddleware(t *testing.T) {
 	})
 }
 
+func TestGenericCredentialBrokerRoutesUseProviderNeutralContract(t *testing.T) {
+	broker, _, _ := newPATCredentialBroker(t)
+	lease, err := broker.Issue(context.Background(), brokerLeaseRequest())
+	if err != nil {
+		t.Fatalf("issue lease: %v", err)
+	}
+	router := newBrokerHTTPTestRouter(t, broker)
+
+	ready := httptest.NewRequest(http.MethodGet, "/api/v1/git/credentials/resolve", nil)
+	readyRec := httptest.NewRecorder()
+	router.ServeHTTP(readyRec, ready)
+	if readyRec.Code != http.StatusNoContent {
+		t.Fatalf("generic readiness status = %d body=%s, want %d", readyRec.Code, readyRec.Body.String(), http.StatusNoContent)
+	}
+
+	body, err := json.Marshal(resolveCredentialLeaseBody{
+		Lease: lease.Token, TaskID: "task-1", SessionID: "session-1",
+		RepositoryID: "repository-1", Owner: "kdlbs", Repo: "kandev", Host: "github.com",
+	})
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/git/credentials/resolve", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	record := httptest.NewRecorder()
+	router.ServeHTTP(record, request)
+	if record.Code != http.StatusOK {
+		t.Fatalf("generic resolve status = %d body=%s, want %d", record.Code, record.Body.String(), http.StatusOK)
+	}
+
+	invalidBody, err := json.Marshal(resolveCredentialLeaseBody{
+		Lease: "invalid", TaskID: "task-1", SessionID: "session-1",
+		RepositoryID: "repository-1", Owner: "kdlbs", Repo: "kandev", Host: "github.com",
+	})
+	if err != nil {
+		t.Fatalf("marshal invalid body: %v", err)
+	}
+	invalidRequest := httptest.NewRequest(http.MethodPost, "/api/v1/git/credentials/resolve", bytes.NewReader(invalidBody))
+	invalidRequest.Header.Set("Content-Type", "application/json")
+	invalidRecord := httptest.NewRecorder()
+	router.ServeHTTP(invalidRecord, invalidRequest)
+	if invalidRecord.Code != http.StatusUnauthorized ||
+		!bytes.Contains(invalidRecord.Body.Bytes(), []byte("git_credential_lease_invalid")) {
+		t.Fatalf("generic invalid resolve status/body = %d/%s", invalidRecord.Code, invalidRecord.Body.String())
+	}
+}
+
 func TestCredentialBrokerReissueRouteAcceptsOnlyScopedCapability(t *testing.T) {
 	broker, _, _ := newPATCredentialBroker(t)
 	signer, err := gitcredentials.NewReissueCapabilitySigner("test-signing-key")

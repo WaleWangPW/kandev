@@ -11,9 +11,11 @@ status: completed
 Add an encrypted, execution-scoped reissue capability alongside each managed Git
 credential lease. The generic broker validates that capability and issues a
 fresh lease from live authorization and provider binding; the existing helper
-then performs one replacement redemption. This retains in-memory leases while
-making a running execution recover after a credential-generation change or
-backend restart.
+then performs one replacement redemption. A capability reissue replaces the
+previous lease for that capability, so short-lived helper processes cannot
+consume the workspace lease limit. This retains in-memory leases while making
+a running execution recover after a credential-generation change or backend
+restart.
 
 ## Backend
 
@@ -22,7 +24,9 @@ backend restart.
 - Add sealing, validation, expiry, and exact-scope comparison to
   `apps/backend/internal/gitcredentials/` without retaining credentials.
 - Extend `Broker` with capability issue/reissue operations that call its
-  existing `Issue` path, preserving live authorizer and resolver checks.
+  existing authorization path, preserving live authorizer and resolver checks.
+- Let providers refresh rotating binding generations during reissue without
+  changing the sealed task, session, or repository identity.
 - Wire a stable signer from backend configuration in
   `apps/backend/internal/backendapp/` and leave capability issuance disabled
   when no stable key exists.
@@ -39,9 +43,10 @@ backend restart.
 
 ### HTTP and helper recovery
 
-- Add the broker reissue route and precise reissuable error codes in
-  `apps/backend/internal/github/`; preserve public-route self-authentication
-  in `apps/backend/internal/auth/httpmw/middleware.go`.
+- Add provider-neutral `/api/v1/git/credentials/*` broker routes and precise
+  reissuable error codes. Keep the GitHub paths as compatibility aliases and
+  preserve public-route self-authentication in
+  `apps/backend/internal/auth/httpmw/middleware.go`.
 - Update `apps/backend/cmd/agentctl/github_credential.go` to recognize only
   eligible lease errors, request one replacement lease with the matching
   capability, and retry the original redemption once. The same command powers
@@ -59,7 +64,11 @@ backend restart.
   capability.
 - **Helper integration:** `cmd/agentctl/github_credential_test.go` asserts
   credential-generation revoked and missing-lease responses reissue once,
-  retry successfully, and reject non-reissuable/fake/expired paths.
+  retry successfully in single- and multi-scope mode, and reject
+  non-reissuable/fake/expired paths. The `gh` shim uses the same one-shot flow.
+- **Lease lifecycle:** repeated reissue keeps one active lease for a
+  capability. Contribution destination reissue refreshes the current binding
+  generation after an authorized connection rotation.
 
 ## Verification Results
 
