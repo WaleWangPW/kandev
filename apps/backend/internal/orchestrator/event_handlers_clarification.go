@@ -596,6 +596,15 @@ func (s *Service) PauseForClarificationInput(ctx context.Context, sessionID stri
 	} else if err != nil {
 		return detached, errors.Join(detachErr, err)
 	}
+	// Clarification park is a turn boundary, mirroring the
+	// pre-#677 contract where handleAgentReady always drained after returning
+	// from a turn. PauseForClarificationInput holds the cancelInFlight guard
+	// (line 533) for the entire function, so we must use the *Locked* drain
+	// variant — the public one would try to re-acquire the same non-reentrant
+	// sync.Mutex and deadlock. The detached bundle remains in the UI for the
+	// user to answer, but the workflow will no longer block on it for the new
+	// turn (PR description flags this trade-off for maintainer review).
+	s.drainQueuedMessageForPromptableSessionLocked(pauseCtx, sessionID)
 	return detached, detachErr
 }
 
