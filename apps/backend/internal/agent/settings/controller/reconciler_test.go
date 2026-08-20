@@ -532,6 +532,44 @@ func TestProfileReconciler_KeepsGoneFallbackModel(t *testing.T) {
 	}
 }
 
+func TestProfileReconciler_PreservesUserModifiedCustomRouteOutsideAgentCatalog(t *testing.T) {
+	st := newFakeStore()
+	dbAgent := &models.Agent{Name: "opencode-acp"}
+	_ = st.CreateAgent(context.Background(), dbAgent)
+	existing := &models.AgentProfile{
+		AgentID:      dbAgent.ID,
+		Name:         "Custom route",
+		Model:        "custom-provider/model",
+		Mode:         "custom-mode",
+		UserModified: true,
+	}
+	_ = st.CreateAgentProfile(context.Background(), existing)
+	st.created = nil
+
+	ag := &mockInferenceAgent{id: "opencode-acp", displayName: "OpenCode", enabled: true}
+	caps := &fakeCapReader{caps: map[string]hostutility.AgentCapabilities{
+		"opencode-acp": {
+			AgentType:      "opencode-acp",
+			Models:         []hostutility.Model{{ID: "catalog-model", Name: "Catalog"}},
+			CurrentModelID: "catalog-model",
+			Modes:          []hostutility.Mode{{ID: "agent", Name: "Agent"}},
+			CurrentModeID:  "agent",
+			Status:         hostutility.StatusOK,
+		},
+	}}
+
+	r := newReconciler(t, st, caps, ag)
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(st.updated) != 0 {
+		t.Fatalf("user-modified custom route was rewritten: %+v", st.updated)
+	}
+	if existing.Model != "custom-provider/model" || existing.Mode != "custom-mode" {
+		t.Fatalf("custom route changed to model=%q mode=%q", existing.Model, existing.Mode)
+	}
+}
+
 func TestProfileReconciler_PreservesOfficeAgentName(t *testing.T) {
 	profile := &models.AgentProfile{
 		Name:             "Researcher",
