@@ -2,12 +2,27 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/kandev/kandev/internal/task/models"
+	sqliterepo "github.com/kandev/kandev/internal/task/repository/sqlite"
 	v1 "github.com/kandev/kandev/pkg/api/v1"
 )
+
+type fastPathTaskReadRetryRepo struct {
+	*sqliterepo.Repository
+	failNext atomic.Bool
+}
+
+func (r *fastPathTaskReadRetryRepo) GetTask(ctx context.Context, taskID string) (*models.Task, error) {
+	if r.failNext.CompareAndSwap(true, false) {
+		return nil, errors.New("transient task read failure")
+	}
+	return r.Repository.GetTask(ctx, taskID)
+}
 
 // TestQueueUserPrompt_T2FastPathDrainsPromptableSession pins the
 // T2 contract: a user message admitted via QueueUserPrompt triggers
@@ -43,10 +58,9 @@ func TestQueueUserPrompt_T2FastPathDrainsPromptableSession(t *testing.T) {
 }
 
 // TestQueueUserPrompt_T2SkipsFastPathOnPendingClarification pins the
-// detached-bundle contract: a session with an active detached
-// clarification_request row must NOT fast-path drain on enqueue. The
-// drain is deferred to the next turn boundary (handleAgentReady /
-// promptTask tail).
+// live-clarification contract: a session with an active clarification
+// request must NOT fast-path drain on enqueue. The drain is deferred to
+// the clarification outcome or the next turn boundary.
 func TestQueueUserPrompt_T2SkipsFastPathOnPendingClarification(t *testing.T) {
 	ctx := context.Background()
 	repo := setupTestRepo(t)
@@ -61,6 +75,46 @@ func TestQueueUserPrompt_T2SkipsFastPathOnPendingClarification(t *testing.T) {
 	// clarification. The queue grows; the next turn-end will drain.
 	if got := svc.messageQueue.GetStatus(ctx, "s1").Count; got != 1 {
 		t.Fatalf("post-enqueue queue count = %d, want 1 (T2 must defer to turn-end on pending clarification)", got)
+	}
+}
+
+func TestQueueUserPrompt_T2DrainsAfterClarificationDetachedWithEmptyQueue(t *testing.T) {
+	ctx := context.Background()
+	repo := setupTestRepo(t)
+	seedTaskAndSession(t, repo, "t1", "s1", models.TaskSessionStateWaitingForInput)
+	seedPendingClarificationMessage(t, repo, "t1", "s1")
+	message, err := repo.GetMessage(ctx, "clarification-s1")
+	if err != nil {
+		t.Fatalf("load clarification: %v", err)
+	}
+	message.Metadata["agent_disconnected"] = true
+	if err := repo.UpdateMessage(ctx, message); err != nil {
+		t.Fatalf("mark clarification detached: %v", err)
+	}
+	svc := createTestService(repo, newMockStepGetter(), newMockTaskRepo())
+
+	if err := svc.QueueUserPrompt(ctx, "t1", "s1", "after-detach", "", false, nil, map[string]interface{}{}, true); err != nil {
+		t.Fatalf("QueueUserPrompt: %v", err)
+	}
+	if got := svc.messageQueue.GetStatus(ctx, "s1").Count; got != 0 {
+		t.Fatalf("detached-only clarification stranded successor queue: count=%d, want 0", got)
+	}
+}
+
+func TestQueueUserPrompt_T2RetriesTaskAdmissionReadAfterPromotion(t *testing.T) {
+	ctx := context.Background()
+	repo := setupTestRepo(t)
+	seedTaskAndSession(t, repo, "t1", "s1", models.TaskSessionStateWaitingForInput)
+	svc := createTestService(repo, newMockStepGetter(), newMockTaskRepo())
+	retryRepo := &fastPathTaskReadRetryRepo{Repository: repo}
+	retryRepo.failNext.Store(true)
+	svc.repo = retryRepo
+
+	if err := svc.QueueUserPrompt(ctx, "t1", "s1", "after-promotion", "", false, nil, map[string]interface{}{}, true); err != nil {
+		t.Fatalf("QueueUserPrompt: %v", err)
+	}
+	if got := svc.messageQueue.GetStatus(ctx, "s1").Count; got != 0 {
+		t.Fatalf("transient task read stranded queue entry: count=%d, want 0", got)
 	}
 }
 

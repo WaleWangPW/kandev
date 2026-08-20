@@ -773,7 +773,12 @@ func (s *Service) executeQueuedMessageWithReservation(
 	if reservation == nil {
 		reservation = s.queuedDispatchReservationForEntry(reservedSessionID, queuedMsg.ID)
 	}
-	defer s.clearQueuedDispatchInFlightIfCurrent(reservedSessionID, reservation)
+	defer func() {
+		s.clearQueuedDispatchInFlightIfCurrent(reservedSessionID, reservation)
+		if s.onQueuedMessageExecutionComplete != nil {
+			s.onQueuedMessageExecutionComplete()
+		}
+	}()
 	lifecyclePrompt := isLifecycleAutomationOrigin(queuedMsg.Metadata["origin"])
 
 	claimEntryID, handoffDone := s.claimQueuedMessageHandoff(

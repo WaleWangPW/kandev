@@ -558,6 +558,11 @@ type Service struct {
 	// onManualMoveLifecycleStart blocks the admitted manual-move lifecycle in
 	// package tests so feeder promotion ordering can be asserted.
 	onManualMoveLifecycleStart func()
+	// onQueuedMessageExecutionComplete is a package-test hook that fires after
+	// an asynchronous queued-message worker has released its dispatch
+	// reservation. It lets tests wait for the full worker lifecycle instead of
+	// observing only the prompt call.
+	onQueuedMessageExecutionComplete func()
 	// queuedMoveLifecycleLocks serializes source-exit work per task. The
 	// completion marker remains durable so a restart can safely resume work.
 	queuedMoveLifecycleLocks sync.Map
@@ -3030,9 +3035,9 @@ func (s *Service) QueueUserPrompt(
 	// (agent.ready / agent.boot_ready / processOnEnter / promptTask
 	// tail) lack this guard too — T2 is defense-in-depth, matching the
 	// queueFull-bound pattern rather than introducing a new escape.
-	// Two SQL reads per enqueue (clarification guard + task) is small
-	// and acceptable for the user-message volume; the load-path hot
-	// loop is already gated by the clarification guard and
+	// Three SQL reads per enqueue (clarification guard, session, and task)
+	// is small and acceptable for the user-message volume; the load-path hot
+	// loop is already gated by the guarded clarification check and
 	// isCancelInFlight / isQueuedDispatchInFlight / isSteerInFlight
 	// in-flight checks (cheaper than the DB read).
 	s.tryFastPathDrainAfterEnqueue(ctx, taskID, sessionID)
@@ -3046,63 +3051,44 @@ func (s *Service) QueueUserPrompt(
 // increasing cost order:
 //
 //  1. messageQueue is non-nil (cheap pointer check).
-//  2. sessionHasPendingClarification is false (one DB read). A
-//     detached clarification bundle on a parked session gates the
-//     queue behind the user's answer — T1 owns that surface. If a
-//     detached bundle is active, T2 must defer to the next turn
-//     boundary (handleAgentReady / promptTask tail).
-//  3. isCancelInFlight / isQueuedDispatchInFlight / isSteerInFlight
+//  2. isCancelInFlight / isQueuedDispatchInFlight / isSteerInFlight
 //     are false (in-memory atomic loads). These guard the next drain
 //     from racing an in-flight sibling. False negatives are safe: the
 //     next turn-end re-evaluates.
-//  4. task is loaded; loaded and (WIP-admitted OR has no
-//     QueuedForStepID) is true (one DB read for the task; if the
-//     load fails, fail-closed: do not drain). A task waiting in
-//     the WIP admission queue (QueuedForStepID != "" &&
-//     !WIPAdmitted) must wait for the admission promotion path
-//     (ReconcileQueuedTasks / promoteSameStepTask) — promoting
-//     here would bypass WIP gating.
-//  5. drainQueuedMessageForPromptableSession dispatched the head
-//     via the existing public drain helper, which acquires the
-//     cancelInFlight guard itself (QueueUserPrompt does not hold
-//     that guard).
+//  3. drainQueuedMessageForPromptableSessionWithTaskAdmission reloads the
+//     task after acquiring the guard and immediately before reservation. A
+//     task waiting in the WIP admission queue (QueuedForStepID != "" &&
+//     !WIPAdmitted) remains parked.
 //
-// All five gates must pass; the first failure aborts the fast-path
+// The first failure aborts the fast-path
 // drain silently. Failures leave the queued message in place for the
 // next turn-end drain — they never block user input.
 //
-// Two SQL reads per enqueue (clarification guard + task) is small and
-// acceptable for the user-message volume. The four pre-existing drain
-// triggers (agent.ready, agent.boot_ready, processOnEnter, promptTask
-// tail) also lack a WIP check — T2 is defense-in-depth that matches
-// the existing admission pattern at the queue boundary, rather than
-// introducing a different escape path inside the dispatch lifecycle.
+// The guarded helper rechecks clarification ownership, session promptability,
+// and task admission immediately before reservation. The four pre-existing
+// drain triggers (agent.ready, agent.boot_ready, processOnEnter, promptTask
+// tail) also lack a WIP check — T2 is defense-in-depth that matches the
+// existing admission pattern at the queue boundary, rather than introducing a
+// different escape path inside the dispatch lifecycle.
 func (s *Service) tryFastPathDrainAfterEnqueue(ctx context.Context, taskID, sessionID string) {
 	if s.messageQueue == nil {
-		return
-	}
-	if s.sessionHasPendingClarification(ctx, sessionID) {
 		return
 	}
 	if s.isCancelInFlight(sessionID) || s.isQueuedDispatchInFlight(sessionID) || s.isSteerInFlight(sessionID) {
 		return
 	}
-	task, err := s.repo.GetTask(ctx, taskID)
-	if err != nil {
-		// Fail-closed: a task read failure is exceptional; the next
-		// turn-end drain will re-evaluate. We do not panic or log
-		// loudly here because the error will surface there.
-		return
+	const maxTaskAdmissionReadAttempts = 2
+	for attempt := 0; attempt < maxTaskAdmissionReadAttempts; attempt++ {
+		outcome := s.drainQueuedMessageForPromptableSessionWithTaskAdmission(ctx, taskID, sessionID)
+		if outcome != queueDrainTaskAdmissionReadFailed {
+			return
+		}
+		if attempt+1 == maxTaskAdmissionReadAttempts {
+			s.logger.Warn("queue fast-path deferred after repeated task admission reads failed",
+				zap.String("task_id", taskID), zap.String("session_id", sessionID))
+			return
+		}
 	}
-	if task == nil {
-		return
-	}
-	if !task.WIPAdmitted && task.QueuedForStepID != "" {
-		// WIP wait — do not bypass. The next admission promotion will
-		// run drain via the existing reconcile / promote path.
-		return
-	}
-	s.drainQueuedMessageForPromptableSession(ctx, sessionID)
 }
 
 // GetEventBus returns the event bus
