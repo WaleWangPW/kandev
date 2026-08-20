@@ -3021,7 +3021,88 @@ func (s *Service) QueueUserPrompt(
 		return fmt.Errorf("queue user prompt: %w", err)
 	}
 	s.publishQueueStatusEvent(ctx, sessionID)
+
+	// T2: enqueue-side fast-path drain. The user's WIP wait is a
+	// first-class contract (the dispatcher gates on
+	// ProcessOnTurnStart's Queued=true return value). Promoting a queued
+	// prompt to dispatch while the task is still in WIP-wait would
+	// bypass the admission path; the existing 4 drain triggers
+	// (agent.ready / agent.boot_ready / processOnEnter / promptTask
+	// tail) lack this guard too — T2 is defense-in-depth, matching the
+	// queueFull-bound pattern rather than introducing a new escape.
+	// Two SQL reads per enqueue (clarification guard + task) is small
+	// and acceptable for the user-message volume; the load-path hot
+	// loop is already gated by the clarification guard and
+	// isCancelInFlight / isQueuedDispatchInFlight / isSteerInFlight
+	// in-flight checks (cheaper than the DB read).
+	s.tryFastPathDrainAfterEnqueue(ctx, taskID, sessionID)
 	return nil
+}
+
+// tryFastPathDrainAfterEnqueue is the T2 fast-path drain. After QueueUserPrompt
+// has admitted a user message into the session's queue, this method
+// decides whether the message is safe to dispatch right now. The
+// decision is gated by a sequence of cheap-to-expensive checks in
+// increasing cost order:
+//
+//  1. messageQueue is non-nil (cheap pointer check).
+//  2. sessionHasPendingClarification is false (one DB read). A
+//     detached clarification bundle on a parked session gates the
+//     queue behind the user's answer — T1 owns that surface. If a
+//     detached bundle is active, T2 must defer to the next turn
+//     boundary (handleAgentReady / promptTask tail).
+//  3. isCancelInFlight / isQueuedDispatchInFlight / isSteerInFlight
+//     are false (in-memory atomic loads). These guard the next drain
+//     from racing an in-flight sibling. False negatives are safe: the
+//     next turn-end re-evaluates.
+//  4. task is loaded; loaded and (WIP-admitted OR has no
+//     QueuedForStepID) is true (one DB read for the task; if the
+//     load fails, fail-closed: do not drain). A task waiting in
+//     the WIP admission queue (QueuedForStepID != "" &&
+//     !WIPAdmitted) must wait for the admission promotion path
+//     (ReconcileQueuedTasks / promoteSameStepTask) — promoting
+//     here would bypass WIP gating.
+//  5. drainQueuedMessageForPromptableSession dispatched the head
+//     via the existing public drain helper, which acquires the
+//     cancelInFlight guard itself (QueueUserPrompt does not hold
+//     that guard).
+//
+// All five gates must pass; the first failure aborts the fast-path
+// drain silently. Failures leave the queued message in place for the
+// next turn-end drain — they never block user input.
+//
+// Two SQL reads per enqueue (clarification guard + task) is small and
+// acceptable for the user-message volume. The four pre-existing drain
+// triggers (agent.ready, agent.boot_ready, processOnEnter, promptTask
+// tail) also lack a WIP check — T2 is defense-in-depth that matches
+// the existing admission pattern at the queue boundary, rather than
+// introducing a different escape path inside the dispatch lifecycle.
+func (s *Service) tryFastPathDrainAfterEnqueue(ctx context.Context, taskID, sessionID string) {
+	if s.messageQueue == nil {
+		return
+	}
+	if s.sessionHasPendingClarification(ctx, sessionID) {
+		return
+	}
+	if s.isCancelInFlight(sessionID) || s.isQueuedDispatchInFlight(sessionID) || s.isSteerInFlight(sessionID) {
+		return
+	}
+	task, err := s.repo.GetTask(ctx, taskID)
+	if err != nil {
+		// Fail-closed: a task read failure is exceptional; the next
+		// turn-end drain will re-evaluate. We do not panic or log
+		// loudly here because the error will surface there.
+		return
+	}
+	if task == nil {
+		return
+	}
+	if !task.WIPAdmitted && task.QueuedForStepID != "" {
+		// WIP wait — do not bypass. The next admission promotion will
+		// run drain via the existing reconcile / promote path.
+		return
+	}
+	s.drainQueuedMessageForPromptableSession(ctx, sessionID)
 }
 
 // GetEventBus returns the event bus
