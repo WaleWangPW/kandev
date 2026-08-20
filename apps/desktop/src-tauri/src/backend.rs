@@ -371,10 +371,15 @@ pub fn desktop_environment(
         !key.to_string_lossy()
             .eq_ignore_ascii_case(DESKTOP_NATIVE_NOTIFICATIONS_ENV)
     });
-    env.insert(
-        OsString::from("KANDEV_SERVER_HOST"),
-        OsString::from(LOOPBACK_HOST),
-    );
+    // KANDEV_SERVER_HOST is conditionally injected: a caller (CI smoke harness,
+    // integration test) that already set it must see the value pass through
+    // unchanged. Only the un-set case falls back to the loopback default.
+    if !env.contains_key(OsStr::new("KANDEV_SERVER_HOST")) {
+        env.insert(
+            OsString::from("KANDEV_SERVER_HOST"),
+            OsString::from(LOOPBACK_HOST),
+        );
+    }
     env.insert(
         OsString::from("KANDEV_BUNDLE_DIR"),
         runtime_dir.as_os_str().to_os_string(),
@@ -847,6 +852,38 @@ mod tests {
             Some(&OsString::from("true"))
         );
         assert!(!env.contains_key(OsStr::new("kandev_desktop_native_notifications")));
+    }
+
+    #[test]
+    fn desktop_environment_preserves_inherited_server_host() {
+        // CI smoke harness / integration tests can pre-set KANDEV_SERVER_HOST
+        // to point at a non-loopback backend. desktop_environment must pass
+        // the value through unchanged.
+        let mut inherited = BTreeMap::new();
+        inherited.insert(
+            OsString::from("KANDEV_SERVER_HOST"),
+            OsString::from("10.0.0.42"),
+        );
+
+        let env = desktop_environment(Path::new("/opt/kandev"), inherited, None);
+
+        assert_eq!(
+            env.get(OsStr::new("KANDEV_SERVER_HOST")),
+            Some(&OsString::from("10.0.0.42")),
+            "inherited KANDEV_SERVER_HOST must pass through desktop_environment",
+        );
+    }
+
+    #[test]
+    fn desktop_environment_falls_back_to_loopback_when_server_host_unset() {
+        // The default production path: no inherited KANDEV_SERVER_HOST,
+        // desktop_environment must inject the loopback default.
+        let env = desktop_environment(Path::new("/opt/kandev"), BTreeMap::new(), None);
+
+        assert_eq!(
+            env.get(OsStr::new("KANDEV_SERVER_HOST")),
+            Some(&OsString::from(LOOPBACK_HOST))
+        );
     }
 
     #[test]
