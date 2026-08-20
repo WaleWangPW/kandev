@@ -70,7 +70,6 @@ const (
 type idleSessionReaper struct {
 	mu       sync.Mutex
 	cancel   context.CancelFunc
-	stopped  bool
 	workers  sync.WaitGroup
 	started  bool
 	interval time.Duration
