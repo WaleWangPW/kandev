@@ -837,6 +837,32 @@ func TestConfigureAndStartAgent_DoesNotSendTaskDescriptionEnv(t *testing.T) {
 	}
 }
 
+func TestConfigureAndStartAgentUsesRuntimeSnapshotWhenProfileSecretIsUnavailable(t *testing.T) {
+	mgr := newTestManager(t)
+	mgr.profileResolver = &mockPassthroughProfileResolver{
+		envVars: []settingsmodels.ProfileEnvVar{{Key: "PROFILE_ONLY", SecretID: "deleted-secret"}},
+	}
+	var configuredEnv map[string]string
+	client := newConfigureCaptureAgentctlClient(t, newTestLogger(), &configuredEnv)
+	execution := &AgentExecution{
+		ID:             "exec-1",
+		TaskID:         "task-1",
+		SessionID:      "session-1",
+		AgentProfileID: "profile-1",
+		AgentCommand:   "npx -y @agentclientprotocol/codex-acp",
+		WorkspacePath:  t.TempDir(),
+		agentctl:       client,
+	}
+	execution.setRuntimeEnvironment(map[string]string{"PROFILE_ONLY": "captured-value"})
+
+	if _, err := mgr.configureAndStartAgent(context.Background(), execution, "never"); err != nil {
+		t.Fatalf("configureAndStartAgent() error = %v", err)
+	}
+	if configuredEnv["PROFILE_ONLY"] != "captured-value" {
+		t.Fatalf("configured profile env = %q, want captured runtime value", configuredEnv["PROFILE_ONLY"])
+	}
+}
+
 func TestConfigureAndStartAgent_SendsStructuredArgv(t *testing.T) {
 	mgr := newTestManager(t)
 	var captured []string

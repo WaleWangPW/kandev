@@ -9,10 +9,6 @@ import (
 	"github.com/kandev/kandev/internal/gitconfigenv"
 )
 
-// metadataKeyProfileEnvResolved caches resolved profile env vars on an execution
-// so configureAndStartAgent does not re-resolve secrets on the same launch.
-const metadataKeyProfileEnvResolved = "profile_env_resolved"
-
 var ErrProfileSecretUnavailable = errors.New("BLOCKED_PROFILE_SECRET")
 
 // mergeAgentProfileEnv fills missing keys in env from the agent profile's
@@ -41,20 +37,8 @@ func (m *Manager) mergeAgentProfileEnvFromInfo(ctx context.Context, info *AgentP
 	return nil
 }
 
-func (m *Manager) cacheResolvedProfileEnv(execution *AgentExecution, resolved map[string]string) {
-	if execution == nil || len(resolved) == 0 {
-		return
-	}
-	execution.setMetadataValue(metadataKeyProfileEnvResolved, cloneStringMap(resolved))
-}
-
 func (m *Manager) mergeAgentProfileEnvForExecution(ctx context.Context, execution *AgentExecution, env map[string]string) error {
 	if execution == nil {
-		return nil
-	}
-	value, _ := execution.metadataValue(metadataKeyProfileEnvResolved)
-	if cached, ok := value.(map[string]string); ok && len(cached) > 0 {
-		mergeEnvFillMissing(env, cached)
 		return nil
 	}
 	return m.mergeAgentProfileEnv(ctx, execution.AgentProfileID, env)
@@ -97,6 +81,12 @@ func (m *Manager) resolveAgentProfileEnvVars(ctx context.Context, envVars []sett
 			}
 			value, err := m.revealGlobalSecret(ctx, ev.SecretID)
 			if err != nil {
+				// Preserve caller cancellation identity. The sanitized sentinel is
+				// for secret failures only; callers use context errors to stop work
+				// without misclassifying a cancelled request as bad configuration.
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return nil, err
+				}
 				return nil, profileSecretError(key)
 			}
 			resolved[key] = value

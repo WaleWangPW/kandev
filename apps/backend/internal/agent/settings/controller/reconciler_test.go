@@ -673,6 +673,49 @@ func TestProfileReconciler_HealsStaleCodexModeAfterBridgeSwap(t *testing.T) {
 	}
 }
 
+func TestProfileReconciler_HealsStaleCodexModeForUserModifiedProfile(t *testing.T) {
+	st := newFakeStore()
+	dbAgent := &models.Agent{Name: "codex-acp"}
+	_ = st.CreateAgent(context.Background(), dbAgent)
+	existing := &models.AgentProfile{
+		AgentID:      dbAgent.ID,
+		Name:         "Codex",
+		Model:        "gpt-5.6-sol",
+		Mode:         "auto",
+		UserModified: true,
+	}
+	_ = st.CreateAgentProfile(context.Background(), existing)
+	st.created = nil
+
+	ag := &mockInferenceAgent{id: "codex-acp", displayName: "Codex", enabled: true}
+	caps := &fakeCapReader{
+		caps: map[string]hostutility.AgentCapabilities{
+			"codex-acp": {
+				AgentType:      "codex-acp",
+				Status:         hostutility.StatusOK,
+				Models:         []hostutility.Model{{ID: "gpt-5.6-sol", Name: "GPT 5.6 Sol"}},
+				CurrentModelID: "gpt-5.6-sol",
+				Modes: []hostutility.Mode{
+					{ID: "read-only", Name: "Read Only"},
+					{ID: "agent", Name: "Agent"},
+					{ID: "agent-full-access", Name: "Agent Full Access"},
+				},
+				CurrentModeID: "agent",
+			},
+		},
+	}
+	r := newReconciler(t, st, caps, ag)
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(st.updated) != 1 {
+		t.Fatalf("expected 1 updated profile, got %d", len(st.updated))
+	}
+	if got := st.updated[0].Mode; got != "agent" {
+		t.Fatalf("healed mode = %q, want agent", got)
+	}
+}
+
 func TestProfileReconciler_CleansOrphanProfiles(t *testing.T) {
 	st := newFakeStore()
 	// Seed a DB row for an agent that is NOT registered in the registry.

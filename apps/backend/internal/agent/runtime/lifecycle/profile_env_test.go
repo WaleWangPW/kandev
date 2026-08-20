@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	settingsmodels "github.com/kandev/kandev/internal/agent/settings/models"
@@ -115,5 +116,36 @@ func TestResolveAgentProfileEnvVars_RejectsWorkspaceSecret(t *testing.T) {
 	}
 	if len(resolved) != 0 {
 		t.Fatalf("workspace secret was resolved into profile environment: %#v", resolved)
+	}
+}
+
+func TestResolveAgentProfileEnvVarsPreservesCancellation(t *testing.T) {
+	for name, cause := range map[string]error{
+		"canceled":          context.Canceled,
+		"deadline exceeded": context.DeadlineExceeded,
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := newInMemorySecretStore()
+			store.revealErr = cause
+			_ = store.Create(context.Background(), &secrets.SecretWithValue{
+				Secret: secrets.Secret{ID: "sec-cancel", Name: "cancel"},
+				Value:  "secret-value",
+			})
+
+			log, _ := logger.NewLogger(logger.LoggingConfig{Level: "error", Format: "json"})
+			m := &Manager{logger: log, secretStore: store}
+			resolved, err := m.resolveAgentProfileEnvVars(context.Background(), []settingsmodels.ProfileEnvVar{
+				{Key: "FROM_SECRET", SecretID: "sec-cancel"},
+			})
+			if !errors.Is(err, cause) {
+				t.Fatalf("error = %v, want %v", err, cause)
+			}
+			if errors.Is(err, ErrProfileSecretUnavailable) {
+				t.Fatalf("cancellation was sanitized as a profile secret error: %v", err)
+			}
+			if resolved != nil {
+				t.Fatalf("resolved = %#v, want nil", resolved)
+			}
+		})
 	}
 }

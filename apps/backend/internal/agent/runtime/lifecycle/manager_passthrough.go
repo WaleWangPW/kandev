@@ -143,6 +143,7 @@ func (m *Manager) GetPassthroughBuffer(ctx context.Context, sessionID string) (s
 // including Kandev metadata and required credentials from the agent runtime config.
 func (m *Manager) buildPassthroughEnv(ctx context.Context, execution *AgentExecution, requiredEnv []string) (map[string]string, error) {
 	env := execution.RuntimeEnvironment()
+	hasRuntimeSnapshot := env != nil
 	if env == nil {
 		env = make(map[string]string)
 	}
@@ -150,8 +151,10 @@ func (m *Manager) buildPassthroughEnv(ctx context.Context, execution *AgentExecu
 	env["KANDEV_SESSION_ID"] = execution.SessionID
 	env["KANDEV_AGENT_PROFILE_ID"] = execution.officeProfileID()
 	env["KANDEV_EXECUTION_PROFILE_ID"] = execution.AgentProfileID
-	if err := m.mergeAgentProfileEnv(ctx, execution.AgentProfileID, env); err != nil {
-		return nil, fmt.Errorf("resolve passthrough profile environment: %w", err)
+	if !hasRuntimeSnapshot {
+		if err := m.mergeAgentProfileEnvForExecution(ctx, execution, env); err != nil {
+			return nil, fmt.Errorf("resolve passthrough profile environment: %w", err)
+		}
 	}
 	if m.credsMgr != nil {
 		for _, credKey := range requiredEnv {
@@ -870,14 +873,26 @@ func (m *Manager) restartPassthroughProcess(ctx context.Context, execution *Agen
 		zap.String("session_id", execution.SessionID),
 		zap.String("old_process_id", execution.PassthroughProcessID))
 
-	// 1. Stop the current PTY process.
-	// Clear PassthroughProcessID before stopping so that handlePassthroughStatus
-	// doesn't trigger auto-restart for the deliberately-killed process.
+	// 1. Resolve the replacement command and environment before touching the
+	// current PTY. A profile-secret failure must leave the active session usable.
 	interactiveRunner := m.GetInteractiveRunner()
 	if interactiveRunner == nil {
 		return fmt.Errorf("interactive runner not available")
 	}
 
+	// Build fresh command (no SessionID, no Resume, no Prompt).
+	pt, rt, cmd, err := m.freshPassthroughCommand(ctx, execution)
+	if err != nil {
+		return err
+	}
+	env, err := m.buildPassthroughEnv(ctx, execution, rt.RequiredEnv)
+	if err != nil {
+		return err
+	}
+
+	// 2. Stop the current PTY process. Clear PassthroughProcessID before
+	// stopping so handlePassthroughStatus does not trigger auto-restart for
+	// the deliberately-killed process.
 	oldProcessID := execution.PassthroughProcessID
 	execution.PassthroughProcessID = ""
 	execution.PassthroughStartedAt = time.Time{}
@@ -889,17 +904,7 @@ func (m *Manager) restartPassthroughProcess(ctx context.Context, execution *Agen
 			zap.Error(err))
 	}
 
-	// 2. Build fresh command (no SessionID, no Resume, no Prompt)
-	pt, rt, cmd, err := m.freshPassthroughCommand(ctx, execution)
-	if err != nil {
-		return err
-	}
-
 	// 3. Start new PTY process with ImmediateStart (terminal is already connected)
-	env, err := m.buildPassthroughEnv(ctx, execution, rt.RequiredEnv)
-	if err != nil {
-		return err
-	}
 	startReq := buildInteractiveStartRequest(execution.SessionID, execution, pt, env, cmd, rt.StripEnv, true)
 
 	processInfo, err := interactiveRunner.Start(ctx, startReq)
