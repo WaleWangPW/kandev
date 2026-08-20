@@ -14,11 +14,13 @@ import (
 const gitHubTokenUsername = "x-access-token"
 
 var (
-	ErrCredentialLeaseInvalid = gitcredentials.ErrLeaseInvalid
-	ErrCredentialLeaseExpired = gitcredentials.ErrLeaseExpired
-	ErrCredentialLeaseRevoked = gitcredentials.ErrLeaseRevoked
-	ErrCredentialLeaseLimit   = gitcredentials.ErrLeaseLimit
-	ErrCredentialScopeDenied  = gitcredentials.ErrScopeDenied
+	ErrCredentialLeaseInvalid             = gitcredentials.ErrLeaseInvalid
+	ErrCredentialLeaseExpired             = gitcredentials.ErrLeaseExpired
+	ErrCredentialLeaseRevoked             = gitcredentials.ErrLeaseRevoked
+	ErrCredentialLeaseLimit               = gitcredentials.ErrLeaseLimit
+	ErrCredentialScopeDenied              = gitcredentials.ErrScopeDenied
+	ErrCredentialReissueCapabilityInvalid = gitcredentials.ErrReissueCapabilityInvalid
+	ErrCredentialReissueCapabilityExpired = gitcredentials.ErrReissueCapabilityExpired
 )
 
 // BrokerScopeAuthorizer verifies task/workspace/repository ownership. It is
@@ -62,6 +64,21 @@ type CredentialLease struct {
 
 type BrokerCredentialRequest struct {
 	Lease            string
+	TaskID           string
+	SessionID        string
+	RepositoryID     string
+	Owner            string
+	Repo             string
+	Host             string
+	Path             string
+	ProviderID       string
+	ParentProviderID string
+}
+
+// CredentialLeaseReissueRequest is authorized only by its opaque execution
+// capability; it deliberately has no lease field.
+type CredentialLeaseReissueRequest struct {
+	Capability       string
 	TaskID           string
 	SessionID        string
 	RepositoryID     string
@@ -154,6 +171,25 @@ func (b *CredentialBroker) Resolve(ctx context.Context, req BrokerCredentialRequ
 	return &BrokerCredential{
 		Username: credential.Username, Password: credential.Password, ExpiresAt: credential.ExpiresAt, Principal: principal,
 	}, nil
+}
+
+func (b *CredentialBroker) Reissue(ctx context.Context, req CredentialLeaseReissueRequest) (*CredentialLease, error) {
+	if b == nil || b.broker == nil {
+		return nil, ErrGitHubNotConfigured
+	}
+	path := req.Path
+	if strings.TrimSpace(path) == "" {
+		path = githubCredentialPath(req.Owner, req.Repo)
+	}
+	lease, err := b.broker.Reissue(ctx, gitcredentials.ReissueRequest{
+		Capability: req.Capability, TaskID: req.TaskID, SessionID: req.SessionID,
+		RepositoryID: req.RepositoryID, Host: req.Host, Path: path,
+		IdentityProviderID: req.ProviderID, ParentProviderID: req.ParentProviderID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &CredentialLease{Token: lease.Token, ExpiresAt: lease.ExpiresAt}, nil
 }
 
 func (b *CredentialBroker) RevokeTask(taskID string) {

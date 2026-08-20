@@ -68,6 +68,7 @@ func (c *Controller) RegisterHTTPRoutes(router *gin.Engine) {
 	api.DELETE("/personal-connection", c.httpDisconnectPersonalAuth)
 	api.GET("/credentials/resolve", c.httpCredentialBrokerReady)
 	api.POST("/credentials/resolve", c.httpResolveCredentialLease)
+	api.POST("/credentials/reissue", c.httpReissueCredentialLease)
 
 	api.GET("/task-prs", c.httpListTaskPRs)
 	api.POST("/task-prs", c.httpCreateTaskPR)

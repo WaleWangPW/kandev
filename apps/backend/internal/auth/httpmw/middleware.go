@@ -218,6 +218,10 @@ func isPublicPath(method, path string) bool {
 		// readiness probe, POST redeems the lease; both self-authenticate
 		// inside the handler, never off request identity.
 		return method == http.MethodGet || method == http.MethodPost
+	case "/api/v1/github/credentials/reissue":
+		// The encrypted execution capability is the credential. The handler
+		// checks its expiry and exact task/session/repository scope.
+		return method == http.MethodPost
 	}
 	switch {
 	case strings.HasPrefix(path, "/api/v1/automations/webhook/"):

@@ -16,6 +16,7 @@ import (
 	"github.com/kandev/kandev/internal/auth/httpmw"
 	authstore "github.com/kandev/kandev/internal/auth/store"
 	"github.com/kandev/kandev/internal/common/config"
+	"github.com/kandev/kandev/internal/gitcredentials"
 	userstore "github.com/kandev/kandev/internal/user/store"
 )
 
@@ -24,6 +25,16 @@ import (
 // no json tags, so it cannot be marshaled directly for this HTTP-level test.
 type resolveCredentialLeaseBody struct {
 	Lease        string `json:"lease"`
+	TaskID       string `json:"task_id"`
+	SessionID    string `json:"session_id"`
+	RepositoryID string `json:"repository_id"`
+	Owner        string `json:"owner"`
+	Repo         string `json:"repo"`
+	Host         string `json:"host"`
+}
+
+type reissueCredentialLeaseBody struct {
+	Capability   string `json:"capability"`
 	TaskID       string `json:"task_id"`
 	SessionID    string `json:"session_id"`
 	RepositoryID string `json:"repository_id"`
@@ -146,8 +157,44 @@ func TestCredentialBrokerRoutesPassRealAuthMiddleware(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
 		}
-		if !bytes.Contains(rec.Body.Bytes(), []byte("github_credential_denied")) {
-			t.Fatalf("body = %s, want broker code github_credential_denied", rec.Body.String())
+		if !bytes.Contains(rec.Body.Bytes(), []byte("github_credential_lease_invalid")) {
+			t.Fatalf("body = %s, want broker code github_credential_lease_invalid", rec.Body.String())
 		}
 	})
+}
+
+func TestCredentialBrokerReissueRouteAcceptsOnlyScopedCapability(t *testing.T) {
+	broker, _, _ := newPATCredentialBroker(t)
+	signer, err := gitcredentials.NewReissueCapabilitySigner("test-signing-key")
+	if err != nil {
+		t.Fatalf("NewReissueCapabilitySigner() error = %v", err)
+	}
+	broker.broker.SetReissueCapabilitySigner(signer)
+	_, capability, err := broker.broker.IssueWithReissueCapability(t.Context(), gitcredentials.Scope{
+		ProviderID: "github", WorkspaceID: "workspace-1", TaskID: "task-1", SessionID: "session-1",
+		RepositoryID: "repository-1", Host: "github.com", Path: "/kdlbs/kandev.git",
+	})
+	if err != nil {
+		t.Fatalf("IssueWithReissueCapability() error = %v", err)
+	}
+	router := newBrokerHTTPTestRouter(t, broker)
+	post := func(body reissueCredentialLeaseBody) *httptest.ResponseRecorder {
+		raw, marshalErr := json.Marshal(body)
+		if marshalErr != nil {
+			t.Fatalf("marshal reissue request: %v", marshalErr)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/github/credentials/reissue", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+	request := reissueCredentialLeaseBody{Capability: capability.Token, TaskID: "task-1", SessionID: "session-1", RepositoryID: "repository-1", Owner: "kdlbs", Repo: "kandev", Host: "github.com"}
+	if rec := post(request); rec.Code != http.StatusOK {
+		t.Fatalf("valid reissue status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	request.Capability += "forged"
+	if rec := post(request); rec.Code != http.StatusUnauthorized || !bytes.Contains(rec.Body.Bytes(), []byte("github_credential_reissue_denied")) {
+		t.Fatalf("forged reissue status/body = %d/%s", rec.Code, rec.Body.String())
+	}
 }

@@ -270,6 +270,37 @@ func (c *Controller) httpResolveCredentialLease(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, credential)
 }
 
+func (c *Controller) httpReissueCredentialLease(ctx *gin.Context) {
+	var request struct {
+		Capability       string `json:"capability"`
+		TaskID           string `json:"task_id"`
+		SessionID        string `json:"session_id"`
+		RepositoryID     string `json:"repository_id"`
+		Owner            string `json:"owner"`
+		Repo             string `json:"repo"`
+		Host             string `json:"host"`
+		Path             string `json:"path"`
+		ProviderID       string `json:"provider_id"`
+		ParentProviderID string `json:"parent_provider_id"`
+	}
+	if err := ctx.ShouldBindJSON(&request); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"code": "github_invalid_request", "error": "invalid payload"})
+		return
+	}
+	lease, err := c.service.ReissueGitHubCredentialLease(ctx.Request.Context(), CredentialLeaseReissueRequest{
+		Capability: request.Capability, TaskID: request.TaskID, SessionID: request.SessionID,
+		RepositoryID: request.RepositoryID, Owner: request.Owner, Repo: request.Repo,
+		Host: request.Host, Path: request.Path, ProviderID: request.ProviderID,
+		ParentProviderID: request.ParentProviderID,
+	})
+	if err != nil {
+		writeGitHubAuthError(ctx, err)
+		return
+	}
+	ctx.Header("Cache-Control", "no-store")
+	ctx.JSON(http.StatusOK, lease)
+}
+
 func (c *Controller) httpCredentialBrokerReady(ctx *gin.Context) {
 	if c == nil || c.service == nil || !c.service.CredentialBrokerReady() {
 		ctx.Status(http.StatusServiceUnavailable)
@@ -325,8 +356,15 @@ func githubAuthErrorResponse(err error) (int, string) {
 		status, code = http.StatusBadRequest, "github_invalid_callback"
 	case errors.Is(err, ErrInvalidWebhookSignature):
 		status, code = http.StatusUnauthorized, "github_invalid_webhook_signature"
-	case errors.Is(err, ErrCredentialLeaseInvalid), errors.Is(err, ErrCredentialLeaseExpired),
-		errors.Is(err, ErrCredentialLeaseRevoked), errors.Is(err, ErrCredentialScopeDenied):
+	case errors.Is(err, ErrCredentialLeaseInvalid):
+		status, code = http.StatusUnauthorized, "github_credential_lease_invalid"
+	case errors.Is(err, ErrCredentialLeaseExpired):
+		status, code = http.StatusUnauthorized, "github_credential_lease_expired"
+	case errors.Is(err, ErrCredentialLeaseRevoked):
+		status, code = http.StatusUnauthorized, "github_credential_lease_revoked"
+	case errors.Is(err, ErrCredentialReissueCapabilityInvalid), errors.Is(err, ErrCredentialReissueCapabilityExpired):
+		status, code = http.StatusUnauthorized, "github_credential_reissue_denied"
+	case errors.Is(err, ErrCredentialScopeDenied):
 		status, code = http.StatusUnauthorized, "github_credential_denied"
 	case errors.Is(err, ErrInvalidToken):
 		status, code = http.StatusBadRequest, "github_invalid_token"
