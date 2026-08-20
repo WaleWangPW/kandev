@@ -1359,7 +1359,9 @@ func (m *Manager) launchInternal(ctx context.Context, req *LaunchRequest) (*Agen
 		return nil, err
 	}
 	if profileInfo != nil && len(profileInfo.EnvVars) > 0 {
-		m.cacheResolvedProfileEnv(execution, m.resolveAgentProfileEnvVars(ctx, profileInfo.EnvVars))
+		if resolved, err := m.resolveAgentProfileEnvVars(ctx, profileInfo.EnvVars); err == nil {
+			m.cacheResolvedProfileEnv(execution, resolved)
+		}
 	}
 	if !reqWithWorktree.IsPassthrough {
 		if err := m.materializeRuntimeProjectMCP(ctx, execution, agentConfig); err != nil {
@@ -1835,7 +1837,10 @@ func getAttachmentsFromMetadata(execution *AgentExecution) []MessageAttachment {
 // Returns the effective boot command (full command with adapter args, or base command).
 func (m *Manager) configureAndStartAgent(ctx context.Context, execution *AgentExecution, approvalPolicy string) (string, error) {
 	env := runtimeEnvFromMetadata(execution.MetadataSnapshot())
-	m.mergeAgentProfileEnvForExecution(ctx, execution, env)
+	if err := m.mergeAgentProfileEnvForExecution(ctx, execution, env); err != nil {
+		m.updateExecutionError(execution.ID, "failed to resolve agent profile environment: "+err.Error())
+		return "", fmt.Errorf("resolve agent profile environment: %w", err)
+	}
 	if err := spillLargeWakePayloadEnv(env, execution.WorkspacePath, m.logger.Zap()); err != nil {
 		m.updateExecutionError(execution.ID, "failed to prepare agent env: "+err.Error())
 		return "", fmt.Errorf("failed to prepare agent env: %w", err)

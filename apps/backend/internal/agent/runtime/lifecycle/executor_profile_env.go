@@ -32,9 +32,9 @@ func (m *Manager) SetExecutorProfileReader(reader ExecutorProfileReader) {
 // launch request), so a user shell terminal opened on the workspace sees the
 // same tokens the agent and the repository setup script do.
 //
-// Resolution is best-effort: a missing reader, session, environment, profile, or
-// secret yields the entries that could be resolved rather than failing the
-// terminal.
+// Resolution is best-effort for missing profile records. A secret failure yields
+// no profile values, preventing a terminal from receiving a partial profile
+// environment.
 func (m *Manager) ExecutorProfileEnvForSession(ctx context.Context, sessionID, taskEnvironmentID string) map[string]string {
 	if m.executorProfileReader == nil {
 		return nil
@@ -57,7 +57,15 @@ func (m *Manager) ExecutorProfileEnvForSession(ctx context.Context, sessionID, t
 	}
 	// ExecutorProfile.EnvVars and agent-profile env vars are the same type, so
 	// the secret-revealing resolver is shared.
-	return m.resolveAgentProfileEnvVars(ctx, profile.EnvVars)
+	resolved, err := m.resolveAgentProfileEnvVars(ctx, profile.EnvVars)
+	if err != nil {
+		m.logger.Warn("failed to resolve executor profile environment for terminal",
+			zap.String("session_id", sessionID),
+			zap.String("executor_profile_id", profileID),
+			zap.Error(err))
+		return nil
+	}
+	return resolved
 }
 
 // terminalExecutorProfileID picks the executor profile the terminal should

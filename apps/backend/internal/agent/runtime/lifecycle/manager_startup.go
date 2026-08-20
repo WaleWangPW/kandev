@@ -319,9 +319,13 @@ func (m *Manager) buildEnvForExecution(ctx context.Context, executionID string, 
 	}
 
 	if profileInfo != nil {
-		m.mergeAgentProfileEnvFromInfo(ctx, profileInfo, env)
+		if err := m.mergeAgentProfileEnvFromInfo(ctx, profileInfo, env); err != nil {
+			return nil, fmt.Errorf("resolve agent profile environment: %w", err)
+		}
 	} else {
-		m.mergeAgentProfileEnv(ctx, executionProfileID(req), env)
+		if err := m.mergeAgentProfileEnv(ctx, executionProfileID(req), env); err != nil {
+			return nil, fmt.Errorf("resolve agent profile environment: %w", err)
+		}
 	}
 
 	// Add standard variables for recovery after backend restart

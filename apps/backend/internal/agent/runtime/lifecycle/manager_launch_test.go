@@ -491,6 +491,25 @@ func TestBuildEnvForExecution_ResolvesSecretBackedProfileEnv(t *testing.T) {
 	}
 }
 
+func TestBuildEnvForExecution_FailsClosedWhenProfileSecretIsUnavailable(t *testing.T) {
+	mgr := newTestManager(t)
+	mgr.secretStore = newInMemorySecretStore()
+
+	_, err := mgr.buildEnvForExecution(
+		context.Background(),
+		"exec-1",
+		&LaunchRequest{AgentProfileID: "profile-1"},
+		nil,
+		&AgentProfileInfo{EnvVars: []settingsmodels.ProfileEnvVar{{
+			Key:      "PROFILE_TOKEN",
+			SecretID: "missing-secret",
+		}}},
+	)
+	if err == nil {
+		t.Fatal("buildEnvForExecution succeeded with an unavailable profile secret")
+	}
+}
+
 func TestBuildEnvForExecution_SeparatesOfficeAndExecutionProfiles(t *testing.T) {
 	mgr := newTestManager(t)
 	profileInfo := &AgentProfileInfo{

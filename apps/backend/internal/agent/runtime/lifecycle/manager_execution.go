@@ -822,7 +822,9 @@ func (m *Manager) initializeCreatedExecution(
 	// The effective runtime snapshot (including repository secrets) is already
 	// captured by ToAgentExecution and must not be mislabeled as profile data.
 	if preparation.profileInfo != nil && len(preparation.profileInfo.EnvVars) > 0 {
-		m.cacheResolvedProfileEnv(execution, m.resolveAgentProfileEnvVars(ctx, preparation.profileInfo.EnvVars))
+		if resolved, err := m.resolveAgentProfileEnvVars(ctx, preparation.profileInfo.EnvVars); err == nil {
+			m.cacheResolvedProfileEnv(execution, resolved)
+		}
 	}
 
 	if info.ACPSessionID != "" {

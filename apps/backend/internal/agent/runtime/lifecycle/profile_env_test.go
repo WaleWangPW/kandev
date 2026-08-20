@@ -81,10 +81,13 @@ func TestResolveAgentProfileEnvVars_SecretAndValue(t *testing.T) {
 
 	log, _ := logger.NewLogger(logger.LoggingConfig{Level: "error", Format: "json"})
 	m := &Manager{logger: log, secretStore: store}
-	resolved := m.resolveAgentProfileEnvVars(context.Background(), []settingsmodels.ProfileEnvVar{
+	resolved, err := m.resolveAgentProfileEnvVars(context.Background(), []settingsmodels.ProfileEnvVar{
 		{Key: "PLAIN", Value: "plain"},
 		{Key: "FROM_SECRET", SecretID: "sec-1"},
 	})
+	if err != nil {
+		t.Fatalf("resolveAgentProfileEnvVars: %v", err)
+	}
 	if resolved["PLAIN"] != "plain" {
 		t.Fatalf("PLAIN: got %q", resolved["PLAIN"])
 	}
@@ -104,10 +107,13 @@ func TestResolveAgentProfileEnvVars_RejectsWorkspaceSecret(t *testing.T) {
 
 	log, _ := logger.NewLogger(logger.LoggingConfig{Level: "error", Format: "json"})
 	m := &Manager{logger: log, secretStore: store}
-	resolved := m.resolveAgentProfileEnvVars(context.Background(), []settingsmodels.ProfileEnvVar{{
+	resolved, err := m.resolveAgentProfileEnvVars(context.Background(), []settingsmodels.ProfileEnvVar{{
 		Key: "WORKSPACE_ONLY", SecretID: "workspace-secret",
 	}})
-	if _, ok := resolved["WORKSPACE_ONLY"]; ok {
+	if err == nil {
+		t.Fatal("workspace secret resolved without an error")
+	}
+	if len(resolved) != 0 {
 		t.Fatalf("workspace secret was resolved into profile environment: %#v", resolved)
 	}
 }
