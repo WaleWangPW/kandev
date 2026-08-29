@@ -1,7 +1,7 @@
 ---
 id: "01-fail-closed-stale-workspace"
 title: "Fail closed on stale executor-transition workspaces"
-status: pending
+status: in_progress
 wave: 1
 depends_on: []
 plan: "plan.md"
@@ -62,3 +62,10 @@ Report the exact commit/tree, regression tests, focused test receipts, spec
 lint receipt, residual risks, and the runtime rebind verification result. Mark
 this task and `plan.md` done only after the implementation and verification
 both pass.
+
+## Current receipt
+
+Implementation and focused verification pass on 2026-08-29. The source build
+passes. The task stays `in_progress` until an isolated v0.92.1 runtime proves a
+fresh local session binds the canonical repository and the rejected legacy path
+is never projected or started.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -108,6 +109,21 @@ func (p *LocalPreparer) Prepare(ctx context.Context, req *EnvPrepareRequest, onP
 			Error:        prepErr,
 		}, prepErr
 	}
+	if req.RepositoryID != "" || req.RepositoryPath != "" {
+		if err := validateLocalRepositoryWorkspace(ctx, workspacePath, req.RepositoryPath); err != nil {
+			completeStepError(&step, "workspace is not the expected Git repository checkout")
+			steps = append(steps, step)
+			reportProgress(onProgress, step, stepIdx, totalSteps)
+			prepErr := fmt.Errorf("validate local repository workspace: %w", err)
+			return &EnvPrepareResult{
+				Success:      false,
+				Steps:        steps,
+				ErrorMessage: step.Error,
+				Duration:     time.Since(start),
+				Error:        worktree.ErrReuseWorktreeUnavailable,
+			}, prepErr
+		}
+	}
 	completeStepSuccess(&step)
 	steps = append(steps, step)
 	reportProgress(onProgress, step, stepIdx, totalSteps)
@@ -171,6 +187,50 @@ func (p *LocalPreparer) Prepare(ctx context.Context, req *EnvPrepareRequest, onP
 		WorkspacePath: workspacePath,
 		Duration:      time.Since(start),
 	}, nil
+}
+
+func validateLocalRepositoryWorkspace(ctx context.Context, workspacePath, repositoryPath string) error {
+	workspaceRoot, err := localGitTopLevel(ctx, workspacePath)
+	if err != nil {
+		return err
+	}
+	if repositoryPath == "" {
+		return nil
+	}
+	repositoryRoot, err := localGitTopLevel(ctx, repositoryPath)
+	if err != nil {
+		return err
+	}
+	workspaceRoot, err = filepath.EvalSymlinks(workspaceRoot)
+	if err != nil {
+		return err
+	}
+	repositoryRoot, err = filepath.EvalSymlinks(repositoryRoot)
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(workspaceRoot) != filepath.Clean(repositoryRoot) {
+		return worktree.ErrReuseWorktreeUnavailable
+	}
+	return nil
+}
+
+func localGitTopLevel(ctx context.Context, path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return "", worktree.ErrReuseWorktreeUnavailable
+	}
+	cmd := subproc.NewGitCommand(ctx, "rev-parse", "--show-toplevel")
+	cmd.Dir = path
+	out, err := subproc.RunGitCombinedOutputClass(ctx, subproc.GitLifecycle, cmd)
+	if err != nil {
+		return "", worktree.ErrReuseWorktreeUnavailable
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" {
+		return "", worktree.ErrReuseWorktreeUnavailable
+	}
+	return root, nil
 }
 
 // readCurrentBranchForLocal returns the workspace's currently-checked-out

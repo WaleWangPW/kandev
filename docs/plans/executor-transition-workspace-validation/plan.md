@@ -1,7 +1,7 @@
 ---
 spec: docs/specs/tasks/system-design/additional-session-workspace-reuse.md
 created: 2026-08-29
-status: pending
+status: in_progress
 ---
 
 # Implementation Plan: Executor Transition Workspace Validation
@@ -36,7 +36,7 @@ inventory. Preserve existing tasks and all filesystem evidence.
 
 ## Implementation waves
 
-1. [ ] [task-01-fail-closed-stale-workspace](task-01-fail-closed-stale-workspace.md)
+1. [ ] [task-01-fail-closed-stale-workspace](task-01-fail-closed-stale-workspace.md) — implementation and focused verification pass; isolated runtime rebind remains
 
 ## Verification
 
@@ -55,3 +55,26 @@ python3 scripts/lint-spec-files.py --all
   executor-owned inventory remains the authority.
 - A defense-in-depth lifecycle guard must not convert repository-less tasks or
   quick chats into false failures.
+
+## Implementation receipt
+
+Implemented locally on 2026-08-29. The patch clears stale session workspace
+authority on executor transition, rebinds the single durable environment only
+after a successful target-executor launch, removes stale backend-specific
+runtime/worktree projections, and validates repo-backed host paths before both
+launch preparation and cold execution creation.
+
+Passing verification:
+
+- Full `internal/orchestrator/executor` package.
+- Focused lifecycle local-preparer, workspace-admission, and workspace-execution
+  tests.
+- Focused task-service workspace-info tests.
+- Backend `make build`, including macOS and Linux agentctl binaries and Kandev.
+- Full specification lint and `git diff --check`.
+
+The full lifecycle package retains four failures reproduced unchanged on the
+clean v0.92.1 base: three stale-worktree error-classification expectations on
+the external-volume layout and one macOS Unix-socket path-length failure. They
+are not introduced by this implementation. Runtime rebind against an isolated
+data/config root remains required before this plan can be marked complete.

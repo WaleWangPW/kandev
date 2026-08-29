@@ -1714,6 +1714,7 @@ func (e *Executor) buildLaunchAgentRequest(ctx context.Context, task *v1.Task, s
 		req.ExecutorConfig = execConfig.ExecutorCfg
 		req.SetupScript = execConfig.SetupScript
 	}
+	prepareExecutorTransition(req, existingEnv)
 	// A task environment is reusable only by the executor type that owns it.
 	// If the caller selected a different profile, this launch must provision
 	// the new backend instead of attaching to the old environment. Resolve this
@@ -2335,7 +2336,21 @@ func (e *Executor) persistTaskEnvironment(
 		// empty paths (e.g. before the worktree resolved) stayed permanently
 		// broken. Sandbox ID gets refreshed too in case a fallback created a
 		// new sprite.
-		if workspacePath != "" {
+		executorTransition := existingEnv.ExecutorType != "" && existingEnv.ExecutorType != req.ExecutorType
+		if executorTransition {
+			// Rebind the one durable environment row only after the target
+			// executor has launched successfully. Clear backend-specific handles
+			// before applying response values so a local launch cannot later
+			// project an old container, sprite, or worktree runtime as current.
+			existingEnv.ExecutorType = req.ExecutorType
+			existingEnv.ExecutorID = execCfg.ExecutorID
+			existingEnv.ExecutorProfileID = session.ExecutorProfileID
+			existingEnv.WorkspacePath = workspacePath
+			existingEnv.ContainerID = ""
+			existingEnv.ContainerBootstrapNonceSecretID = ""
+			existingEnv.ContainerControlAuthTokenSecretID = ""
+			existingEnv.SandboxID = ""
+		} else if workspacePath != "" {
 			existingEnv.WorkspacePath = workspacePath
 		}
 		if resp.ContainerID != "" {
@@ -2383,7 +2398,7 @@ func (e *Executor) persistTaskEnvironment(
 		// reader observes a ready environment with an empty inventory for a
 		// repo-backed task — exactly the state the guards elsewhere in this PR
 		// exist to prevent (see validateReuseEnvironmentInventory).
-		if err := e.persistTaskEnvironmentRepos(ctx, existingEnv.ID, repos); err != nil {
+		if err := e.persistTaskEnvironmentReposForTransition(ctx, existingEnv.ID, repos, executorTransition); err != nil {
 			existingEnv.Status = previousStatus
 			existingEnv.MaterializationSessionID = previousMaterializationSessionID
 			return err
@@ -2593,6 +2608,10 @@ func buildTaskEnvironmentRepos(worktrees []RepoWorktreeResult) []*models.TaskEnv
 // task), including cases where stale or legacy rows need the successful launch
 // result written back for the next handoff.
 func (e *Executor) persistTaskEnvironmentRepos(ctx context.Context, envID string, repos []*models.TaskEnvironmentRepo) error {
+	return e.persistTaskEnvironmentReposForTransition(ctx, envID, repos, false)
+}
+
+func (e *Executor) persistTaskEnvironmentReposForTransition(ctx context.Context, envID string, repos []*models.TaskEnvironmentRepo, replacePhysical bool) error {
 	if envID == "" || len(repos) == 0 {
 		return nil
 	}
@@ -2618,14 +2637,14 @@ func (e *Executor) persistTaskEnvironmentRepos(ctx context.Context, envID string
 		}
 		key := w.RepositoryID + "\x00" + w.BranchSlug
 		if row := byKey[key]; row != nil {
-			if err := e.refreshTaskEnvironmentRepo(ctx, row, w, i); err != nil {
+			if err := e.refreshTaskEnvironmentRepo(ctx, row, w, i, replacePhysical); err != nil {
 				return err
 			}
 			continue
 		}
 		if w.BranchSlug != "" {
 			if row := legacyFlatByRepo[w.RepositoryID]; row != nil {
-				if err := e.refreshTaskEnvironmentRepo(ctx, row, w, i); err != nil {
+				if err := e.refreshTaskEnvironmentRepo(ctx, row, w, i, replacePhysical); err != nil {
 					return err
 				}
 				delete(legacyFlatByRepo, w.RepositoryID)
@@ -2654,14 +2673,14 @@ func (e *Executor) persistTaskEnvironmentRepos(ctx context.Context, envID string
 	return nil
 }
 
-func (e *Executor) refreshTaskEnvironmentRepo(ctx context.Context, row, w *models.TaskEnvironmentRepo, position int) error {
-	if !taskEnvironmentRepoNeedsRefresh(row, w, position) {
+func (e *Executor) refreshTaskEnvironmentRepo(ctx context.Context, row, w *models.TaskEnvironmentRepo, position int, replacePhysical bool) error {
+	if !taskEnvironmentRepoNeedsRefresh(row, w, position, replacePhysical) {
 		return nil
 	}
 	row.BranchSlug = w.BranchSlug
 	// Concrete launch results populate the physical tuple together; inventory-only
 	// rows have no WorktreeID and must not replace it.
-	if w.WorktreeID != "" {
+	if replacePhysical || w.WorktreeID != "" {
 		row.WorktreeID = w.WorktreeID
 		row.WorktreePath = w.WorktreePath
 		row.WorktreeBranch = w.WorktreeBranch
@@ -2679,9 +2698,9 @@ func (e *Executor) refreshTaskEnvironmentRepo(ctx context.Context, row, w *model
 	return nil
 }
 
-func taskEnvironmentRepoNeedsRefresh(row, w *models.TaskEnvironmentRepo, position int) bool {
+func taskEnvironmentRepoNeedsRefresh(row, w *models.TaskEnvironmentRepo, position int, replacePhysical bool) bool {
 	return row.BranchSlug != w.BranchSlug ||
-		(w.WorktreeID != "" &&
+		((replacePhysical || w.WorktreeID != "") &&
 			(row.WorktreeID != w.WorktreeID ||
 				row.WorktreePath != w.WorktreePath ||
 				row.WorktreeBranch != w.WorktreeBranch)) ||
