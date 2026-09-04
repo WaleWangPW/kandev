@@ -124,6 +124,21 @@ func TestValidateLaunchWorkspaceAdmissionRejectsUnrelatedRepository(t *testing.T
 	}
 }
 
+func TestValidateLaunchWorkspaceAdmissionDefersMissingWorktreeResume(t *testing.T) {
+	source := initGitRepo(t)
+	missing := filepath.Join(t.TempDir(), "removed-worktree")
+	req := &LaunchRequest{
+		ExecutorType:   string(models.ExecutorTypeWorktree),
+		RepositoryID:   "repository-1",
+		RepositoryPath: source,
+		ACPSessionID:   "acp-session-1",
+	}
+
+	if err := validateLaunchWorkspaceAdmission(context.Background(), req, missing); err != nil {
+		t.Fatalf("validateLaunchWorkspaceAdmission() rejected a missing worktree resume: %v", err)
+	}
+}
+
 func TestTruncateID(t *testing.T) {
 	require.Equal(t, "abc", truncateID("abc", 8))
 	require.Equal(t, "abcdefgh", truncateID("abcdefgh", 8))

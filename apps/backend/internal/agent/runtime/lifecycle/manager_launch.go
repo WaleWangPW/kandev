@@ -1696,11 +1696,26 @@ func validateLaunchWorkspaceAdmission(ctx context.Context, req *LaunchRequest, w
 		} else if len(repositories) > 1 && validateLocalRepositoryWorkspace(ctx, candidate, repository.RepositoryPath) != nil {
 			candidate = filepath.Join(workspacePath, repository.RepoName)
 		}
+		// A missing worktree during ACP resume must reach WorktreePreparer.
+		// It classifies a deleted branch and returns the typed recovery error
+		// used by the explicit replacement action. The preparer still validates
+		// the saved worktree and task environment identity before any reuse.
+		if shouldDeferMissingWorktreeResumeValidation(req, candidate) {
+			continue
+		}
 		if err := validateLocalRepositoryWorkspace(ctx, candidate, repository.RepositoryPath); err != nil {
 			return fmt.Errorf("validate launch workspace repository %q: %w", repository.RepositoryID, err)
 		}
 	}
 	return nil
+}
+
+func shouldDeferMissingWorktreeResumeValidation(req *LaunchRequest, workspacePath string) bool {
+	if req == nil || req.ExecutorType != string(models.ExecutorTypeWorktree) || req.ACPSessionID == "" || workspacePath == "" {
+		return false
+	}
+	_, err := os.Stat(workspacePath)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 // buildExecutionFromInstance turns the spawned ExecutorInstance + request shape
