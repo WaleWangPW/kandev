@@ -131,3 +131,27 @@ func TestCodexACP_PassthroughStrategyDedupesSameNameHTTPAndSSE(t *testing.T) {
 		t.Errorf("dual-injection: SSE /sse url leaked into -c argv; got: %s", joined)
 	}
 }
+
+// TestCodexACP_PassthroughStrategyDedupesSameNameSSEFirstThenHTTP covers the
+// same dual-injection scenario with the entries reversed: kandev/sse arrives
+// before kandev/http. HTTP-beats-SSE is a documented contract and must hold
+// regardless of input order; the surviving entry must be the /mcp endpoint,
+// otherwise codex-acp rejects the SSE transport with invalidRequest.
+func TestCodexACP_PassthroughStrategyDedupesSameNameSSEFirstThenHTTP(t *testing.T) {
+	strategy := mcpconfig.CodexStrategy{}
+	servers := []types.McpServer{
+		{Name: "kandev", Type: "sse", URL: "http://localhost:10005/sse"},
+		{Name: "kandev", Type: "http", URL: "http://localhost:10005/mcp"},
+	}
+	art, err := strategy.BuildPassthroughMCP(servers, mcpconfig.PassthroughPaths{})
+	if err != nil {
+		t.Fatalf("BuildPassthroughMCP: %v", err)
+	}
+	joined := strings.Join(art.Args, " ")
+	if !strings.Contains(joined, `mcp_servers.kandev.url="http://localhost:10005/mcp"`) {
+		t.Errorf("dual-injection (sse first): HTTP /mcp url missing from -c argv; got: %s", joined)
+	}
+	if strings.Contains(joined, `mcp_servers.kandev.url="http://localhost:10005/sse"`) {
+		t.Errorf("dual-injection (sse first): SSE /sse url leaked into -c argv; got: %s", joined)
+	}
+}
