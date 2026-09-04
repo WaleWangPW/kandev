@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -34,6 +35,58 @@ func TestValidateWorkspaceInfoForExecutionAcceptsCanonicalLocalRepository(t *tes
 	})
 	if err != nil {
 		t.Fatalf("validateWorkspaceInfoForExecution() error = %v", err)
+	}
+}
+
+func TestValidateWorkspaceInfoForExecutionAcceptsMatchingWorktree(t *testing.T) {
+	source := initGitRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "linked")
+	cmd := exec.Command("git", "worktree", "add", "--detach", worktreePath)
+	cmd.Dir = source
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v: %s", err, output)
+	}
+
+	err := validateWorkspaceInfoForExecution(context.Background(), &WorkspaceInfo{
+		ExecutorType:  string(models.ExecutorTypeWorktree),
+		WorkspacePath: worktreePath,
+		WorkspaceRepositories: []WorkspaceRepositorySpec{{
+			RepositoryID: "repository-1", RepositoryPath: source, RepoName: "repository",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("validateWorkspaceInfoForExecution() error = %v", err)
+	}
+}
+
+func TestValidateWorkspaceInfoForExecutionRejectsUnrelatedWorktree(t *testing.T) {
+	source := initGitRepo(t)
+	other := initGitRepo(t)
+
+	err := validateWorkspaceInfoForExecution(context.Background(), &WorkspaceInfo{
+		ExecutorType:  string(models.ExecutorTypeWorktree),
+		WorkspacePath: other,
+		WorkspaceRepositories: []WorkspaceRepositorySpec{{
+			RepositoryID: "repository-1", RepositoryPath: source, RepoName: "repository",
+		}},
+	})
+	if err == nil {
+		t.Fatal("validateWorkspaceInfoForExecution() accepted an unrelated Git repository")
+	}
+}
+
+func TestValidateWorkspaceInfoForExecutionRequiresEnvironmentValidationMarker(t *testing.T) {
+	repository := initGitRepo(t)
+	err := validateWorkspaceInfoForExecution(context.Background(), &WorkspaceInfo{
+		TaskEnvironmentID: "env-1",
+		ExecutorType:      string(models.ExecutorTypeLocal),
+		WorkspacePath:     repository,
+		WorkspaceRepositories: []WorkspaceRepositorySpec{{
+			RepositoryID: "repository-1", RepositoryPath: repository, RepoName: "repository",
+		}},
+	})
+	if err == nil {
+		t.Fatal("validateWorkspaceInfoForExecution() accepted missing environment validation marker")
 	}
 }
 

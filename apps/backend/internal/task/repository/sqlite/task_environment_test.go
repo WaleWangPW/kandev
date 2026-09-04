@@ -224,6 +224,74 @@ func TestFinalizeTaskEnvironmentMaterializationAllowsEmptyInventoryForRepoLessTa
 	}
 }
 
+func TestPersistTaskEnvironmentTransitionReconcilesInventoryAtomically(t *testing.T) {
+	repo := newRepoForEntityTests(t)
+	ctx := context.Background()
+	seedWorkspace(t, repo, "workspace-transition")
+	if err := repo.CreateTask(ctx, &models.Task{ID: "task-transition", WorkspaceID: "workspace-transition", Title: "transition"}); err != nil {
+		t.Fatal(err)
+	}
+	env := &models.TaskEnvironment{
+		ID: "env-transition", TaskID: "task-transition", ExecutorType: string(models.ExecutorTypeLocal),
+		Status: models.TaskEnvironmentStatusReady, WorkspacePath: "/workspace/old",
+	}
+	if err := repo.CreateTaskEnvironment(ctx, env); err != nil {
+		t.Fatalf("CreateTaskEnvironment: %v", err)
+	}
+	for _, row := range []*models.TaskEnvironmentRepo{
+		{ID: "keep", TaskEnvironmentID: env.ID, RepositoryID: "repo-keep", BranchSlug: "main", WorktreeID: "wt-old"},
+		{ID: "remove", TaskEnvironmentID: env.ID, RepositoryID: "repo-remove", BranchSlug: "old", WorktreeID: "wt-remove"},
+	} {
+		if err := repo.CreateTaskEnvironmentRepo(ctx, row); err != nil {
+			t.Fatalf("CreateTaskEnvironmentRepo: %v", err)
+		}
+	}
+
+	env.ExecutorType = string(models.ExecutorTypeWorktree)
+	env.WorkspacePath = "/workspace/new"
+	if err := repo.PersistTaskEnvironmentTransition(ctx, env, []*models.TaskEnvironmentRepo{{
+		RepositoryID: "repo-keep", BranchSlug: "main", WorktreeID: "wt-new", WorktreePath: "/workspace/new/repo",
+	}}, true); err != nil {
+		t.Fatalf("PersistTaskEnvironmentTransition: %v", err)
+	}
+
+	persisted, err := repo.GetTaskEnvironment(ctx, env.ID)
+	if err != nil {
+		t.Fatalf("GetTaskEnvironment: %v", err)
+	}
+	if persisted.ExecutorType != string(models.ExecutorTypeWorktree) || persisted.WorkspacePath != "/workspace/new" {
+		t.Fatalf("environment = %#v, want rebound executor and path", persisted)
+	}
+	if len(persisted.Repos) != 2 {
+		t.Fatalf("repository inventory = %#v, want active row plus tombstone", persisted.Repos)
+	}
+	for _, row := range persisted.Repos {
+		if row.ID == "keep" && row.WorktreeID != "wt-new" {
+			t.Fatalf("kept row = %#v, want refreshed worktree", row)
+		}
+		if row.ID == "remove" && (row.Status != worktreeRepoStatusDeleted || row.DeletedAt == nil) {
+			t.Fatalf("removed row = %#v, want deleted tombstone", row)
+		}
+	}
+
+	env.ExecutorType = string(models.ExecutorTypeLocal)
+	env.WorkspacePath = "/workspace/recreated"
+	if err := repo.PersistTaskEnvironmentTransition(ctx, env, []*models.TaskEnvironmentRepo{{
+		RepositoryID: "repo-remove", BranchSlug: "old", WorktreeID: "wt-recreated",
+	}}, true); err != nil {
+		t.Fatalf("PersistTaskEnvironmentTransition recreate: %v", err)
+	}
+	persisted, err = repo.GetTaskEnvironment(ctx, env.ID)
+	if err != nil {
+		t.Fatalf("GetTaskEnvironment after recreate: %v", err)
+	}
+	for _, row := range persisted.Repos {
+		if row.ID == "remove" && (row.Status != worktreeRepoStatusActive || row.DeletedAt != nil || row.WorktreeID != "wt-recreated") {
+			t.Fatalf("recreated row = %#v, want active row", row)
+		}
+	}
+}
+
 func TestCreateTaskSessionWithWorkspaceBindingElectsAndAttaches(t *testing.T) {
 	repo := newRepoForEntityTests(t)
 	ctx := context.Background()
@@ -524,6 +592,40 @@ func TestUpdateTaskEnvironmentMissingReturnsSentinel(t *testing.T) {
 
 	if !errors.Is(err, ErrTaskEnvironmentNotFound) {
 		t.Fatalf("UpdateTaskEnvironment error = %v, want ErrTaskEnvironmentNotFound", err)
+	}
+}
+
+// @covers AC-TASKS-TASK-LAUNCH-FAILURE-RECOVERY-001.2
+// @covers AC-TASKS-TASK-LAUNCH-FAILURE-RECOVERY-001.8
+func TestUpdateTaskEnvironmentAllowsFailedMaterializationWithoutWorkspacePath(t *testing.T) {
+	repo := newRepoForHealTests(t)
+	ctx := context.Background()
+	insertTask(t, repo.db, "task-pathless-failed-materialization")
+
+	environment := &models.TaskEnvironment{
+		ID:                       "env-pathless-failed-materialization",
+		TaskID:                   "task-pathless-failed-materialization",
+		ExecutorType:             string(models.ExecutorTypeWorktree),
+		Status:                   models.TaskEnvironmentStatusCreating,
+		MaterializationSessionID: "session-materializer",
+	}
+	if err := repo.CreateTaskEnvironment(ctx, environment); err != nil {
+		t.Fatalf("CreateTaskEnvironment: %v", err)
+	}
+
+	environment.Status = models.TaskEnvironmentStatusFailed
+	environment.MaterializationSessionID = ""
+	if err := repo.UpdateTaskEnvironment(ctx, environment); err != nil {
+		t.Fatalf("UpdateTaskEnvironment: %v", err)
+	}
+
+	persisted, err := repo.GetTaskEnvironment(ctx, environment.ID)
+	if err != nil {
+		t.Fatalf("GetTaskEnvironment: %v", err)
+	}
+	if persisted.Status != models.TaskEnvironmentStatusFailed ||
+		persisted.WorkspacePath != "" || persisted.MaterializationSessionID != "" {
+		t.Fatalf("persisted environment = %+v, want pathless failed state without materialization claim", persisted)
 	}
 }
 

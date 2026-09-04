@@ -6,12 +6,14 @@ import (
 	"sort"
 
 	"github.com/kandev/kandev/internal/agent/runtime/lifecycle"
+	"github.com/kandev/kandev/internal/agentruntime"
 	"github.com/kandev/kandev/internal/task/models"
 	"github.com/kandev/kandev/internal/worktree"
 	"go.uber.org/zap"
 )
 
 const (
+	taskEnvironmentRepoStatusActive  = "active"
 	taskEnvironmentRepoStatusFailed  = "failed"
 	taskEnvironmentRepoStatusDeleted = "deleted"
 )
@@ -524,7 +526,14 @@ func executorRunningMatchesEnvironment(running *models.ExecutorRunning, env *mod
 }
 
 func applyExecutorRunningMetadata(req *LaunchAgentRequest, running *models.ExecutorRunning) {
-	if running.AgentExecutionID != "" && req.PreviousExecutionID == "" {
+	requestIsKubernetes := models.ExecutorType(req.ExecutorType) == models.ExecutorTypeKubernetes
+	runningIsKubernetes := running.Runtime == agentruntime.RuntimeKubernetes
+	mayReuseExecution := true
+	if requestIsKubernetes || runningIsKubernetes {
+		mayReuseExecution = requestIsKubernetes && runningIsKubernetes &&
+			req.SessionID != "" && running.SessionID == req.SessionID
+	}
+	if running.AgentExecutionID != "" && req.PreviousExecutionID == "" && mayReuseExecution {
 		req.PreviousExecutionID = running.AgentExecutionID
 	}
 	var metadata map[string]interface{}

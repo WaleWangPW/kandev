@@ -109,6 +109,21 @@ func TestLaunchResolveWorkspacePathDefersWorktreeCreation(t *testing.T) {
 	require.Empty(t, ws, "a first worktree launch has no ACP session and defers to the preparer")
 }
 
+func TestValidateLaunchWorkspaceAdmissionRejectsUnrelatedRepository(t *testing.T) {
+	source := initGitRepo(t)
+	other := initGitRepo(t)
+	req := &LaunchRequest{
+		ExecutorType:   string(models.ExecutorTypeLocal),
+		RepositoryID:   "repository-1",
+		RepositoryPath: source,
+		WorkspacePath:  other,
+	}
+
+	if err := validateLaunchWorkspaceAdmission(context.Background(), req, other); err == nil {
+		t.Fatal("validateLaunchWorkspaceAdmission() accepted an unrelated repository")
+	}
+}
+
 func TestTruncateID(t *testing.T) {
 	require.Equal(t, "abc", truncateID("abc", 8))
 	require.Equal(t, "abcdefgh", truncateID("abcdefgh", 8))

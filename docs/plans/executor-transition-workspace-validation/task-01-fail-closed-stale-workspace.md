@@ -40,7 +40,7 @@ spec: "../../specs/tasks/system-design/additional-session-workspace-reuse.md"
 ## Verification
 
 ```bash
-cd apps/backend && go test ./internal/orchestrator/executor -run 'Test.*Executor.*Mismatch|Test.*Workspace.*Reuse'
+cd apps/backend && go test ./internal/orchestrator/executor -run 'Test.*Executor.*Mismatch|Test.*Workspace.*Reuse|Test.*Executor.*Transition'
 cd apps/backend && go test ./internal/agent/runtime/lifecycle -run 'Test.*Workspace.*Execution|Test.*Workspace.*Ready'
 python3 scripts/lint-spec-files.py --all
 ```

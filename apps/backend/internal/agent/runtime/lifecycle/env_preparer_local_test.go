@@ -45,6 +45,38 @@ func TestLocalPreparer_ReuseRequiredSkipsCheckoutAndSetup(t *testing.T) {
 	}
 }
 
+func TestLocalPreparer_ReuseRequiredValidatesRepositoryIdentity(t *testing.T) {
+	workspacePath := initGitRepo(t)
+	otherRepository := initGitRepo(t)
+	preparer := NewLocalPreparer(newTestLocalLogger())
+
+	result, err := preparer.Prepare(context.Background(), &EnvPrepareRequest{
+		WorkspacePath:          workspacePath,
+		RepositoryPath:         otherRepository,
+		RepositoryID:           "repository-1",
+		WorkspaceReuseRequired: true,
+	}, nil)
+	if err == nil {
+		t.Fatal("Prepare() error = nil, want reuse identity rejection")
+	}
+	if result == nil || result.Success {
+		t.Fatalf("Prepare() result = %#v, want failed result", result)
+	}
+
+	result, err = preparer.Prepare(context.Background(), &EnvPrepareRequest{
+		WorkspacePath:          workspacePath,
+		RepositoryPath:         workspacePath,
+		RepositoryID:           "repository-1",
+		WorkspaceReuseRequired: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Prepare() matching reuse error = %v", err)
+	}
+	if result == nil || !result.Success {
+		t.Fatalf("Prepare() matching reuse result = %#v, want success", result)
+	}
+}
+
 func TestLocalPreparer_RejectsRepoBackedNonGitWorkspace(t *testing.T) {
 	workspacePath := t.TempDir()
 	preparer := NewLocalPreparer(newTestLocalLogger())

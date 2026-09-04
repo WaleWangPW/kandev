@@ -69,6 +69,18 @@ func (p *LocalPreparer) Prepare(ctx context.Context, req *EnvPrepareRequest, onP
 			completeStepError(&step, "required workspace is unavailable")
 			return &EnvPrepareResult{Success: false, Steps: []PrepareStep{step}, ErrorMessage: step.Error, Error: worktree.ErrReuseWorktreeUnavailable, Duration: time.Since(start)}, nil
 		}
+		if req.RepositoryID != "" || req.RepositoryPath != "" {
+			if err := validateLocalRepositoryWorkspace(ctx, workspacePath, req.RepositoryPath); err != nil {
+				completeStepError(&step, "workspace is not the expected Git repository checkout")
+				return &EnvPrepareResult{
+					Success:      false,
+					Steps:        []PrepareStep{step},
+					ErrorMessage: step.Error,
+					Duration:     time.Since(start),
+					Error:        worktree.ErrReuseWorktreeUnavailable,
+				}, fmt.Errorf("validate local repository workspace: %w", err)
+			}
+		}
 		completeStepSuccess(&step)
 		reportProgress(onProgress, step, 0, 1)
 		return &EnvPrepareResult{Success: true, Steps: []PrepareStep{step}, WorkspacePath: workspacePath, Duration: time.Since(start)}, nil
@@ -190,26 +202,21 @@ func (p *LocalPreparer) Prepare(ctx context.Context, req *EnvPrepareRequest, onP
 }
 
 func validateLocalRepositoryWorkspace(ctx context.Context, workspacePath, repositoryPath string) error {
-	workspaceRoot, err := localGitTopLevel(ctx, workspacePath)
-	if err != nil {
+	if _, err := localGitTopLevel(ctx, workspacePath); err != nil {
 		return err
 	}
 	if repositoryPath == "" {
 		return nil
 	}
-	repositoryRoot, err := localGitTopLevel(ctx, repositoryPath)
+	workspaceCommonDir, err := localGitCommonDir(ctx, workspacePath)
 	if err != nil {
 		return err
 	}
-	workspaceRoot, err = filepath.EvalSymlinks(workspaceRoot)
+	repositoryCommonDir, err := localGitCommonDir(ctx, repositoryPath)
 	if err != nil {
 		return err
 	}
-	repositoryRoot, err = filepath.EvalSymlinks(repositoryRoot)
-	if err != nil {
-		return err
-	}
-	if filepath.Clean(workspaceRoot) != filepath.Clean(repositoryRoot) {
+	if workspaceCommonDir != repositoryCommonDir {
 		return worktree.ErrReuseWorktreeUnavailable
 	}
 	return nil
@@ -231,6 +238,39 @@ func localGitTopLevel(ctx context.Context, path string) (string, error) {
 		return "", worktree.ErrReuseWorktreeUnavailable
 	}
 	return root, nil
+}
+
+// localGitCommonDir returns the canonical Git directory shared by a checkout
+// and all of its linked worktrees. Comparing this value, instead of the
+// worktree top-level paths, proves that a linked worktree belongs to the
+// selected repository while still rejecting an unrelated Git checkout.
+func localGitCommonDir(ctx context.Context, path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return "", worktree.ErrReuseWorktreeUnavailable
+	}
+	cmd := subproc.NewGitCommand(ctx, "rev-parse", "--git-common-dir")
+	cmd.Dir = path
+	out, err := subproc.RunGitCombinedOutputClass(ctx, subproc.GitLifecycle, cmd)
+	if err != nil {
+		return "", worktree.ErrReuseWorktreeUnavailable
+	}
+	commonDir := strings.TrimSpace(string(out))
+	if commonDir == "" {
+		return "", worktree.ErrReuseWorktreeUnavailable
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(path, commonDir)
+	}
+	commonDir, err = filepath.Abs(commonDir)
+	if err != nil {
+		return "", worktree.ErrReuseWorktreeUnavailable
+	}
+	commonDir, err = filepath.EvalSymlinks(commonDir)
+	if err != nil {
+		return "", worktree.ErrReuseWorktreeUnavailable
+	}
+	return filepath.Clean(commonDir), nil
 }
 
 // readCurrentBranchForLocal returns the workspace's currently-checked-out
