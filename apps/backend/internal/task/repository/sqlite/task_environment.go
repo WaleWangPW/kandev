@@ -335,9 +335,6 @@ func (r *Repository) PersistTaskEnvironmentTransition(
 	if env == nil || env.ID == "" {
 		return fmt.Errorf("persist task environment transition: environment is required")
 	}
-	if env.ExecutorType == string(models.ExecutorTypeWorktree) && env.WorkspacePath == "" {
-		return fmt.Errorf("persist task environment transition: worktree-mode env requires workspace_path (id=%s)", env.ID)
-	}
 	tx, err := r.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return err
@@ -355,14 +352,58 @@ func (r *Repository) PersistTaskEnvironmentTransition(
 	if err != nil {
 		return err
 	}
+	if err := r.validateTaskEnvironmentTransitionWorkspace(ctx, tx, taskID, env, existing); err != nil {
+		return err
+	}
 	if err := r.reconcileTaskEnvironmentReposTx(ctx, tx, env.ID, existing, repos, replacePhysical); err != nil {
 		return err
 	}
-	if env.Status == models.TaskEnvironmentStatusReady {
-		if err := r.validateReadyTaskEnvironment(ctx, tx, env.ID); err != nil {
-			return err
-		}
+	if err := r.validateTaskEnvironmentTransitionReady(ctx, tx, env.ID, env.Status); err != nil {
+		return err
 	}
+	if err := r.updateTaskEnvironmentTransitionTx(ctx, tx, env); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (r *Repository) validateTaskEnvironmentTransitionWorkspace(
+	ctx context.Context,
+	tx *sqlx.Tx,
+	taskID string,
+	env *models.TaskEnvironment,
+	existing []*models.TaskEnvironmentRepo,
+) error {
+	if env.ExecutorType != string(models.ExecutorTypeWorktree) || env.WorkspacePath != "" {
+		return nil
+	}
+	hasRepos, err := r.taskHasRepositoriesTx(ctx, tx, taskID)
+	if err != nil {
+		return err
+	}
+	if hasRepos || len(existing) > 0 {
+		return fmt.Errorf("persist task environment transition: worktree-mode env requires workspace_path (id=%s)", env.ID)
+	}
+	return nil
+}
+
+func (r *Repository) validateTaskEnvironmentTransitionReady(
+	ctx context.Context,
+	tx *sqlx.Tx,
+	environmentID string,
+	status models.TaskEnvironmentStatus,
+) error {
+	if status != models.TaskEnvironmentStatusReady {
+		return nil
+	}
+	return r.validateReadyTaskEnvironment(ctx, tx, environmentID)
+}
+
+func (r *Repository) updateTaskEnvironmentTransitionTx(
+	ctx context.Context,
+	tx *sqlx.Tx,
+	env *models.TaskEnvironment,
+) error {
 	env.UpdatedAt = time.Now().UTC()
 	result, err := tx.ExecContext(ctx, r.db.Rebind(`
 		UPDATE task_environments SET
@@ -386,7 +427,7 @@ func (r *Repository) PersistTaskEnvironmentTransition(
 	if rows, _ := result.RowsAffected(); rows != 1 {
 		return fmt.Errorf("%w: %s", ErrTaskEnvironmentNotFound, env.ID)
 	}
-	return tx.Commit()
+	return nil
 }
 
 func listTaskEnvironmentReposTx(ctx context.Context, r *Repository, tx *sqlx.Tx, envID string) ([]*models.TaskEnvironmentRepo, error) {
