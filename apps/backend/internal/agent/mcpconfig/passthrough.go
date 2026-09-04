@@ -226,16 +226,22 @@ func codexDedupeByName(servers []types.McpServer) []types.McpServer {
 
 // codexPreferRemoteOver reports whether a candidate transport type should
 // replace an existing one for the same server name. HTTP / streamable_http
-// are modern and Codex loads them natively; SSE is the legacy fallback. stdio
-// is never displaced by a remote entry (and vice versa) — they coexist under
+// are modern and Codex loads them natively; SSE is the legacy fallback, so
+// HTTP beats SSE regardless of the order the entries appear in. stdio is
+// never displaced by a remote entry (and vice versa) — they coexist under
 // different names by design.
 func codexPreferRemoteOver(candidate, current string) bool {
 	candRemote := isRemoteMCPTransport(candidate)
 	currRemote := isRemoteMCPTransport(current)
-	if candRemote == currRemote {
+	if candRemote != currRemote {
+		return candRemote
+	}
+	if !candRemote {
 		return false
 	}
-	return candRemote
+	// Both remote: a non-SSE candidate displaces a legacy SSE entry so the
+	// HTTP-beats-SSE contract holds even when the SSE entry arrives first.
+	return current == string(ServerTypeSSE) && candidate != string(ServerTypeSSE)
 }
 
 func isRemoteMCPTransport(t string) bool {
