@@ -1292,8 +1292,27 @@ func (e *Executor) LaunchPreparedSession(ctx context.Context, task *v1.Task, ses
 	if err != nil {
 		return nil, err
 	}
+	// An inherited environment (inherit_parent / shared_group) is owned by the
+	// task that materialized it, so the child cannot share it across an executor
+	// boundary. Failing the whole launch strands the child: it can never attach
+	// to a parent environment on one executor while elected onto another. Detach
+	// instead — the child materializes a fresh environment on its elected
+	// executor and leaves the parent's environment untouched. prepareExecutorTransition
+	// has already stripped req.WorkspacePath and req.WorkspaceReuseRequired for
+	// this launch, so nil-ing existingEnv routes the child through the normal
+	// fresh-materialization path in persistTaskEnvironment.
 	if existingEnv != nil && existingEnv.TaskID != task.ID && existingEnv.ExecutorType != "" && existingEnv.ExecutorType != req.ExecutorType {
-		return nil, fmt.Errorf("%w: inherited task environment belongs to executor %q, launch selected %q", models.ErrWorkspaceReuseUnsafe, existingEnv.ExecutorType, req.ExecutorType)
+		inheritedExecutorType := existingEnv.ExecutorType
+		existingEnv = nil
+		session.TaskEnvironmentID = ""
+		session.WorkspacePath = ""
+		assignLaunchTaskEnvironmentID(session, nil)
+		req.TaskEnvironmentID = session.TaskEnvironmentID
+		e.logger.Info("detaching inherited task environment for executor mismatch",
+			zap.String("task_id", task.ID),
+			zap.String("session_id", session.ID),
+			zap.String("inherited_executor_type", inheritedExecutorType),
+			zap.String("elected_executor_type", req.ExecutorType))
 	}
 	if execCfg.ExecutorID != "" {
 		session.ExecutorID = execCfg.ExecutorID
