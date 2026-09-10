@@ -1061,6 +1061,20 @@ func taskUsesInheritedWorkspace(task *v1.Task) bool {
 	return mode == "inherit_parent" || mode == "shared_group"
 }
 
+func rejectInheritedEnvironmentExecutorMismatch(
+	task *v1.Task,
+	env *models.TaskEnvironment,
+	requestedExecutorType string,
+) error {
+	if task == nil || !taskUsesInheritedWorkspace(task) || env == nil ||
+		env.TaskID == "" || env.TaskID == task.ID || env.ExecutorType == "" ||
+		env.ExecutorType == requestedExecutorType {
+		return nil
+	}
+	return fmt.Errorf("%w: inherited task environment belongs to executor %q, launch selected %q",
+		models.ErrWorkspaceReuseUnsafe, env.ExecutorType, requestedExecutorType)
+}
+
 func (e *Executor) resolveLaunchTaskEnvironment(
 	ctx context.Context,
 	task *v1.Task,
@@ -1292,15 +1306,16 @@ func (e *Executor) LaunchPreparedSession(ctx context.Context, task *v1.Task, ses
 	if err != nil {
 		return nil, err
 	}
-	// An inherited environment (inherit_parent / shared_group) is owned by the
-	// task that materialized it, so the child cannot share it across an executor
-	// boundary. Failing the whole launch strands the child: it can never attach
-	// to a parent environment on one executor while elected onto another. Detach
-	// instead — the child materializes a fresh environment on its elected
-	// executor and leaves the parent's environment untouched. prepareExecutorTransition
-	// has already stripped req.WorkspacePath and req.WorkspaceReuseRequired for
-	// this launch, so nil-ing existingEnv routes the child through the normal
-	// fresh-materialization path in persistTaskEnvironment.
+	// An inherited policy keeps the child bound to its canonical environment and
+	// group membership. Do not detach across executor types without an explicit
+	// policy transition that updates both records.
+	if err := rejectInheritedEnvironmentExecutorMismatch(task, existingEnv, req.ExecutorType); err != nil {
+		return nil, err
+	}
+	// A non-policy session can still carry a foreign environment reference from
+	// an older launch. Detach it after prepareExecutorTransition cleared the
+	// stale workspace path and reuse flag; persistTaskEnvironment then creates a
+	// fresh environment owned by the child and leaves the foreign row untouched.
 	if existingEnv != nil && existingEnv.TaskID != task.ID && existingEnv.ExecutorType != "" && existingEnv.ExecutorType != req.ExecutorType {
 		inheritedExecutorType := existingEnv.ExecutorType
 		existingEnv = nil
