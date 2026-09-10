@@ -112,7 +112,7 @@ func currentTaskDirName(env *models.TaskEnvironment) string {
 func canonicalInventoryMatches(spec RepoSpec, rows []*models.TaskEnvironmentRepo, useWorktree bool) int {
 	matches := 0
 	expectedBranchSlug := launchRepoBranchIdentitySlug(spec)
-	allowLegacyEmptyBranch := expectedBranchSlug != "" && !hasBranchScopedEnvironmentRepoRows(rows)
+	allowLegacyEmptyBranch := expectedBranchSlug != "" && !repositoryHasBranchScopedRepoRow(rows, spec.RepositoryID)
 	for _, row := range rows {
 		branchMatches := worktree.SanitizeBranchSlug(row.BranchSlug) == expectedBranchSlug
 		if allowLegacyEmptyBranch && row.BranchSlug == "" {
@@ -458,6 +458,20 @@ func hasBranchScopedEnvironmentWorktrees(env *models.TaskEnvironment) bool {
 func hasBranchScopedEnvironmentRepoRows(repos []*models.TaskEnvironmentRepo) bool {
 	for _, repo := range repos {
 		if repo.RepositoryID != "" && repo.WorktreeID != "" && worktree.SanitizeBranchSlug(repo.BranchSlug) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// repositoryHasBranchScopedRepoRow reports whether the inventory already has an
+// active branch for a single repository. Unlike hasBranchScopedEnvironmentRepoRows
+// it ignores the worktree identifier, because a local executor's scoped row
+// legitimately has an empty worktree ID; treating it as unscoped would re-enable
+// the legacy empty-branch fallback and let a stale row over-match the slot.
+func repositoryHasBranchScopedRepoRow(repos []*models.TaskEnvironmentRepo, repositoryID string) bool {
+	for _, repo := range repos {
+		if repo.RepositoryID == repositoryID && worktree.SanitizeBranchSlug(repo.BranchSlug) != "" {
 			return true
 		}
 	}
