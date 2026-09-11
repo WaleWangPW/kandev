@@ -464,11 +464,9 @@ func hasBranchScopedEnvironmentRepoRows(repos []*models.TaskEnvironmentRepo) boo
 	return false
 }
 
-// repositoryHasBranchScopedRepoRow reports whether the inventory already has an
-// active branch for a single repository. Unlike hasBranchScopedEnvironmentRepoRows
-// it ignores the worktree identifier, because a local executor's scoped row
-// legitimately has an empty worktree ID; treating it as unscoped would re-enable
-// the legacy empty-branch fallback and let a stale row over-match the slot.
+// repositoryHasBranchScopedRepoRow reports whether repos contains a row for
+// repositoryID with a non-empty sanitized branch slug. WorktreeID is not
+// required because local executor rows can be branch-scoped without a worktree.
 func repositoryHasBranchScopedRepoRow(repos []*models.TaskEnvironmentRepo, repositoryID string) bool {
 	for _, repo := range repos {
 		if repo.RepositoryID == repositoryID && worktree.SanitizeBranchSlug(repo.BranchSlug) != "" {

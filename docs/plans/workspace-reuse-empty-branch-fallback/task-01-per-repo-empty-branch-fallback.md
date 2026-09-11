@@ -1,7 +1,7 @@
 ---
 id: "01-per-repo-empty-branch-fallback"
 title: "Scope the empty-branch fallback per repository"
-status: pending
+status: completed
 wave: 1
 depends_on: []
 plan: "plan.md"
@@ -86,4 +86,5 @@ None
 
 ## Results
 
-Pending.
+All acceptance criteria are met. `go test ./internal/orchestrator/executor -count=1` passes.
+`python3 scripts/lint-spec-files.py --all` passes.

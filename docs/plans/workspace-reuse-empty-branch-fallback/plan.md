@@ -1,6 +1,6 @@
 ---
 created: 2026-09-11
-status: draft
+status: complete
 requirements:
   - REQ-TASKS-ADDITIONAL-SESSION-WORKSPACE-REUSE-001
   - REQ-TASKS-ADDITIONAL-SESSION-WORKSPACE-REUSE-003
@@ -73,11 +73,13 @@ misleading: the slot over-matches, it is not missing.
 
 ## Work orders
 
-- [ ] [Task 01: Scope the empty-branch fallback per repository](task-01-per-repo-empty-branch-fallback.md)
+- [x] [Task 01: Scope the empty-branch fallback per repository](task-01-per-repo-empty-branch-fallback.md)
 
 ## Verification results
 
-Pending.
+`go test ./internal/orchestrator/executor -run 'TestCanonicalInventoryMatches|TestValidateReuseEnvironmentInventory' -count=1` passes.
+`go test ./internal/orchestrator/executor -count=1` passes.
+`python3 scripts/lint-spec-files.py --all` passes.
 
 ## Risks
 
