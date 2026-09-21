@@ -1091,9 +1091,21 @@ func (e *Executor) restoreResumeCredentialSnapshotIfStarting(
 	}
 }
 
+// terminalRollbackState prevents a failed relaunch from restoring an active
+// state when no agent process was recovered.
+func terminalRollbackState(priorState models.TaskSessionState) models.TaskSessionState {
+	switch priorState {
+	case models.TaskSessionStateRunning, models.TaskSessionStateStarting:
+		return models.TaskSessionStateFailed
+	default:
+		return priorState
+	}
+}
+
 // rollbackResumeStateAfterFailure restores the state observed before a resume
 // attempt only while the session is still STARTING. A concurrent terminal
-// transition wins and is left untouched by transitionSessionState.
+// transition wins and is left untouched by transitionSessionState. Active
+// prior states become FAILED because the relaunch did not restore liveness.
 func (e *Executor) rollbackResumeStateAfterFailure(
 	ctx context.Context,
 	taskID, sessionID string,
@@ -1110,12 +1122,13 @@ func (e *Executor) rollbackResumeStateAfterFailure(
 		defer e.onCeilingReservationRelease(sessionID)
 	}
 	e.restoreResumeCredentialSnapshotIfStarting(ctx, sessionID, credentialSnapshot)
+	targetState := terminalRollbackState(priorState)
 	if e.onSessionStateTransition != nil {
 		current, err := e.repo.GetTaskSession(ctx, sessionID)
 		if err != nil || current == nil || current.State != models.TaskSessionStateStarting {
 			return
 		}
-		_, _, rollbackErr := e.transitionSessionState(ctx, taskID, sessionID, priorState, resumeErr.Error())
+		_, _, rollbackErr := e.transitionSessionState(ctx, taskID, sessionID, targetState, resumeErr.Error())
 		if rollbackErr != nil {
 			e.logger.Warn("failed to roll back session state after resume failure",
 				zap.String("task_id", taskID),
@@ -1131,7 +1144,7 @@ func (e *Executor) rollbackResumeStateAfterFailure(
 			ctx,
 			sessionID,
 			models.TaskSessionStateStarting,
-			priorState,
+			targetState,
 			resumeErr.Error(),
 		); err != nil {
 			e.logger.Warn("failed to roll back session state after resume failure",
@@ -1145,7 +1158,7 @@ func (e *Executor) rollbackResumeStateAfterFailure(
 	if err != nil || current == nil || current.State != models.TaskSessionStateStarting {
 		return
 	}
-	_, _, rollbackErr := e.transitionSessionState(ctx, taskID, sessionID, priorState, resumeErr.Error())
+	_, _, rollbackErr := e.transitionSessionState(ctx, taskID, sessionID, targetState, resumeErr.Error())
 	if rollbackErr != nil {
 		e.logger.Warn("failed to roll back session state after resume failure",
 			zap.String("task_id", taskID),
