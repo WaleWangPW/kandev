@@ -11,6 +11,73 @@ import (
 	"github.com/kandev/kandev/internal/task/models"
 )
 
+type concurrentRunningAfterStartingReadRepo struct {
+	*mockRepository
+	changed bool
+}
+
+func (r *concurrentRunningAfterStartingReadRepo) GetTaskSession(
+	ctx context.Context,
+	id string,
+) (*models.TaskSession, error) {
+	current, err := r.mockRepository.GetTaskSession(ctx, id)
+	if err != nil || current == nil {
+		return current, err
+	}
+	snapshot := cloneMockTaskSession(current)
+	if !r.changed && snapshot.State == models.TaskSessionStateStarting {
+		r.changed = true
+		if err := r.UpdateTaskSessionState(
+			ctx, id, models.TaskSessionStateRunning, "",
+		); err != nil {
+			return nil, err
+		}
+	}
+	return snapshot, nil
+}
+
+func TestRollbackResumeStateAfterFailureDoesNotOverwriteConcurrentRunning(t *testing.T) {
+	baseRepo := newMockRepository()
+	setupLiveResumeTestFixture(baseRepo)
+	baseRepo.sessions["sess-1"].State = models.TaskSessionStateStarting
+	repo := &concurrentRunningAfterStartingReadRepo{mockRepository: baseRepo}
+	exec := newTestExecutor(t, &mockAgentManager{}, repo)
+	exec.SetOnSessionStateTransition(func(
+		ctx context.Context,
+		_ string,
+		sessionID string,
+		expectedState *models.TaskSessionState,
+		nextState models.TaskSessionState,
+		errorMessage string,
+		_ func(),
+	) (bool, models.TaskSessionState, error) {
+		current, err := repo.GetTaskSession(ctx, sessionID)
+		if err != nil {
+			return false, "", err
+		}
+		if expectedState == nil {
+			expectedState = &current.State
+		}
+		changed, _, err := repo.UpdateTaskSessionStateIfCurrent(
+			ctx, sessionID, *expectedState, nextState, errorMessage,
+		)
+		return changed, repo.sessions[sessionID].State, err
+	})
+
+	exec.rollbackResumeStateAfterFailure(
+		context.Background(),
+		"task-1",
+		"sess-1",
+		models.TaskSessionStateRunning,
+		errors.New("launch failed"),
+		nil,
+	)
+
+	if got := baseRepo.sessions["sess-1"].State; got != models.TaskSessionStateRunning {
+		t.Fatalf("session state after concurrent transition = %s, want %s", got, models.TaskSessionStateRunning)
+	}
+}
+
 func TestTerminalRollbackState(t *testing.T) {
 	tests := []struct {
 		name       string

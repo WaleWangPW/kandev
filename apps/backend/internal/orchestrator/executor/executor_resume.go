@@ -1128,7 +1128,14 @@ func (e *Executor) rollbackResumeStateAfterFailure(
 		if err != nil || current == nil || current.State != models.TaskSessionStateStarting {
 			return
 		}
-		_, _, rollbackErr := e.transitionSessionState(ctx, taskID, sessionID, targetState, resumeErr.Error())
+		_, _, rollbackErr := e.transitionSessionStateFrom(
+			ctx,
+			taskID,
+			sessionID,
+			models.TaskSessionStateStarting,
+			targetState,
+			resumeErr.Error(),
+		)
 		if rollbackErr != nil {
 			e.logger.Warn("failed to roll back session state after resume failure",
 				zap.String("task_id", taskID),

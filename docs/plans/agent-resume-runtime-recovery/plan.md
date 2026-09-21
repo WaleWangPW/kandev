@@ -104,8 +104,11 @@ regression discovered after release and persist its non-secret display metadata.
 
 - Map a prior `RUNNING` or `STARTING` state to `FAILED` when a resume relaunch
   fails and the session still holds the guarded `STARTING` transition.
-- Preserve non-active prior states and any concurrent terminal transition.
-- Cover the state mapping and the real stale-`RUNNING` resume failure path.
+- Preserve non-active prior states and any concurrent state transition.
+- Carry the expected `STARTING` source state through the orchestrator callback
+  and persistence CAS so a concurrent `RUNNING` owner cannot be overwritten.
+- Cover the state mapping, the real stale-`RUNNING` resume failure path, and a
+  concurrent transition to `RUNNING` between rollback reads.
 
 ### Persist the resume credential snapshot
 
@@ -164,12 +167,13 @@ regression discovered after release and persist its non-secret display metadata.
   **How:** repository-observing fake `GitHubCredentialLeaseIssuer` exercised
   through the real `ResumeSession -> buildResumeRequest` path.
 - **What:** a failed relaunch cannot restore stale active state when no agent
-  process was recovered; non-active and concurrent terminal states remain
-  preserved.
+  process was recovered; non-active states and every concurrent transition
+  remain preserved.
   **File:**
   `apps/backend/internal/orchestrator/executor/executor_resume_terminal_rollback_test.go`.
-  **How:** table-driven state mapping plus the real `ResumeSession` launch-error
-  path starting from stale `RUNNING`.
+  **How:** table-driven state mapping, the real `ResumeSession` launch-error
+  path starting from stale `RUNNING`, and a callback race that advances
+  `STARTING` to `RUNNING` before rollback persistence.
 - **What:** a resumed launch persists the current non-secret credential
   routing snapshot after lease setup without weakening the `STARTING` guard.
   **File:**
