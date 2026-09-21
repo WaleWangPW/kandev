@@ -953,8 +953,12 @@ func (e *Executor) resumeSession(
 				zap.String("task_id", task.ID),
 				zap.String("session_id", session.ID))
 			if startAgent {
-				e.rollbackResumeStateAfterFailure(
-					ctx, task.ID, session.ID, resumeInitialState, err,
+				// The live process owns this session's active lifecycle. Keep the
+				// STARTING projection for that process to reconcile instead of
+				// marking it FAILED as if this duplicate launch had failed.
+				e.restoreResumeCredentialSnapshotIfStarting(
+					ctx,
+					session.ID,
 					resumeCredentialSnapshotBackupIfPersisted(credentialSnapshotPersisted, previousCredentialSnapshot),
 				)
 			}

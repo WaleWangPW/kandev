@@ -91,6 +91,7 @@ func TestTerminalRollbackState(t *testing.T) {
 		{name: "waiting for input is preserved", priorState: models.TaskSessionStateWaitingForInput, want: models.TaskSessionStateWaitingForInput},
 		{name: "idle is preserved", priorState: models.TaskSessionStateIdle, want: models.TaskSessionStateIdle},
 		{name: "created is preserved", priorState: models.TaskSessionStateCreated, want: models.TaskSessionStateCreated},
+		{name: "completed is preserved", priorState: models.TaskSessionStateCompleted, want: models.TaskSessionStateCompleted},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -121,9 +122,31 @@ func TestResumeSession_RedirectsRunningToFailedWhenRelaunchFails(t *testing.T) {
 		},
 	}
 	exec := newTestExecutor(t, agentMgr, repo)
+	var transitionCalls int
+	exec.SetOnSessionStateTransition(func(
+		ctx context.Context,
+		_ string,
+		sessionID string,
+		expectedState *models.TaskSessionState,
+		nextState models.TaskSessionState,
+		errorMessage string,
+		_ func(),
+	) (bool, models.TaskSessionState, error) {
+		transitionCalls++
+		if expectedState == nil || *expectedState != models.TaskSessionStateStarting {
+			t.Fatalf("expected state = %v, want STARTING", expectedState)
+		}
+		changed, _, err := repo.UpdateTaskSessionStateIfCurrent(
+			ctx, sessionID, *expectedState, nextState, errorMessage,
+		)
+		return changed, repo.sessions[sessionID].State, err
+	})
 
 	if _, err := exec.ResumeSession(context.Background(), repo.sessions["sess-1"], true); !errors.Is(err, launchErr) {
 		t.Fatalf("ResumeSession error = %v, want %v", err, launchErr)
+	}
+	if transitionCalls != 1 {
+		t.Fatalf("state transition callback calls = %d, want 1", transitionCalls)
 	}
 	current := repo.sessions["sess-1"]
 	if current.State != models.TaskSessionStateFailed {
