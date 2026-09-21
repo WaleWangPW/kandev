@@ -183,9 +183,12 @@ request error. Existing consumers can still treat it as an `Error`.
 The executor passes the same provider resume identity to agent launch after
 workspace preparation succeeds.
 
-The existing guarded transition to `STARTING`, resume lock, failure rollback,
-and successful token replacement rules remain unchanged. Only **Start fresh**
-can intentionally remove the stored provider identity before launch.
+The guarded transition to `STARTING` and the per-session resume lock remain the
+state ownership boundary. A failed relaunch restores a prior non-active state
+only while the session is still `STARTING`; a concurrent terminal transition
+wins. If the prior state was `RUNNING` or `STARTING`, failure records `FAILED`
+because no live agent was recovered. Only **Start fresh** can intentionally
+remove the stored provider identity before launch.
 
 ## Explicit branch replacement
 
